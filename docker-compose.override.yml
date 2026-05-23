@@ -1,0 +1,7 @@
+services:
+  app:
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - LOG_LEVEL=debug

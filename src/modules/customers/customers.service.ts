@@ -1,0 +1,261 @@
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Brackets, Repository } from 'typeorm';
+import { parse } from 'csv-parse/sync';
+
+import { Customer } from './entities/customer.entity';
+import { CustomerAiProfile } from './entities/customer-ai-profile.entity';
+import { CustomerVisit } from './entities/customer-visit.entity';
+import { CreateCustomerDto } from './dto/create-customer.dto';
+import { UpdateCustomerDto } from './dto/update-customer.dto';
+import { ListCustomersQuery } from './dto/list-customers.query';
+import { CreateVisitDto } from './dto/create-visit.dto';
+import { hashPhone } from '../../common/utils/phone-hash.util';
+import { JobsService } from '../../common/jobs/jobs.service';
+
+export interface CustomerInsights {
+  customer: Customer;
+  aiProfile: CustomerAiProfile | null;
+  recentVisits: CustomerVisit[];
+  invoiceSummary: { count: number; totalFils: number }; // populated by plan 06
+  collectionSummary: { outstandingFils: number; overdueFils: number }; // plan 07
+}
+
+export interface CsvImportResult {
+  inserted: number;
+  skipped: number;
+  errors: Array<{ row: number; reason: string }>;
+}
+
+export const AI_PROFILE_REFRESH_QUEUE = 'customer-ai-profile-refresh';
+
+@Injectable()
+export class CustomersService {
+  private readonly logger = new Logger(CustomersService.name);
+
+  constructor(
+    @InjectRepository(Customer)
+    private readonly customers: Repository<Customer>,
+    @InjectRepository(CustomerAiProfile)
+    private readonly aiProfiles: Repository<CustomerAiProfile>,
+    @InjectRepository(CustomerVisit)
+    private readonly visits: Repository<CustomerVisit>,
+    private readonly jobs: JobsService,
+  ) {}
+
+  async create(dto: CreateCustomerDto): Promise<Customer> {
+    const exists = await this.customers.exist({
+      where: { customerNumber: dto.customerNumber },
+    });
+    if (exists) {
+      throw new ConflictException(`Customer ${dto.customerNumber} already exists`);
+    }
+    const entity = this.customers.create({
+      ...dto,
+      nameAr: dto.nameAr ?? dto.customerName,
+      phoneHash: hashPhone(dto.phone),
+    });
+    return this.customers.save(entity);
+  }
+
+  async update(id: string, dto: UpdateCustomerDto): Promise<Customer> {
+    const customer = await this.findOneOrThrow(id);
+    Object.assign(customer, dto);
+    if (dto.phone !== undefined) {
+      customer.phoneHash = hashPhone(dto.phone);
+    }
+    return this.customers.save(customer);
+  }
+
+  async findOneOrThrow(id: string): Promise<Customer> {
+    const c = await this.customers.findOne({ where: { id } });
+    if (!c) throw new NotFoundException(`Customer ${id} not found`);
+    return c;
+  }
+
+  async list(query: ListCustomersQuery): Promise<{ items: Customer[]; total: number }> {
+    const qb = this.customers
+      .createQueryBuilder('c')
+      .where('c.deleted_at IS NULL')
+      .orderBy('c.created_at', 'DESC')
+      .take(query.limit ?? 25)
+      .skip(query.offset ?? 0);
+
+    if (query.repId) qb.andWhere('c.rep_id = :repId', { repId: query.repId });
+    if (query.regionId) qb.andWhere('c.region_id = :regionId', { regionId: query.regionId });
+    if (query.isActive !== undefined) qb.andWhere('c.is_active = :a', { a: query.isActive });
+
+    if (query.q) {
+      qb.andWhere(
+        new Brackets((b) => {
+          const p = `%${query.q}%`;
+          b.where('c.name_ar ILIKE :p', { p })
+            .orWhere('c.name_en ILIKE :p', { p })
+            .orWhere('c.customer_number ILIKE :p', { p });
+        }),
+      );
+    }
+
+    // Filters that require the AI profile — expressed as an EXISTS subquery so
+    // getManyAndCount() doesn't try to map a joined entity (which breaks).
+    if (query.segment) {
+      qb.andWhere(
+        `EXISTS (SELECT 1 FROM customer_ai_profile ap
+                 WHERE ap.customer_id = c.id AND ap.segment = :seg)`,
+        { seg: query.segment },
+      );
+    }
+    if (query.churnRisk) {
+      qb.andWhere(
+        `EXISTS (SELECT 1 FROM customer_ai_profile ap
+                 WHERE ap.customer_id = c.id AND ap.churn_risk_label = :cr)`,
+        { cr: query.churnRisk },
+      );
+    }
+
+    const [items, total] = await qb.getManyAndCount();
+    return { items, total };
+  }
+
+  async insights(id: string): Promise<CustomerInsights> {
+    const customer = await this.findOneOrThrow(id);
+    const [aiProfile, recentVisits] = await Promise.all([
+      this.aiProfiles.findOne({ where: { customerId: id } }),
+      this.visits.find({
+        where: { customerId: id },
+        order: { visitedAt: 'DESC' },
+        take: 10,
+      }),
+    ]);
+    return {
+      customer,
+      aiProfile: aiProfile ?? null,
+      recentVisits,
+      // Real numbers arrive with plans 06 (invoices) and 07 (collections).
+      invoiceSummary: { count: 0, totalFils: 0 },
+      collectionSummary: { outstandingFils: 0, overdueFils: 0 },
+    };
+  }
+
+  async reassign(id: string, newRepId: string): Promise<Customer> {
+    const customer = await this.findOneOrThrow(id);
+    customer.repId = newRepId;
+    return this.customers.save(customer);
+  }
+
+  async addVisit(customerId: string, dto: CreateVisitDto): Promise<CustomerVisit> {
+    await this.findOneOrThrow(customerId);
+    return this.visits.save(
+      this.visits.create({
+        customerId,
+        repId: dto.repId,
+        visitedAt: dto.visitedAt ? new Date(dto.visitedAt) : new Date(),
+        hadSale: dto.hadSale ?? false,
+        visitNote: dto.visitNote ?? null,
+        lat: dto.lat ?? null,
+        lng: dto.lng ?? null,
+      }),
+    );
+  }
+
+  async listVisits(customerId: string, limit = 50): Promise<CustomerVisit[]> {
+    await this.findOneOrThrow(customerId);
+    return this.visits.find({
+      where: { customerId },
+      order: { visitedAt: 'DESC' },
+      take: limit,
+    });
+  }
+
+  async remove(id: string): Promise<void> {
+    const res = await this.customers.softDelete(id);
+    if (!res.affected) throw new NotFoundException(`Customer ${id} not found`);
+  }
+
+  /**
+   * Bulk CSV import. Columns: number,name,address,phone,category
+   * Good rows commit; bad rows are reported. Transaction holds for the batch.
+   */
+  async importCsv(buffer: Buffer): Promise<CsvImportResult> {
+    let records: Record<string, string>[];
+    try {
+      records = parse(buffer, {
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+        bom: true,
+      }) as Record<string, string>[];
+    } catch (err) {
+      throw new BadRequestException(`Malformed CSV: ${(err as Error).message}`);
+    }
+
+    if (records.length === 0) {
+      throw new BadRequestException('CSV has no data rows');
+    }
+    if (records.length > 5000) {
+      throw new BadRequestException('CSV exceeds 5000 rows');
+    }
+
+    const result: CsvImportResult = { inserted: 0, skipped: 0, errors: [] };
+
+    await this.customers.manager.transaction(async (em) => {
+      const repo = em.getRepository(Customer);
+      for (let i = 0; i < records.length; i++) {
+        const row = records[i];
+        const number = row.number ?? row.customerNumber ?? row.customer_number;
+        const name = row.name ?? row.customerName ?? row.customer_name;
+        if (!number || !name) {
+          result.errors.push({ row: i + 2, reason: 'missing number or name' });
+          result.skipped++;
+          continue;
+        }
+        const dup = await repo.exist({ where: { customerNumber: number } });
+        if (dup) {
+          result.errors.push({ row: i + 2, reason: `duplicate ${number}` });
+          result.skipped++;
+          continue;
+        }
+        const phone = row.phone ?? null;
+        await repo.save(
+          repo.create({
+            customerNumber: number,
+            customerName: name,
+            nameAr: row.name_ar ?? name,
+            addressAr: row.address ?? null,
+            phone,
+            phoneHash: hashPhone(phone),
+            category: row.category ?? null,
+          }),
+        );
+        result.inserted++;
+      }
+    });
+
+    return result;
+  }
+
+  /** Enqueue an AI-profile refresh job (real model integration in plan 08). */
+  async requestAiRefresh(id: string): Promise<{ queued: boolean }> {
+    await this.findOneOrThrow(id);
+    const jobId = await this.jobs.enqueue(AI_PROFILE_REFRESH_QUEUE, { customerId: id });
+    this.logger.log(`Queued AI refresh for customer ${id} (job ${jobId ?? 'disabled'})`);
+    return { queued: jobId !== null };
+  }
+
+  /** Internal helper to upsert an AI profile (used by the pipeline + tests). */
+  async upsertAiProfile(
+    profile: Omit<CustomerAiProfile, 'updatedAt'>,
+  ): Promise<CustomerAiProfile> {
+    await this.findOneOrThrow(profile.customerId);
+    // customer_id is the PK, so save() inserts or updates in one call.
+    const entity = this.aiProfiles.create({ ...profile, updatedAt: new Date() });
+    await this.aiProfiles.save(entity);
+    return this.aiProfiles.findOneOrFail({ where: { customerId: profile.customerId } });
+  }
+}

@@ -1,0 +1,67 @@
+services:
+  app:
+    build:
+      context: .
+      target: dev
+    image: cashvan-api:dev
+    container_name: cashvan-api
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+      - DB_HOST=db
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+      - "9229:9229"
+    volumes:
+      - cashvan_storage:/app/storage
+    networks:
+      - cashvan-net
+    restart: unless-stopped
+
+  db:
+    image: postgres:16.4-alpine
+    container_name: cashvan-db
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-cashvan}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-cashvan_dev_pw}
+      POSTGRES_DB: ${DB_NAME:-cashvan}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - cashvan_pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-cashvan} -d ${DB_NAME:-cashvan}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - cashvan-net
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4:8.11
+    container_name: cashvan-pgadmin
+    profiles: ["tools"]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@cashvan.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      - db
+    networks:
+      - cashvan-net
+
+volumes:
+  cashvan_pgdata:
+  cashvan_storage:
+
+networks:
+  cashvan-net:
+    driver: bridge
