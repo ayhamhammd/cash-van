@@ -11,6 +11,13 @@ export class AppSettings {
   @PrimaryColumn({ type: 'smallint', default: 1 })
   id!: number;
 
+  /** Single-tenant company id echoed/validated by the mobile BFF (e.g. "C001"). */
+  @Column({ name: 'company_number', type: 'text', default: 'C001' })
+  companyNumber!: string;
+
+  @Column({ name: 'logo_url', type: 'text', nullable: true })
+  logoUrl?: string | null;
+
   @Column({ name: 'company_name_ar', type: 'text' })
   companyNameAr!: string;
 

@@ -59,6 +59,18 @@ export class RoutesController {
     return this.routes.compliance(date);
   }
 
+  @Get('overdue')
+  @ApiOperation({
+    summary: 'Overdue (missed) outlets',
+    description:
+      "A rep's outlets that were missed on an earlier day and not yet covered (most recent past visit still pending, within the carry-forward window). These are auto-added to the next generated route.",
+  })
+  @ApiQuery({ name: 'repId', required: true, description: 'Rep id (uuid)' })
+  @ApiOkResponse({ description: 'Missed-and-uncovered outlets with last-missed date' })
+  overdue(@Query('repId', ParseUUIDPipe) repId: string) {
+    return this.routes.overdueOutlets(repId);
+  }
+
   @Get(':id')
   @ApiOperation({
     summary: 'Get route plan',

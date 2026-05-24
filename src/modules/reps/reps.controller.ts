@@ -28,6 +28,10 @@ import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import {
+  CurrentUser,
+  AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 
 @ApiTags('reps')
 @ApiBearerAuth()
@@ -44,6 +48,27 @@ export class RepsController {
   @ApiOkResponse({ description: 'Paginated rep list' })
   list(@Query() query: ListRepsQuery) {
     return this.reps.list(query);
+  }
+
+  @Get('me')
+  @ApiOperation({
+    summary: 'Get my rep profile',
+    description:
+      'Resolve the field rep linked to the currently authenticated user. Returns 404 if the user is not linked to any rep.',
+  })
+  @ApiOkResponse({ description: "The current user's rep" })
+  me(@CurrentUser() user: AuthenticatedUser) {
+    return this.reps.findByUserIdOrThrow(user.sub);
+  }
+
+  @Get('me/kpis')
+  @ApiOperation({
+    summary: 'My KPIs',
+    description: "KPI snapshot for the current user's rep. 404 if the user isn't a rep.",
+  })
+  @ApiOkResponse({ description: 'KPI snapshot for the current rep' })
+  myKpis(@CurrentUser() user: AuthenticatedUser) {
+    return this.reps.kpisForUser(user.sub);
   }
 
   @Get(':id')

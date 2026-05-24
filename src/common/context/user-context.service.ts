@@ -4,6 +4,7 @@ import { ClsService } from 'nestjs-cls';
 export interface UserContext {
   userId: string;
   role: string;
+  repId?: string | null;
 }
 
 export const USER_CTX_KEY = 'userCtx';
@@ -37,6 +38,10 @@ export class UserContextService {
 
   getRole(): string | null {
     return this.get()?.role ?? null;
+  }
+
+  getRepId(): string | null {
+    return this.get()?.repId ?? null;
   }
 
   /**

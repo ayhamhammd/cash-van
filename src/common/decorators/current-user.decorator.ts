@@ -5,6 +5,8 @@ export interface AuthenticatedUser {
   userNumber: string;
   userType: string;
   role: string;
+  /** Field-rep id linked to this user, or null if the user isn't a rep. */
+  repId: string | null;
   permissions: Record<string, boolean>;
 }
 

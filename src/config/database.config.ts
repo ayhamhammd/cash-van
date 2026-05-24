@@ -1,11 +1,10 @@
-import { TypeOrmModuleAsyncOptions } from '@nestjs/typeorm';
+import { TypeOrmModuleAsyncOptions, TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { DataSourceOptions } from 'typeorm';
 
 export const typeOrmAsyncConfig: TypeOrmModuleAsyncOptions = {
   imports: [ConfigModule],
   inject: [ConfigService],
-  useFactory: (config: ConfigService): DataSourceOptions => ({
+  useFactory: (config: ConfigService): TypeOrmModuleOptions => ({
     type: 'postgres',
     host: config.get<string>('database.host'),
     port: config.get<number>('database.port'),
@@ -17,6 +16,9 @@ export const typeOrmAsyncConfig: TypeOrmModuleAsyncOptions = {
       : false,
     logging: config.get<boolean>('database.logging'),
     entities: [__dirname + '/../**/*.entity.{ts,js}'],
+    // Also register entities provided via forFeature() that the glob misses —
+    // notably @ViewEntity files (e.g. *.view.ts like ItemBalanceView).
+    autoLoadEntities: true,
     migrations: [__dirname + '/../database/migrations/*.{ts,js}'],
     migrationsRun: false,
     synchronize: false,

@@ -4,6 +4,11 @@ import { GeoJsonPolygon } from '../../../common/geo/geo.util';
 
 @Entity({ name: 'regions' })
 export class Region extends BaseEntity {
+  /** Human route code (e.g. "R-A01") used by the mobile contract. Unique when set. */
+  @Index('uq_regions_code', { unique: true, where: '"code" IS NOT NULL' })
+  @Column({ type: 'text', nullable: true })
+  code?: string | null;
+
   @Column({ name: 'name_ar', type: 'text' })
   nameAr!: string;
 

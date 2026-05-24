@@ -3,6 +3,15 @@ import { IsBoolean, IsObject, IsOptional, IsString, MaxLength } from 'class-vali
 import { GeoJsonPolygon } from '../../../common/geo/geo.util';
 
 export class CreateRegionDto {
+  @ApiPropertyOptional({
+    example: 'R-A01',
+    description: 'Human route code used by the mobile app. Unique when set.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  code?: string;
+
   @ApiProperty({ example: 'شمال عمان' })
   @IsString()
   @MaxLength(255)

@@ -2,6 +2,18 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 
 export class UpdateAppSettingsDto {
+  @ApiPropertyOptional({ example: 'C001', description: 'Single-tenant company id (mobile BFF)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  companyNumber?: string;
+
+  @ApiPropertyOptional({ example: 'https://cdn.example.com/logo.png', description: 'Company logo URL' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1024)
+  logoUrl?: string;
+
   @ApiPropertyOptional({ example: 'شركة ABC للتجارة' })
   @IsOptional()
   @IsString()

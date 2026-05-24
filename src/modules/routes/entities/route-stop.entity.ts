@@ -47,4 +47,8 @@ export class RouteStop {
 
   @Column({ name: 'skip_reason', type: 'text', nullable: true })
   skipReason?: string | null;
+
+  /** True when this stop was rolled forward from an earlier missed day. */
+  @Column({ name: 'carried_over', type: 'boolean', default: false })
+  carriedOver!: boolean;
 }

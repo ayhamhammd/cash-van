@@ -11,6 +11,15 @@ import {
 } from 'class-validator';
 
 export class CreateRepDto {
+  @ApiPropertyOptional({
+    example: 'S012',
+    description: 'Human salesman code used by the mobile app. Unique when set.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  code?: string;
+
   @ApiProperty({ example: 'خالد العلي' })
   @IsString()
   @MaxLength(255)

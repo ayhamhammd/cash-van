@@ -37,6 +37,7 @@ import { CollectionsModule } from './modules/collections/collections.module';
 import { SystemModule } from './modules/system/system.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { TaxModule } from './modules/tax/tax.module';
+import { MobileModule } from './modules/mobile/mobile.module';
 
 @Module({
   imports: [
@@ -85,6 +86,7 @@ import { TaxModule } from './modules/tax/tax.module';
     SystemModule,
     RealtimeModule,
     TaxModule,
+    MobileModule,
   ],
   controllers: [HealthController],
   providers: [

@@ -9,6 +9,7 @@ import { In, Repository } from 'typeorm';
 
 import { RoutePlan } from './entities/route-plan.entity';
 import { RouteStop } from './entities/route-stop.entity';
+import { JourneyPlanService } from './journey-plan.service';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { CreateRoutePlanDto } from './dto/create-route-plan.dto';
@@ -22,6 +23,7 @@ import { ListRoutesQuery } from './dto/list-routes.query';
 import { haversineMeters } from '../../common/geo/geo.util';
 
 const AVG_SPEED_KMH = 30; // assumed van speed for ETA / duration estimates
+const CARRY_FORWARD_LOOKBACK_DAYS = 30; // missed outlets older than this stop carrying
 
 export interface ComplianceRow {
   repId: string;
@@ -44,6 +46,7 @@ export class RoutesService {
     private readonly reps: Repository<Rep>,
     @InjectRepository(Customer)
     private readonly customers: Repository<Customer>,
+    private readonly journeyPlan: JourneyPlanService,
   ) {}
 
   async list(query: ListRoutesQuery): Promise<RoutePlan[]> {
@@ -180,16 +183,28 @@ export class RoutesService {
   }
 
   /**
-   * Build optimized plans for the given reps using a nearest-neighbor heuristic
-   * over each rep's assigned customers (those with coordinates). Replaceable by
-   * the plan-08 AI optimizer behind the same endpoint.
+   * Build optimized plans for the given reps + date.
+   *
+   * Outlets come from two sources:
+   *   1. the rep's Journey Plan (PJP) — shops *due* on `planDate`, and
+   *   2. carry-forward — shops *missed* on an earlier day (a past-dated stop
+   *      still 'pending', within the lookback window) that haven't been covered
+   *      since. These are flagged `carriedOver` so the UI can show "overdue".
+   * The combined set is ordered with a nearest-neighbor heuristic. Replaceable
+   * by the plan-08 AI optimizer behind the same endpoint.
    */
   async generate(dto: GenerateRoutesDto): Promise<RoutePlan[]> {
     const results: RoutePlan[] = [];
     for (const repId of dto.repIds) {
       await this.assertRep(repId);
+      const dueIds = await this.journeyPlan.dueCustomerIds(repId, dto.planDate);
+      const overdueIds = await this.overdueCustomerIds(repId, dto.planDate);
+      const dueSet = new Set(dueIds);
+      const allIds = [...new Set([...dueIds, ...overdueIds])];
+      if (allIds.length === 0) continue; // nothing scheduled or overdue
+
       const custs = await this.customers.find({
-        where: { repId, isActive: true },
+        where: { id: In(allIds), isActive: true },
       });
       const located = custs.filter((c) => c.latitude != null && c.longitude != null);
       if (located.length === 0) continue;
@@ -218,12 +233,70 @@ export class RoutesService {
             stopOrder: i + 1,
             estDurationMin: 20,
             status: 'pending',
+            // carried only if it's here *because* it was missed — not also due today
+            carriedOver: !dueSet.has(c.id),
           }),
         ),
       });
       results.push(await this.plans.save(plan));
     }
     return results;
+  }
+
+  /**
+   * Outlets a rep has missed and not yet covered, as of `asOf` (YYYY-MM-DD).
+   *
+   * "Missed" = a stop on a past day still in 'pending'. An outlet is overdue
+   * only if its *most recent* past stop is 'pending' (a later 'visited' clears
+   * it — "until covered"; a deliberate 'skipped' is not carried). Bounded by a
+   * lookback window so ancient misses don't linger forever.
+   */
+  private async overdueRows(
+    repId: string,
+    asOf: string,
+  ): Promise<Array<{ customerId: string; lastMissed: string }>> {
+    // Raw query: DISTINCT ON + ::date casts don't survive TypeORM's named-param
+    // parser (it mistakes `::date` for a `:date` param), so use positional args.
+    const rows = (await this.stops.manager.query(
+      `SELECT DISTINCT ON (s.customer_id)
+              s.customer_id AS "customerId",
+              p.plan_date   AS "lastMissed",
+              s.status      AS "status"
+         FROM route_stops s
+         JOIN route_plans p ON p.id = s.plan_id
+        WHERE p.rep_id = $1
+          AND p.plan_date < $2
+          AND p.plan_date >= ($2::date - $3::int)
+        ORDER BY s.customer_id, p.plan_date DESC`,
+      [repId, asOf, CARRY_FORWARD_LOOKBACK_DAYS],
+    )) as Array<{ customerId: string; lastMissed: string | Date; status: string }>;
+
+    return rows
+      .filter((r) => r.status === 'pending')
+      .map((r) => ({ customerId: r.customerId, lastMissed: toDateStr(r.lastMissed) }));
+  }
+
+  private async overdueCustomerIds(repId: string, asOf: string): Promise<string[]> {
+    return (await this.overdueRows(repId, asOf)).map((r) => r.customerId);
+  }
+
+  /** Dashboard "needs attention" list: a rep's missed-and-uncovered outlets. */
+  async overdueOutlets(repId: string): Promise<
+    Array<{ customerId: string; customerName: string | null; lastMissedDate: string }>
+  > {
+    await this.assertRep(repId);
+    const asOf = new Date().toISOString().slice(0, 10);
+    const rows = await this.overdueRows(repId, asOf);
+    if (rows.length === 0) return [];
+    const customers = await this.customers.find({
+      where: { id: In(rows.map((r) => r.customerId)) },
+    });
+    const nameById = new Map(customers.map((c) => [c.id, c.customerName ?? null]));
+    return rows.map((r) => ({
+      customerId: r.customerId,
+      customerName: nameById.get(r.customerId) ?? null,
+      lastMissedDate: r.lastMissed,
+    }));
   }
 
   private async getStop(stopId: string): Promise<RouteStop> {
@@ -247,6 +320,10 @@ export class RoutesService {
 }
 
 // ---- helpers ----
+
+function toDateStr(v: string | Date): string {
+  return v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+}
 
 type Located = Customer;
 

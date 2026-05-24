@@ -3,17 +3,28 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { RoutePlan } from './entities/route-plan.entity';
 import { RouteStop } from './entities/route-stop.entity';
+import { JourneyPlanEntry } from './entities/journey-plan-entry.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
 
 import { RoutesService } from './routes.service';
+import { JourneyPlanService } from './journey-plan.service';
 import { RouteAdherenceService } from './route-adherence.service';
 import { RoutesController } from './routes.controller';
+import { JourneyPlanController } from './journey-plan.controller';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([RoutePlan, RouteStop, Rep, Customer])],
-  controllers: [RoutesController],
-  providers: [RoutesService, RouteAdherenceService],
-  exports: [RoutesService, RouteAdherenceService],
+  imports: [
+    TypeOrmModule.forFeature([
+      RoutePlan,
+      RouteStop,
+      JourneyPlanEntry,
+      Rep,
+      Customer,
+    ]),
+  ],
+  controllers: [RoutesController, JourneyPlanController],
+  providers: [RoutesService, JourneyPlanService, RouteAdherenceService],
+  exports: [RoutesService, JourneyPlanService, RouteAdherenceService],
 })
 export class RoutesModule {}

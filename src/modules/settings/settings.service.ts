@@ -9,6 +9,8 @@ import { decryptSecret, encryptSecret, maskSecret } from '../../common/crypto/se
 import { UserContextService } from '../../common/context/user-context.service';
 
 export interface AppSettingsView {
+  companyNumber: string;
+  logoUrl: string | null;
   companyNameAr: string;
   companyNameEn: string | null;
   sellerTin: string | null;
@@ -126,6 +128,8 @@ export class SettingsService {
 
   private toView(row: AppSettings): AppSettingsView {
     return {
+      companyNumber: row.companyNumber,
+      logoUrl: row.logoUrl ?? null,
       companyNameAr: row.companyNameAr,
       companyNameEn: row.companyNameEn ?? null,
       sellerTin: row.sellerTin ?? null,

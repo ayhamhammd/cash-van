@@ -1,6 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, ILike, IsNull, Repository } from 'typeorm';
+import { Brackets, ILike, IsNull, Not, Repository } from 'typeorm';
 
 import { Rep } from './entities/rep.entity';
 import { CreateRepDto } from './dto/create-rep.dto';
@@ -58,15 +62,71 @@ export class RepsService {
     return rep;
   }
 
+  /** Resolve the rep linked to a dashboard user (1:1), or null if unlinked. */
+  async findByUserId(userId: string): Promise<Rep | null> {
+    return this.repo.findOne({ where: { userId, deletedAt: IsNull() } });
+  }
+
+  async findByUserIdOrThrow(userId: string): Promise<Rep> {
+    const rep = await this.findByUserId(userId);
+    if (!rep) {
+      throw new NotFoundException('No rep is linked to this user account');
+    }
+    return rep;
+  }
+
+  /** KPIs for the rep linked to the current user (used by /reps/me/kpis). */
+  async kpisForUser(userId: string): Promise<RepKpis> {
+    const rep = await this.findByUserIdOrThrow(userId);
+    return this.kpis(rep.id);
+  }
+
+  /** Resolve the rep with this salesman code (used by the mobile BFF). */
+  async findByCode(code: string): Promise<Rep | null> {
+    return this.repo.findOne({ where: { code, deletedAt: IsNull() } });
+  }
+
   async create(dto: CreateRepDto): Promise<Rep> {
+    if (dto.userId) await this.assertUserUnlinked(dto.userId);
+    if (dto.code) await this.assertCodeUnique(dto.code);
     const rep = this.repo.create(dto);
     return this.repo.save(rep);
   }
 
   async update(id: string, dto: UpdateRepDto): Promise<Rep> {
     const rep = await this.findOne(id);
+    if (dto.userId) await this.assertUserUnlinked(dto.userId, id);
+    if (dto.code) await this.assertCodeUnique(dto.code, id);
     Object.assign(rep, dto);
     return this.repo.save(rep);
+  }
+
+  private async assertCodeUnique(code: string, exceptRepId?: string): Promise<void> {
+    const existing = await this.repo.findOne({
+      where: exceptRepId
+        ? { code, id: Not(exceptRepId), deletedAt: IsNull() }
+        : { code, deletedAt: IsNull() },
+    });
+    if (existing) {
+      throw new ConflictException(`Salesman code "${code}" is already in use`);
+    }
+  }
+
+  /** Guard the 1:1 user↔rep invariant before it hits the unique index. */
+  private async assertUserUnlinked(
+    userId: string,
+    exceptRepId?: string,
+  ): Promise<void> {
+    const existing = await this.repo.findOne({
+      where: exceptRepId
+        ? { userId, id: Not(exceptRepId), deletedAt: IsNull() }
+        : { userId, deletedAt: IsNull() },
+    });
+    if (existing) {
+      throw new ConflictException(
+        `User ${userId} is already linked to rep ${existing.id}`,
+      );
+    }
   }
 
   async softDelete(id: string): Promise<void> {

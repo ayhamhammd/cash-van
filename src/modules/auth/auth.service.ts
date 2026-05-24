@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 
 import { UsersService } from '../users/users.service';
+import { RepsService } from '../reps/reps.service';
 import { LoginDto } from './dto/login.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 import { User } from '../users/entities/user.entity';
@@ -17,6 +18,8 @@ export interface LoginResponse {
     name: string;
     userType: string;
     role: string;
+    /** Field-rep id linked to this user, or null if not a rep. */
+    repId: string | null;
     permissions: Record<string, boolean>;
   };
 }
@@ -25,6 +28,7 @@ export interface LoginResponse {
 export class AuthService {
   constructor(
     private readonly usersService: UsersService,
+    private readonly repsService: RepsService,
     private readonly jwtService: JwtService,
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
@@ -48,6 +52,10 @@ export class AuthService {
       .update(user.id, { lastLoginAt: new Date() })
       .catch(() => undefined);
 
+    // Map the logged-in user to their field rep (1:1), if any.
+    const rep = await this.repsService.findByUserId(user.id);
+    const repId = rep?.id ?? null;
+
     const permissions = this.extractPermissions(user);
     const payload: JwtPayload = {
       sub: user.id,
@@ -55,6 +63,7 @@ export class AuthService {
       userNumber: user.userNumber,
       userType: user.userType,
       role: user.role ?? 'viewer',
+      repId,
       permissions,
     };
     const accessToken = await this.jwtService.signAsync(payload);
@@ -67,6 +76,7 @@ export class AuthService {
         name: user.name,
         userType: user.userType,
         role: user.role ?? 'viewer',
+        repId,
         permissions,
       },
     };

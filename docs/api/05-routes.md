@@ -17,8 +17,10 @@ Lists plans (each with ordered `stops`).
 **Response data**: `RoutePlan[]`.
 
 `RoutePlan`: `{ id, repId, planDate, source ('manual'|'ai_optimized'), aiEstDistance, aiEstDuration, aiSavingsMin, acceptedAt, createdAt, updatedAt, stops: RouteStop[] }`
-`RouteStop`: `{ id, planId, customerId, stopOrder, estArrival, estDurationMin, actualArrival, actualDeparture, status ('pending'|'visited'|'skipped'), skipReason }`
+`RouteStop`: `{ id, planId, customerId, stopOrder, estArrival, estDurationMin, actualArrival, actualDeparture, status ('pending'|'visited'|'skipped'), skipReason, carriedOver }`
 **Errors**: `400`, `401`.
+
+> **Missed vs carried.** "Missed" is computed, not stored: a stop on a **past** plan still in `status: pending` is a missed visit (no nightly job, no extra status). `carriedOver: true` marks a stop that was added to a day's route because it was missed earlier (see carry-forward under `generate` and `GET /routes/overdue`).
 
 ### `GET /api/v1/routes/compliance?date=YYYY-MM-DD`
 Stop-completion per rep for the date.
@@ -46,13 +48,22 @@ Create a manual plan.
 **Errors**: `400` (unknown customers), `401`, `403`, `404` (rep), `409` (plan already exists for rep+date).
 
 ### `POST /api/v1/routes/generate` — `@Roles('admin','manager')`
-Builds optimized plans (nearest-neighbor over each rep's located, active customers).
+Builds the day's plan for each rep from two sources, then orders with nearest-neighbor:
+1. **Due today** — outlets whose [Journey Plan](./12-journey-plan.md) schedule includes `planDate`'s weekday.
+2. **Carry-forward** — outlets *missed* on an earlier day (most recent past stop still `pending`, within a 30-day window) and not yet covered. These get `carriedOver: true`.
+
 **Body**: `{ repIds: uuid[], planDate: 'YYYY-MM-DD' }`.
-Sets `source='ai_optimized'`, computes `aiEstDistance` (km), `aiEstDuration` (min), `aiSavingsMin` vs naive order. **Replaces** any existing plan for that rep+date. Reps with no located customers are skipped.
-**Response data**: `RoutePlan[]` (one per rep that had customers).
+Sets `source='ai_optimized'`, computes `aiEstDistance` (km), `aiEstDuration` (min), `aiSavingsMin`. **Replaces** any existing plan for that rep+date. A rep with nothing due and nothing overdue (or no located outlets) is skipped (no plan).
+**Response data**: `RoutePlan[]` (one per rep that had outlets).
 **Errors**: `400`, `401`, `403`, `404` (rep).
 
+> An outlet keeps carrying forward each day **until it's actually visited** — once a later stop is `visited`, it's no longer overdue. A deliberate `skip` is not carried.
 > The nearest-neighbor heuristic is swappable for the plan-08 AI optimizer behind this same endpoint.
+
+### `GET /api/v1/routes/overdue?repId=` — `@Roles('admin','manager')`
+A rep's missed-and-uncovered outlets (dashboard "needs attention"). Each outlet whose most recent past visit is still `pending` (within the 30-day window).
+**Response data**: `{ customerId, customerName, lastMissedDate }[]`.
+**Errors**: `400`, `401`, `403`, `404` (rep).
 
 ### `PATCH /api/v1/routes/:id/stops/reorder` — `@Roles('admin','manager')`
 **Body**: `{ order: [{ stopId, stopOrder }] }`. Every `stopId` must belong to the plan.

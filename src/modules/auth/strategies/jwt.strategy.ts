@@ -19,6 +19,8 @@ export interface JwtPayload {
   userNumber: string;
   userType: string;
   role?: string;
+  /** Field-rep id linked to this user (resolved at login), or null. */
+  repId?: string | null;
   permissions: Record<string, boolean>;
 }
 
@@ -45,10 +47,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
 
     const role = payload.role ?? 'viewer';
+    const repId = payload.repId ?? null;
 
     this.userCtx.set({
       userId: payload.sub,
       role,
+      repId,
     });
 
     return {
@@ -56,6 +60,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       userNumber: payload.userNumber,
       userType: payload.userType,
       role,
+      repId,
       permissions: payload.permissions ?? {},
     };
   }

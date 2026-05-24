@@ -1,6 +1,11 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, IsNull, Repository } from 'typeorm';
+import { Brackets, IsNull, Not, Repository } from 'typeorm';
 
 import { Region } from './entities/region.entity';
 import { CreateRegionDto } from './dto/create-region.dto';
@@ -48,12 +53,17 @@ export class RegionsService {
   }
 
   async create(dto: CreateRegionDto): Promise<Region> {
+    if (dto.code) await this.assertCodeUnique(dto.code);
     const boundary = this.normalizeBoundary(dto.boundary);
     return this.repo.save(this.repo.create({ ...dto, boundary }));
   }
 
   async update(id: string, dto: UpdateRegionDto): Promise<Region> {
     const region = await this.findOne(id);
+    if (dto.code !== undefined) {
+      if (dto.code) await this.assertCodeUnique(dto.code, id);
+      region.code = dto.code;
+    }
     if (dto.boundary !== undefined) {
       region.boundary = this.normalizeBoundary(dto.boundary);
     }
@@ -61,6 +71,17 @@ export class RegionsService {
     if (dto.nameEn !== undefined) region.nameEn = dto.nameEn;
     if (dto.isActive !== undefined) region.isActive = dto.isActive;
     return this.repo.save(region);
+  }
+
+  private async assertCodeUnique(code: string, exceptId?: string): Promise<void> {
+    const existing = await this.repo.findOne({
+      where: exceptId
+        ? { code, id: Not(exceptId), deletedAt: IsNull() }
+        : { code, deletedAt: IsNull() },
+    });
+    if (existing) {
+      throw new ConflictException(`Route code "${code}" is already in use`);
+    }
   }
 
   async softDelete(id: string): Promise<void> {

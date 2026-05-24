@@ -177,6 +177,38 @@ Open `http://localhost:3000/docs`:
 
 ---
 
+## 10. Carry-forward of missed visits
+
+Uses a fresh rep + a **Wednesday-only** outlet so carry-forward is unambiguous.
+`weekdays` use 0=Sun..6=Sat. (Demo dates: 05-20=Wed, 05-21=Thu, 05-22=Fri.)
+
+```bash
+H="Authorization: Bearer $TOKEN"
+REP=$(curl -s -X POST $B/reps -H "$H" -H 'Content-Type: application/json' -d '{"nameAr":"Carry"}' | jq -r .data.id)
+X=$(curl -s -X POST $B/customers -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"customerNumber\":\"CF-X\",\"customerName\":\"Wed Shop\",\"repId\":\"$REP\",\"latitude\":\"31.95\",\"longitude\":\"35.91\"}" | jq -r .data.id)
+curl -s -X PUT "$B/reps/$REP/journey-plan/$X" -H "$H" -H 'Content-Type: application/json' -d '{"weekdays":[3]}' >/dev/null
+
+# Wed: due → generate, then DON'T visit (missed)
+curl -s -X POST $B/routes/generate -H "$H" -H 'Content-Type: application/json' -d "{\"repIds\":[\"$REP\"],\"planDate\":\"2026-05-20\"}" >/dev/null
+curl -s "$B/routes/overdue?repId=$REP" -H "$H" | jq        # → X, lastMissedDate 2026-05-20
+# Thu: NOT due, but carry-forward adds X as carried
+curl -s -X POST $B/routes/generate -H "$H" -H 'Content-Type: application/json' -d "{\"repIds\":[\"$REP\"],\"planDate\":\"2026-05-21\"}" >/dev/null
+curl -s "$B/routes?repId=$REP&date=2026-05-21" -H "$H" | jq '.data[0].stops | map({customerId,status,carriedOver})'
+# Visit the carried stop → overdue clears
+SID=$(curl -s "$B/routes?repId=$REP&date=2026-05-21" -H "$H" | jq -r '.data[0].stops[0].id')
+curl -s -X POST "$B/routes/stops/$SID/visit" -H "$H" -H 'Content-Type: application/json' -d '{}' >/dev/null
+curl -s "$B/routes/overdue?repId=$REP" -H "$H" | jq        # → []
+```
+
+- [ ] Wed plan: X `pending`, `carriedOver:false`
+- [ ] `overdue` lists X with `lastMissedDate` = the missed date
+- [ ] Thu plan: X present with `carriedOver:true` (even though Thu isn't its day)
+- [ ] after visiting the carried stop, `overdue` → `[]` (covered)
+- [ ] generating a later non-scheduled day with nothing overdue → no plan
+
+---
+
 ## Done
 
-All green → plan 05 verified. Plan 06 (Sales Invoices) next.
+All green → plan 05 verified (incl. journey-plan generation + carry-forward).

@@ -1,0 +1,402 @@
+# CashFlow API Documentation
+
+*Version:* 1.0.0  
+*Base URL:* https://api.cashflow.jo/v1  
+*Format:* JSON  
+*Encoding:* UTF-8
+
+---
+
+## Table of Contents
+
+1. [Authentication](#authentication)
+2. [Common Parameters](#common-parameters)
+3. [Error Responses](#error-responses)
+4. [Salesman API](#salesman-api)
+5. [Company Metadata API](#company-metadata-api)
+6. [Item API](#item-api)
+7. [Item Balance API](#item-balance-api)
+
+---
+
+## Authentication
+
+All requests must include a Bearer token in the Authorization header.
+
+
+Authorization: Bearer {token}
+
+
+---
+
+## Common Parameters
+
+The following parameters are *required on every request* and must be sent as query parameters or headers.
+
+| Parameter | Type | Location | Required | Description |
+|---|---|---|---|---|
+| companyNumber | string | query / header | ✅ | Company identifier |
+| salesmanCode | string | query / header | ✅ | Salesman identifier |
+| Authorization | string | header | ✅ | Bearer token |
+
+*Header format (alternative to query params)*
+
+X-Company-Number: C001
+X-Salesman-Code: S012
+
+
+---
+
+## Error Responses
+
+All endpoints return errors in the following format:
+
+json
+{
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "Item 23232 not found for company C001"
+}
+
+
+| Status | Code | Description |
+|---|---|---|
+| 400 | BAD_REQUEST | Missing or invalid required parameter |
+| 401 | UNAUTHORIZED | Invalid or missing token |
+| 403 | FORBIDDEN | Salesman not authorized for this company |
+| 404 | NOT_FOUND | Resource not found |
+| 422 | VALIDATION_ERROR | Request body validation failed |
+| 500 | SERVER_ERROR | Internal server error |
+
+---
+
+## Salesman API
+
+### Get Salesman
+
+Returns salesman profile, assigned route, van store, and price phase.
+
+
+GET /salesman/{salesmanCode}
+
+
+#### Path Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| salesmanCode | string | ✅ | Salesman unique code |
+
+#### Query Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| companyNumber | string | ✅ | Company identifier |
+
+#### Response Fields
+
+| Field | Type | Description |
+|---|---|---|
+| companyNumber | string | Company identifier |
+| salesmanCode | string | Salesman unique code |
+| salesmanNameAr | string | Salesman Arabic name |
+| salesmanNameEn | string | Salesman English name |
+| salesmanPhone | string | Contact number |
+| routeCode | string | Assigned route code |
+| routeNameAr | string | Route Arabic name |
+| routeNameEn | string | Route English name |
+| storeNumber | string | Assigned van / warehouse number |
+| pricePhase | string | Default price phase (1–4) |
+| isActive | boolean | Salesman active status |
+
+#### Example Request
+
+
+GET /salesman/S012?companyNumber=C001
+
+
+#### Example Response
+
+json
+{
+  "companyNumber": "C001",
+  "salesmanCode": "S012",
+  "salesmanNameAr": "أحمد المصري",
+  "salesmanNameEn": "Ahmad Al-Masri",
+  "salesmanPhone": "0791234567",
+  "routeCode": "R-A01",
+  "routeNameAr": "مسار وسط عمان",
+  "routeNameEn": "Central Amman Route",
+  "storeNumber": "4",
+  "pricePhase": "2",
+  "isActive": true
+}
+
+
+---
+
+## Company Metadata API
+
+### Get Company Metadata
+
+Returns company profile, tax number, phone, and logo.
+
+
+GET /company/meta
+
+
+#### Query Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| companyNumber | string | ✅ | Company identifier |
+| salesmanCode | string | ✅ | Salesman identifier |
+
+#### Response Fields
+
+| Field | Type | Description |
+|---|---|---|
+| companyNumber | string | Company identifier |
+| salesmanCode | string | Salesman identifier |
+| companyName | string | Registered company name |
+| taxNumber | string | Tax registration number |
+| companyPhone | string | Primary contact number |
+| logo | string | Logo image URL |
+
+#### Example Request
+
+
+GET /company/meta?companyNumber=C001&salesmanCode=S012
+
+
+#### Example Response
+
+json
+{
+  "companyNumber": "C001",
+  "salesmanCode": "S012",
+  "companyName": "كاش فلو للتجارة",
+  "taxNumber": "23423423",
+  "companyPhone": "0793232334",
+  "logo": "https://cdn.cashflow.jo/logo.jpeg"
+}
+
+
+---
+
+## Item API
+
+### Get Item
+
+Returns full item details including units and price phases.
+
+
+GET /items/{itemCode}
+
+
+#### Path Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| itemCode | string | ✅ | Unique item code |
+
+#### Query Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| companyNumber | string | ✅ | Company identifier |
+| salesmanCode | string | ✅ | Salesman identifier |
+
+#### Response Fields
+
+| Field | Type | Description |
+|---|---|---|
+| companyNumber | string | Company identifier |
+| salesmanCode | string | Salesman identifier |
+| itemCode | string | Unique item identifier |
+| itemNameAr | string | Arabic item name |
+| itemNameEn | string | English item name |
+| itemPrice | decimal(3) | Base unit price |
+| itemBarcode | string | Item barcode number |
+| itemPic | string | Image URL |
+| itemCategory | string | Category name |
+| taxPerc | decimal | Tax percentage |
+| itemUnits | array | List of available units — see below |
+| itemPriceList | array | Tiered price phases — see below |
+
+#### itemUnits Fields
+
+| Field | Type | Description |
+|---|---|---|
+| unitName | string | Unit label (piece, carton, pallet…) |
+| unitCode | string | Unit identifier code |
+| unitPrice | decimal(3) | Price per this unit |
+| unitQty | integer | Available stock qty for this unit |
+
+#### itemPriceList Fields
+
+| Field | Type | Description |
+|---|---|---|
+| phaseNumber | string | Phase index (1, 2, 3, 4) |
+| phasePrice | decimal(3) | Price for this phase |
+
+#### Example Request
+
+
+GET /items/23232?companyNumber=C001&salesmanCode=S012
+
+
+#### Example Response
+
+json
+{
+  "companyNumber": "C001",
+  "salesmanCode": "S012",
+  "itemCode": "23232",
+  "itemNameAr": "مياه معدنية بركة 1.5 لتر",
+  "itemNameEn": "Baraka Mineral Water 1.5L",
+  "itemPrice": "0.350",
+  "itemBarcode": "4533455",
+  "itemPic": "https://cdn.cashflow.jo/items/23232.jpg",
+  "itemCategory": "Drinks",
+  "taxPerc": "16",
+  "itemUnits": [
+    {
+      "unitName": "حبة",
+      "unitCode": "4423523",
+      "unitPrice": "0.350",
+      "unitQty": "300"
+    },
+    {
+      "unitName": "كرتونة",
+      "unitCode": "4423524",
+      "unitPrice": "4.200",
+      "unitQty": "25"
+    },
+    {
+      "unitName": "كرتون X24",
+      "unitCode": "4423525",
+      "unitPrice": "7.900",
+      "unitQty": "10"
+    },
+    {
+      "unitName": "باليت",
+      "unitCode": "4423526",
+      "unitPrice": "210.000",
+      "unitQty": "2"
+    }
+  ],
+  "itemPriceList": [
+    { "phaseNumber": "1", "phasePrice": "0.350" },
+    { "phaseNumber": "2", "phasePrice": "0.320" },
+    { "phaseNumber": "3", "phasePrice": "0.300" },
+    { "phaseNumber": "4", "phasePrice": "0.280" }
+  ]
+}
+
+
+---
+
+## Item Balance API
+
+### Get Item Balance
+
+Returns stock balance for an item across stores or for a specific store.
+
+
+GET /itemBalance
+
+
+#### Query Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| companyNumber | string | ✅ | Company identifier |
+| salesmanCode | string | ✅ | Salesman identifier |
+| itemNumber | string | ✅ | Item number to query |
+| storeNo | string | ❌ | Filter by store number. Omit to return all stores |
+
+#### Response
+
+Returns an *array*. Always an array even when filtering by a single store.
+
+| Field | Type | Description |
+|---|---|---|
+| companyNumber | string | Company identifier |
+| salesmanCode | string | Salesman identifier |
+| itemNumber | string | Item reference number |
+| itemQty | integer | Available quantity in this store |
+| storeNumber | string | Store / warehouse identifier |
+
+#### Store Numbers Reference
+
+| storeNumber | Arabic | English |
+|---|---|---|
+| 1 | مخزن رئيسي | Main Warehouse |
+| 2 | مخزن B | Warehouse B |
+| 3 | مخزن C | Warehouse C |
+| 4 | فان المندوب | Sales Van |
+
+#### Example Requests
+
+*All stores:*
+
+GET /itemBalance?companyNumber=C001&salesmanCode=S012&itemNumber=231312
+
+
+*Van only:*
+
+GET /itemBalance?companyNumber=C001&salesmanCode=S012&itemNumber=231312&storeNo=4
+
+
+#### Example Response — All Stores
+
+json
+[
+  {
+    "companyNumber": "C001",
+    "salesmanCode": "S012",
+    "itemNumber": "231312",
+    "itemQty": "40",
+    "storeNumber": "1"
+  },
+  {
+    "companyNumber": "C001",
+    "salesmanCode": "S012",
+    "itemNumber": "231312",
+    "itemQty": "120",
+    "storeNumber": "2"
+  },
+  {
+    "companyNumber": "C001",
+    "salesmanCode": "S012",
+    "itemNumber": "231312",
+    "itemQty": "8",
+    "storeNumber": "4"
+  }
+]
+
+
+#### Example Response — Van Only
+
+json
+[
+  {
+    "companyNumber": "C001",
+    "salesmanCode": "S012",
+    "itemNumber": "231312",
+    "itemQty": "8",
+    "storeNumber": "4"
+  }
+]
+
+
+---
+
+## Notes
+
+- All *price fields* use 3 decimal places → "0.350"
+- companyNumber and salesmanCode are required on *every request*
+- itemBalance always returns an *array* even for a single store result
+- Arabic text fields (*Ar) are always **UTF-8** encoded
+- Date fields follow *DD/MM/YYYY HH:mm* format
+- Image fields (itemPic, logo) return a full CDN URL or empty string ""
