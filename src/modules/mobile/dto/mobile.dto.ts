@@ -67,3 +67,42 @@ export class ItemBalanceRowDto {
   @ApiProperty({ example: '40' }) itemQty!: string;
   @ApiProperty({ example: '1' }) storeNumber!: string;
 }
+
+/** One unit row inside a /mobile/van-stock entry. */
+export class VanStockUnitDto {
+  @ApiProperty({ format: 'uuid' }) unitId!: string;
+  @ApiProperty({ example: 'CTN' }) unitCode!: string;
+  @ApiProperty({ example: 'كرتونة' }) unitName!: string;
+  @ApiProperty({ example: 'Carton', nullable: true }) unitNameEn!: string | null;
+  @ApiProperty({ example: 24, description: 'How many base units make 1 of this unit' })
+  qty!: number;
+  @ApiProperty({ example: false }) isBase!: boolean;
+  @ApiProperty({ example: '4423524' }) barcode!: string;
+  @ApiProperty({ example: '8.400' }) salePrice!: string;
+}
+
+/** Full item row + on-van quantity + allowed unit mappings (mobile contract). */
+export class VanStockItemDto {
+  @ApiProperty({ format: 'uuid' }) id!: string;
+  @ApiProperty() itemNumber!: string;
+  @ApiProperty() name!: string;
+  @ApiProperty() barcode!: string;
+  @ApiProperty() sku!: string;
+  @ApiProperty() nameAr!: string;
+  @ApiProperty({ nullable: true }) nameEn!: string | null;
+  @ApiProperty({ format: 'uuid', nullable: true }) categoryId!: string | null;
+  @ApiProperty() unit!: string;
+  @ApiProperty() unitOfMeasure!: string;
+  @ApiProperty({ description: 'Base price in fils (1 JOD = 1000 fils)' }) price!: number;
+  @ApiProperty({ nullable: true }) cost!: number | null;
+  @ApiProperty({ nullable: true }) imageUrl!: string | null;
+  @ApiProperty() isActive!: boolean;
+  @ApiProperty() reorderQty!: number;
+  @ApiProperty() taxType!: string;
+  @ApiProperty() taxCategory!: string;
+  @ApiProperty() taxRate!: string;
+  @ApiProperty() taxPercentage!: string;
+  @ApiProperty({ nullable: true }) photoUrl!: string | null;
+  @ApiProperty({ description: 'Current quantity on the van in base units' }) quantity!: number;
+  @ApiProperty({ type: [VanStockUnitDto] }) units!: VanStockUnitDto[];
+}

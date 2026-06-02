@@ -38,6 +38,7 @@ import { SystemModule } from './modules/system/system.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { TaxModule } from './modules/tax/tax.module';
 import { MobileModule } from './modules/mobile/mobile.module';
+import { UnitsModule } from './modules/units/units.module';
 
 @Module({
   imports: [
@@ -87,6 +88,7 @@ import { MobileModule } from './modules/mobile/mobile.module';
     RealtimeModule,
     TaxModule,
     MobileModule,
+    UnitsModule,
   ],
   controllers: [HealthController],
   providers: [

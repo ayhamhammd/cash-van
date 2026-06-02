@@ -1,6 +1,5 @@
 import { Column, Entity, Index, OneToMany } from 'typeorm';
 import { BaseEntity } from '../../../common/entities/base.entity';
-import { ItemSwitch } from './item-switch.entity';
 import { ExpiryItem } from './expiry-item.entity';
 
 export type TaxType = 'TAXABLE' | 'INCLUSIVE' | 'EXEMPT';
@@ -82,9 +81,6 @@ export class ItemCart extends BaseEntity {
 
   @Column({ name: 'photo_url', type: 'text', nullable: true })
   photoUrl?: string | null;
-
-  @OneToMany(() => ItemSwitch, (sw) => sw.item)
-  switches?: ItemSwitch[];
 
   @OneToMany(() => ExpiryItem, (ex) => ex.item)
   expiries?: ExpiryItem[];

@@ -24,6 +24,7 @@ import {
   ItemBalanceRowDto,
   ItemDto,
   SalesmanDto,
+  VanStockItemDto,
 } from './dto/mobile.dto';
 
 /**
@@ -51,7 +52,20 @@ export class MobileController {
   @ApiQuery({ name: 'companyNumber', required: false, description: 'Company id (or X-Company-Number header)' })
   @ApiOkResponse({ type: SalesmanDto })
   getSalesman(@MobileCtx() ctx: MobileContext) {
-    return this.mobile.getSalesman(ctx.rep, ctx.companyNumber);
+    return this.mobile.getSalesman(ctx.rep, ctx.companyNumber, ctx.salesmanCode);
+  }
+
+  @Get('van-stock')
+  @ApiOperation({
+    summary: "Get the salesman's van stock",
+    description:
+      "Every item currently loaded on the salesman's van. Each row is the full catalog row + `quantity` (base units on van) + `units[]` (unit mappings: unitId, code, name, qty=base_qty, isBase, barcode, salePrice).",
+  })
+  @ApiQuery({ name: 'companyNumber', required: false })
+  @ApiQuery({ name: 'salesmanCode', required: false })
+  @ApiOkResponse({ type: [VanStockItemDto] })
+  getVanStock(@MobileCtx() ctx: MobileContext) {
+    return this.mobile.getVanStock(ctx.rep);
   }
 
   @Get('company/meta')
@@ -95,6 +109,12 @@ export class MobileController {
     @MobileCtx() ctx: MobileContext,
   ) {
     if (!itemNumber) throw new BadRequestException('itemNumber is required');
-    return this.mobile.getItemBalance(itemNumber, storeNo, ctx.companyNumber, ctx.salesmanCode);
+    return this.mobile.getItemBalance(
+      itemNumber,
+      storeNo,
+      ctx.rep,
+      ctx.companyNumber,
+      ctx.salesmanCode,
+    );
   }
 }

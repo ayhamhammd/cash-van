@@ -23,13 +23,11 @@ import {
 } from '@nestjs/swagger';
 
 import { ItemCartService } from './item-cart.service';
-import { ItemSwitchesService } from './item-switches.service';
 import { ExpiryItemsService } from './expiry-items.service';
 import { ItemBalanceService } from './item-balance.service';
 
 import { CreateItemDto } from './dto/create-item.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
-import { CreateItemSwitchDto } from './dto/create-item-switch.dto';
 import { CreateExpiryItemDto } from './dto/create-expiry-item.dto';
 
 import { PaginationDto } from '../../common/dto/pagination.dto';
@@ -41,7 +39,6 @@ import { RequirePermissions } from '../../common/decorators/permissions.decorato
 export class ItemsController {
   constructor(
     private readonly itemCart: ItemCartService,
-    private readonly itemSwitches: ItemSwitchesService,
     private readonly expiryItems: ExpiryItemsService,
     private readonly itemBalance: ItemBalanceService,
   ) {}
@@ -68,7 +65,7 @@ export class ItemsController {
   @Get('barcode/:barcode')
   @ApiOperation({
     summary: 'Find item by barcode',
-    description: 'Look up a catalog item by its barcode.',
+    description: 'Look up a catalog item by its base barcode.',
   })
   @ApiParam({ name: 'barcode', description: 'Item barcode', example: 'B-1001' })
   @ApiOkResponse({ description: 'The matching catalog item' })
@@ -106,50 +103,6 @@ export class ItemsController {
   @ApiNoContentResponse({ description: 'Item soft-deleted' })
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.itemCart.remove(id);
-  }
-
-  // -------- Unit switches (carton/piece/box) ---------
-  @Post('switches')
-  @RequirePermissions('canAddItems')
-  @ApiOperation({
-    summary: 'Create unit switch',
-    description:
-      'Create a unit-conversion row (e.g. carton ↔ piece) for an item. Requires canAddItems.',
-  })
-  @ApiCreatedResponse({ description: 'Unit switch created' })
-  createSwitch(@Body() dto: CreateItemSwitchDto) {
-    return this.itemSwitches.create(dto);
-  }
-
-  @Get(':itemNumber/switches')
-  @ApiOperation({
-    summary: 'List unit switches',
-    description: 'List all unit-conversion rows for an item.',
-  })
-  @ApiParam({ name: 'itemNumber', description: 'Item number', example: 'IT-1001' })
-  @ApiOkResponse({ description: 'Unit switches for the item' })
-  listSwitches(@Param('itemNumber') itemNumber: string) {
-    return this.itemSwitches.listForItem(itemNumber);
-  }
-
-  @Get('switches/barcode/:barcode')
-  @ApiOperation({
-    summary: 'Find unit switch by barcode',
-    description: 'Look up a unit-conversion row by its barcode.',
-  })
-  @ApiParam({ name: 'barcode', description: 'Unit switch barcode', example: 'B-1001-CTN' })
-  @ApiOkResponse({ description: 'The matching unit switch' })
-  switchByBarcode(@Param('barcode') barcode: string) {
-    return this.itemSwitches.findByBarcode(barcode);
-  }
-
-  @Delete('switches/:id')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Delete unit switch', description: 'Delete a unit-conversion row.' })
-  @ApiParam({ name: 'id', format: 'uuid', description: 'Unit switch id' })
-  @ApiNoContentResponse({ description: 'Unit switch deleted' })
-  removeSwitch(@Param('id', ParseUUIDPipe) id: string) {
-    return this.itemSwitches.remove(id);
   }
 
   // -------- Expiry tracking ---------

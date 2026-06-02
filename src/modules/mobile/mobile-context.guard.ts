@@ -10,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 
 import { Rep } from '../reps/entities/rep.entity';
+import { User } from '../users/entities/user.entity';
 import { AppSettings } from '../settings/entities/app-settings.entity';
 import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { MobileContext } from './mobile.context';
@@ -27,7 +28,8 @@ interface MobileRequest {
  *   - `companyNumber` (query `companyNumber` or header `X-Company-Number`) must
  *     match the single-tenant `app_settings.company_number`.
  *   - `salesmanCode` (route param, query `salesmanCode`, or header
- *     `X-Salesman-Code`) must resolve to a rep.
+ *     `X-Salesman-Code`) = the user's `userNumber` (e.g. `U-0001`). It must
+ *     resolve to a user with a linked rep.
  *   - if the caller's token is itself a salesman, the code must be their own.
  * Resolved context is attached as `req.mobileCtx`.
  */
@@ -35,6 +37,7 @@ interface MobileRequest {
 export class MobileContextGuard implements CanActivate {
   constructor(
     @InjectRepository(Rep) private readonly reps: Repository<Rep>,
+    @InjectRepository(User) private readonly users: Repository<User>,
     @InjectRepository(AppSettings)
     private readonly settings: Repository<AppSettings>,
   ) {}
@@ -59,17 +62,24 @@ export class MobileContextGuard implements CanActivate {
       throw new BadRequestException(`Unknown companyNumber "${companyNumber}"`);
     }
 
+    // salesmanCode is the user's userNumber (e.g. "U-0001"); resolve user → rep.
+    const userRow = await this.users.findOne({
+      where: { userNumber: salesmanCode },
+    });
+    if (!userRow) {
+      throw new NotFoundException(`Salesman "${salesmanCode}" not found`);
+    }
     const rep = await this.reps.findOne({
-      where: { code: salesmanCode, deletedAt: IsNull() },
+      where: { userId: userRow.id, deletedAt: IsNull() },
     });
     if (!rep) {
-      throw new NotFoundException(`Salesman "${salesmanCode}" not found`);
+      throw new NotFoundException(`No rep linked to user "${salesmanCode}"`);
     }
 
     // Admins/managers may query any salesman; a salesman token may only act as itself.
-    const user = req.user;
-    const privileged = user?.role === 'admin' || user?.role === 'manager';
-    if (!privileged && user?.repId && user.repId !== rep.id) {
+    const tokenUser = req.user;
+    const privileged = tokenUser?.role === 'admin' || tokenUser?.role === 'manager';
+    if (!privileged && tokenUser?.repId && tokenUser.repId !== rep.id) {
       throw new ForbiddenException('Salesman not authorized for this account');
     }
 
