@@ -1,0 +1,87 @@
+# Render Blueprint — deploys the VanFlow Cash-Van NestJS backend + a free
+# managed PostgreSQL database. Connect this repo at https://render.com →
+# "New +" → "Blueprint", pick this repo/branch, and Render reads this file.
+#
+# NOTE on the free tier:
+#   * The web service spins down after ~15 min idle (cold start on next request).
+#   * Free PostgreSQL is deleted ~30 days after creation. For a permanent free
+#     DB, create a Neon (neon.tech) Postgres and replace the DB_* envVars below
+#     with its connection values instead of the `fromDatabase` references.
+#   * The container disk is ephemeral — uploaded files (cheque images, voice
+#     clips) do NOT survive restarts. Wire object storage (R2/S3) for persistence.
+
+databases:
+  - name: cashvan-db
+    plan: free
+    databaseName: cashvan
+    user: cashvan
+    region: frankfurt
+
+services:
+  - type: web
+    name: cashvan-backend
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    # Run pending migrations + idempotent seed, then boot the API. Migrations and
+    # the seed are no-ops once applied, so this is safe on every (cold) start.
+    dockerCommand: sh -c "npm run migration:run:prod && npm run seed:prod && node dist/main.js"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
+      - key: DB_HOST
+        fromDatabase:
+          name: cashvan-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: cashvan-db
+          property: port
+      - key: DB_USERNAME
+        fromDatabase:
+          name: cashvan-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: cashvan-db
+          property: password
+      - key: DB_NAME
+        fromDatabase:
+          name: cashvan-db
+          property: database
+      - key: DB_SSL
+        value: "true"
+      - key: DB_LOGGING
+        value: "false"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 12h
+      - key: RATE_LIMIT_TTL
+        value: "60"
+      - key: RATE_LIMIT_LIMIT
+        value: "100"
+      # Lock this down to your Cloudflare Pages URL after the frontend deploys,
+      # e.g. https://cash-van-dashboard.pages.dev  (comma-separated for several).
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: CACHE_MAX_ENTRIES
+        value: "5000"
+      - key: CACHE_DEFAULT_TTL_SEC
+        value: "300"
+      - key: JOBS_ENABLED
+        value: "true"
+      - key: JOFOTARA_MOCK
+        value: "true"
+      # Required in production. 64 hex chars — generate with: openssl rand -hex 32
+      # Set this value in the Render dashboard before the first deploy.
+      - key: JOFOTARA_KMS_KEY
+        sync: false
+      - key: PHONE_HASH_SECRET
+        generateValue: true
