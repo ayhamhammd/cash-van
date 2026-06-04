@@ -24,6 +24,10 @@ export class VanStock {
   @Column({ type: 'integer', default: 0 })
   quantity!: number;
 
+  /** Quantity committed to open (unfulfilled) ORDER vouchers. */
+  @Column({ type: 'integer', default: 0 })
+  reserved!: number;
+
   @Column({ name: 'loaded_at', type: 'timestamptz', nullable: true })
   loadedAt?: Date | null;
 

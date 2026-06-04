@@ -74,6 +74,10 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'is_edit', type: 'boolean', default: false })
   isEdit!: boolean;
 
+  /** ORDER vouchers only: reservation released + shipped from the van. */
+  @Column({ name: 'is_fulfilled', type: 'boolean', default: false })
+  isFulfilled!: boolean;
+
   @OneToMany(() => VoucherTransaction, (t) => t.header, { cascade: true })
   transactions?: VoucherTransaction[];
 

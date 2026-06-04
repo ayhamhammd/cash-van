@@ -125,6 +125,19 @@ export class VouchersController {
     return this.vouchersService.post(id);
   }
 
+  @Patch(':id/fulfill')
+  @RequirePermissions('canMakeVoucher')
+  @ApiOperation({
+    summary: 'Fulfil order',
+    description:
+      'Fulfil a posted ORDER voucher: releases its van reservation and ships the goods (reserved → out). Requires canMakeVoucher.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Voucher id' })
+  @ApiOkResponse({ description: 'Fulfilled order voucher' })
+  fulfill(@Param('id', ParseUUIDPipe) id: string) {
+    return this.vouchersService.fulfill(id);
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete voucher', description: 'Delete an unposted voucher.' })

@@ -12,6 +12,7 @@ export interface VanStockRow {
   sku: string;
   nameAr: string;
   quantity: number;
+  reserved: number;
   reorderQty: number;
   status: 'sufficient' | 'borderline' | 'stockout';
   snapshotAt: Date;
@@ -36,6 +37,7 @@ export class VanStockService {
       .select([
         'vs.product_id AS product_id',
         'vs.quantity AS quantity',
+        'vs.reserved AS reserved',
         'vs.snapshot_at AS snapshot_at',
         'p.sku AS sku',
         'p.name_ar AS name_ar',
@@ -46,6 +48,7 @@ export class VanStockService {
       .getRawMany<{
         product_id: string;
         quantity: number;
+        reserved: number;
         snapshot_at: Date;
         sku: string;
         name_ar: string;
@@ -54,15 +57,18 @@ export class VanStockService {
 
     return rows.map((r) => {
       const quantity = Number(r.quantity);
+      const reserved = Number(r.reserved);
+      const available = quantity - reserved;
       const reorderQty = Number(r.reorder_qty);
       let status: VanStockRow['status'] = 'sufficient';
-      if (quantity <= 0) status = 'stockout';
-      else if (reorderQty > 0 && quantity <= reorderQty) status = 'borderline';
+      if (available <= 0) status = 'stockout';
+      else if (reorderQty > 0 && available <= reorderQty) status = 'borderline';
       return {
         productId: r.product_id,
         sku: r.sku,
         nameAr: r.name_ar,
         quantity,
+        reserved,
         reorderQty,
         status,
         snapshotAt: r.snapshot_at,

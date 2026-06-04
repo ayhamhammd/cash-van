@@ -46,15 +46,15 @@ async function seed(): Promise<void> {
     // ── transaction kinds ────────────────────────────────────────────────
     const kindsRepo = m.getRepository(TransactionKind);
     const kinds: Array<Partial<TransactionKind>> = [
-      { transKind: 'SALE', transName: 'Sales invoice', sign: -1 },
-      { transKind: 'PURCHASE', transName: 'Purchase invoice', sign: 1 },
-      { transKind: 'RETURN_IN', transName: 'Customer return (in)', sign: 1 },
-      { transKind: 'RETURN_OUT', transName: 'Vendor return (out)', sign: -1 },
-      { transKind: 'TRANSFER_IN', transName: 'Stock transfer in', sign: 1 },
-      { transKind: 'TRANSFER_OUT', transName: 'Stock transfer out', sign: -1 },
-      { transKind: 'ADJUSTMENT', transName: 'Manual adjustment', sign: 0 },
-      { transKind: 'PAYMENT_IN', transName: 'Payment received', sign: 0 },
-      { transKind: 'PAYMENT_OUT', transName: 'Payment made', sign: 0 },
+      { transKind: 'SALE', transName: 'بيع', sign: -1 }, // van out
+      { transKind: 'RETURN', transName: 'مرتجع', sign: 1 }, // van in
+      { transKind: 'ORDER', transName: 'طلبية', sign: 0 }, // reserve until fulfilled
+      { transKind: 'TRANSFER_IN', transName: 'تحميل المركبة', sign: 1 }, // van in
+      { transKind: 'TRANSFER_OUT', transName: 'تنزيل المركبة', sign: -1 }, // van out
+      { transKind: 'PURCHASE', transName: 'شراء', sign: 1 }, // warehouse in
+      { transKind: 'ADJUSTMENT', transName: 'تسوية', sign: 0 },
+      { transKind: 'PAYMENT_IN', transName: 'سند قبض', sign: 0 },
+      { transKind: 'PAYMENT_OUT', transName: 'سند صرف', sign: 0 },
     ];
     for (const k of kinds) {
       await upsert(kindsRepo, { transKind: k.transKind }, k);

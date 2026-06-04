@@ -13,11 +13,31 @@ import { VoucherTransaction } from './entities/voucher-transaction.entity';
 import { Payment } from './entities/payment.entity';
 import { PaymentCheque } from './entities/payment-cheque.entity';
 import { TransactionKind } from './entities/transaction-kind.entity';
+import { VanStock } from '../products/entities/van-stock.entity';
+import { ItemCart } from '../items/entities/item-cart.entity';
+import { User } from '../users/entities/user.entity';
+import { Rep } from '../reps/entities/rep.entity';
 
 import {
   CreateVoucherDto,
   VoucherLineDto,
 } from './dto/create-voucher.dto';
+
+/**
+ * How each voucher kind moves the salesman's van stock when posted:
+ *   in      → quantity += qty   (TRANSFER_IN, RETURN)
+ *   out     → quantity -= qty   (SALE, TRANSFER_OUT)
+ *   reserve → reserved += qty   (ORDER — committed; shipped on fulfilment)
+ * Anything else (PURCHASE, PAYMENT_*, ADJUSTMENT) does not touch the van.
+ */
+const VAN_EFFECT: Record<string, 'in' | 'out' | 'reserve'> = {
+  SALE: 'out',
+  TRANSFER_OUT: 'out',
+  RETURN: 'in',
+  RETURN_IN: 'in',
+  TRANSFER_IN: 'in',
+  ORDER: 'reserve',
+};
 import { CreateChequeDto } from './dto/create-cheque.dto';
 
 interface ComputedLine {
@@ -115,13 +135,127 @@ export class VouchersService {
     });
   }
 
+  /**
+   * Post a voucher: lock it and reflect its lines on the salesman's van stock
+   * (out for SALE/TRANSFER_OUT, in for RETURN/TRANSFER_IN, reserve for ORDER).
+   */
   async post(id: string): Promise<VoucherHeader> {
-    const header = await this.findOneOrThrow(id);
-    if (header.isPosted) {
-      throw new ConflictException('Voucher already posted');
-    }
-    header.isPosted = true;
-    return this.headersRepo.save(header);
+    return this.dataSource.transaction(async (em) => {
+      const header = await em.getRepository(VoucherHeader).findOne({
+        where: { id },
+        relations: { transactions: true },
+      });
+      if (!header) throw new NotFoundException(`Voucher ${id} not found`);
+      if (header.isPosted) {
+        throw new ConflictException('Voucher already posted');
+      }
+      header.isPosted = true;
+      await em.getRepository(VoucherHeader).save(header);
+
+      const effect = VAN_EFFECT[header.transKind];
+      if (effect) {
+        const rep = await this.resolveRep(em, header.userCode);
+        if (rep) {
+          for (const line of header.transactions ?? []) {
+            await this.applyLineToVan(em, rep.id, line, effect);
+          }
+        }
+      }
+
+      return em.getRepository(VoucherHeader).findOneOrFail({
+        where: { id },
+        relations: { transactions: true, payments: true },
+      });
+    });
+  }
+
+  /**
+   * Fulfil an ORDER: release its reservation and ship the goods from the van
+   * (reserved -= qty, quantity -= qty). Idempotent via `is_fulfilled`.
+   */
+  async fulfill(id: string): Promise<VoucherHeader> {
+    return this.dataSource.transaction(async (em) => {
+      const header = await em.getRepository(VoucherHeader).findOne({
+        where: { id },
+        relations: { transactions: true },
+      });
+      if (!header) throw new NotFoundException(`Voucher ${id} not found`);
+      if (header.transKind !== 'ORDER') {
+        throw new BadRequestException('Only ORDER vouchers can be fulfilled');
+      }
+      if (!header.isPosted) {
+        throw new BadRequestException('Post the order before fulfilling it');
+      }
+      if (header.isFulfilled) {
+        throw new ConflictException('Order already fulfilled');
+      }
+
+      const rep = await this.resolveRep(em, header.userCode);
+      if (rep) {
+        for (const line of header.transactions ?? []) {
+          const product = await em
+            .getRepository(ItemCart)
+            .findOne({ where: { itemNumber: line.itemNumber } });
+          if (!product) continue;
+          const vs = await em.getRepository(VanStock).findOne({
+            where: { repId: rep.id, productId: product.id },
+          });
+          if (!vs) continue;
+          const qty = Math.round(Number(line.itemQty) || 0);
+          vs.reserved = Math.max(0, vs.reserved - qty);
+          vs.quantity = Math.max(0, vs.quantity - qty);
+          vs.snapshotAt = new Date();
+          await em.getRepository(VanStock).save(vs);
+        }
+      }
+
+      header.isFulfilled = true;
+      await em.getRepository(VoucherHeader).save(header);
+      return em.getRepository(VoucherHeader).findOneOrFail({
+        where: { id },
+        relations: { transactions: true, payments: true },
+      });
+    });
+  }
+
+  /** Resolve the rep (van owner) behind a voucher's userCode. */
+  private async resolveRep(
+    em: EntityManager,
+    userCode: string,
+  ): Promise<Rep | null> {
+    const user = await em
+      .getRepository(User)
+      .findOne({ where: { userNumber: userCode } });
+    if (!user) return null;
+    return em.getRepository(Rep).findOne({ where: { userId: user.id } });
+  }
+
+  /** Apply a single line to the rep's van_stock row (upserting it). */
+  private async applyLineToVan(
+    em: EntityManager,
+    repId: string,
+    line: VoucherTransaction,
+    effect: 'in' | 'out' | 'reserve',
+  ): Promise<void> {
+    const product = await em
+      .getRepository(ItemCart)
+      .findOne({ where: { itemNumber: line.itemNumber } });
+    if (!product) return; // unknown product → nothing to move
+    const qty = Math.round(Number(line.itemQty) || 0);
+    if (qty <= 0) return;
+
+    const repo = em.getRepository(VanStock);
+    const vs =
+      (await repo.findOne({ where: { repId, productId: product.id } })) ??
+      repo.create({ repId, productId: product.id, quantity: 0, reserved: 0 });
+
+    if (effect === 'in') vs.quantity += qty;
+    else if (effect === 'out') vs.quantity = Math.max(0, vs.quantity - qty);
+    else if (effect === 'reserve') vs.reserved += qty;
+
+    vs.snapshotAt = new Date();
+    if (effect === 'in') vs.loadedAt = new Date();
+    await repo.save(vs);
   }
 
   async update(
