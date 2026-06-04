@@ -1,14 +1,20 @@
-# Render Blueprint — deploys the VanFlow Cash-Van NestJS backend + a free
-# managed PostgreSQL database. Connect this repo at https://render.com →
-# "New +" → "Blueprint", pick this repo/branch, and Render reads this file.
+# Render Blueprint — deploys the WHOLE VanFlow stack to ONE free Render
+# account: NestJS backend + Next.js frontend + a free managed PostgreSQL.
 #
-# NOTE on the free tier:
-#   * The web service spins down after ~15 min idle (cold start on next request).
+# Connect at https://render.com → "New +" → "Blueprint", pick this repo/branch
+# (deploy/render). Render reads this file and creates all three resources.
+#
+# Because the frontend lives in a separate Git repo, it is a second free web
+# service (cross-repo `repo:` below). One account, one blueprint, $0.
+#
+# FREE-TIER NOTES:
+#   * Web services spin down after ~15 min idle (cold start on next request).
 #   * Free PostgreSQL is deleted ~30 days after creation. For a permanent free
-#     DB, create a Neon (neon.tech) Postgres and replace the DB_* envVars below
-#     with its connection values instead of the `fromDatabase` references.
-#   * The container disk is ephemeral — uploaded files (cheque images, voice
-#     clips) do NOT survive restarts. Wire object storage (R2/S3) for persistence.
+#     DB, create a Neon (neon.tech) Postgres and replace the DB_* values below.
+#   * Container disk is ephemeral — uploaded files do NOT survive restarts.
+#     Wire object storage (R2/S3) for durable uploads.
+#   * NEXT_PUBLIC_* are inlined into the frontend at BUILD time. After the API
+#     URL is known, set them on the frontend service and redeploy it.
 
 databases:
   - name: cashvan-db
@@ -18,8 +24,9 @@ databases:
     region: frankfurt
 
 services:
+  # ---- Backend API (this repo) ------------------------------------------------
   - type: web
-    name: cashvan-backend
+    name: cashvan-api
     runtime: docker
     plan: free
     region: frankfurt
@@ -27,8 +34,8 @@ services:
     dockerContext: .
     healthCheckPath: /health
     autoDeploy: true
-    # Run pending migrations + idempotent seed, then boot the API. Migrations and
-    # the seed are no-ops once applied, so this is safe on every (cold) start.
+    # Run pending migrations + idempotent seed, then boot the API. Both are
+    # no-ops once applied, so this is safe on every (cold) start.
     dockerCommand: sh -c "npm run migration:run:prod && npm run seed:prod && node dist/main.js"
     envVars:
       - key: NODE_ENV
@@ -67,8 +74,8 @@ services:
         value: "60"
       - key: RATE_LIMIT_LIMIT
         value: "100"
-      # Lock this down to your Cloudflare Pages URL after the frontend deploys,
-      # e.g. https://cash-van-dashboard.pages.dev  (comma-separated for several).
+      # Allows the frontend (and any origin) to call the API. Tighten to the
+      # frontend URL once known, e.g. https://cashvan-web.onrender.com
       - key: CORS_ORIGINS
         value: "*"
       - key: CACHE_MAX_ENTRIES
@@ -80,8 +87,35 @@ services:
       - key: JOFOTARA_MOCK
         value: "true"
       # Required in production. 64 hex chars — generate with: openssl rand -hex 32
-      # Set this value in the Render dashboard before the first deploy.
       - key: JOFOTARA_KMS_KEY
         sync: false
       - key: PHONE_HASH_SECRET
         generateValue: true
+
+  # ---- Frontend dashboard (separate repo) -------------------------------------
+  - type: web
+    name: cashvan-web
+    runtime: node
+    plan: free
+    region: frankfurt
+    repo: https://github.com/JehadEAlomour/Flow-Van-Frontend
+    branch: deploy/render
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start:render
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Point these at the backend service URL (above). Inlined at build time,
+      # so set the real values then trigger a redeploy of this service.
+      #   https://cashvan-api.onrender.com/api/v1   and   https://cashvan-api.onrender.com
+      - key: NEXT_PUBLIC_API_BASE_URL
+        sync: false
+      - key: NEXT_PUBLIC_WS_URL
+        sync: false
+      - key: NEXT_PUBLIC_DEFAULT_LOCALE
+        value: ar
+      - key: NEXT_PUBLIC_AI_ENABLED
+        value: "false"
+      - key: NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
+        sync: false
