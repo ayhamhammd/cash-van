@@ -35,8 +35,10 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     # Run pending migrations + idempotent seed, then boot the API. Both are
-    # no-ops once applied, so this is safe on every (cold) start.
-    dockerCommand: sh -c "npm run migration:run:prod && npm run seed:prod && node dist/main.js"
+    # no-ops once applied, so this is safe on every (cold) start. The chain
+    # lives in the start:deploy npm script (npm runs it via a real shell) so
+    # Render can exec it directly without shell-quoting issues.
+    dockerCommand: npm run start:deploy
     envVars:
       - key: NODE_ENV
         value: production
