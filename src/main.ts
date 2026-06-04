@@ -80,7 +80,13 @@ async function bootstrap(): Promise<void> {
   app.useGlobalFilters(new HttpExceptionFilter());
   app.useGlobalInterceptors(new TransformInterceptor());
 
-  if (config.get<string>('nodeEnv') !== 'production') {
+  // Swagger is on outside production, or in production when explicitly opted
+  // in via SWAGGER_ENABLED=true (so docs can be exposed without weakening
+  // production security/validation behaviour).
+  const swaggerEnabled =
+    config.get<string>('nodeEnv') !== 'production' ||
+    process.env.SWAGGER_ENABLED === 'true';
+  if (swaggerEnabled) {
     const swaggerCfg = new DocumentBuilder()
       .setTitle('VanFlow API')
       .setDescription(

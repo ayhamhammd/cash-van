@@ -88,6 +88,9 @@ services:
         value: "true"
       - key: JOFOTARA_MOCK
         value: "true"
+      # Expose Swagger UI at /docs in production (opt-in).
+      - key: SWAGGER_ENABLED
+        value: "true"
       # Required in production. 64 hex chars — generate with: openssl rand -hex 32
       - key: JOFOTARA_KMS_KEY
         sync: false
