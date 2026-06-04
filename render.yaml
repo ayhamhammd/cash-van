@@ -32,7 +32,7 @@ services:
     region: frankfurt
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    healthCheckPath: /health
+    healthCheckPath: /api/v1/health
     autoDeploy: true
     # Run pending migrations + idempotent seed, then boot the API. Both are
     # no-ops once applied, so this is safe on every (cold) start. The chain
