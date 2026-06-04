@@ -148,15 +148,17 @@ async function seed(): Promise<void> {
       { sku: 'AYRAN-250', nameAr: 'لبن عيران 250مل', nameEn: 'Ayran 250ml', cat: 'juice', price: 400, cost: 250, reorder: 36 },
     ];
     const productId: Record<string, string> = {};
-    for (const d of drinks) {
-      const digits = d.sku.replace(/[^0-9]/g, '').padEnd(9, '0').slice(0, 9);
+    for (let i = 0; i < drinks.length; i++) {
+      const d = drinks[i];
+      // Unique EAN-13-style barcode per item (628 prefix + zero-padded sequence).
+      const barcode = `628${String(i + 1).padStart(10, '0')}`;
       const row = await upsert(
         itemRepo,
         { itemNumber: d.sku },
         {
           itemNumber: d.sku,
           sku: d.sku,
-          barcode: `628${digits}`,
+          barcode,
           name: d.nameEn,
           nameAr: d.nameAr,
           nameEn: d.nameEn,
