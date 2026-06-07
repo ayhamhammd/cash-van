@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -24,6 +25,7 @@ import {
 import { VouchersService } from './vouchers.service';
 import { TransactionKindsService } from './transaction-kinds.service';
 import { CreateVoucherDto } from './dto/create-voucher.dto';
+import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
 import { CreateChequeDto } from './dto/create-cheque.dto';
 import { CreateTransactionKindDto } from './dto/create-transaction-kind.dto';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
@@ -68,10 +70,14 @@ export class VouchersController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List vouchers', description: 'List all vouchers.' })
+  @ApiOperation({
+    summary: 'List vouchers',
+    description:
+      'List vouchers, optionally filtered by transKind, userCode, store and date range.',
+  })
   @ApiOkResponse({ description: 'Voucher list' })
-  list() {
-    return this.vouchersService.list();
+  list(@Query() query: ListVouchersQueryDto) {
+    return this.vouchersService.list(query);
   }
 
   @Get(':id')

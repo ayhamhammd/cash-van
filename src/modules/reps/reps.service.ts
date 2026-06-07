@@ -1,12 +1,14 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, ILike, IsNull, Not, Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { Brackets, DataSource, ILike, IsNull, Not, Repository } from 'typeorm';
 
 import { Rep } from './entities/rep.entity';
+import { Warehouse } from '../warehouses/entities/warehouse.entity';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
@@ -23,6 +25,8 @@ export class RepsService {
   constructor(
     @InjectRepository(Rep)
     private readonly repo: Repository<Rep>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
 
   async list(query: ListRepsQuery): Promise<{ items: Rep[]; total: number }> {
@@ -86,11 +90,52 @@ export class RepsService {
     return this.repo.findOne({ where: { code, deletedAt: IsNull() } });
   }
 
+  /**
+   * Create a salesman. When the caller opts in with `createStore` ("add with
+   * store"), we also provision a store (warehouse) for him in the same
+   * transaction: the store number mirrors the salesman code and the store name
+   * mirrors the salesman name, then it is linked back as the rep's van.
+   */
   async create(dto: CreateRepDto): Promise<Rep> {
     if (dto.userId) await this.assertUserUnlinked(dto.userId);
     if (dto.code) await this.assertCodeUnique(dto.code);
-    const rep = this.repo.create(dto);
-    return this.repo.save(rep);
+
+    if (dto.createStore) {
+      if (!dto.code) {
+        throw new BadRequestException(
+          'A salesman code is required to create a store with the same number',
+        );
+      }
+      if (dto.vanId) {
+        throw new BadRequestException(
+          'Cannot use "add with store" together with an existing vanId',
+        );
+      }
+    }
+
+    return this.dataSource.transaction(async (em) => {
+      const repRepo = em.getRepository(Rep);
+      const rep = repRepo.create(dto);
+      await repRepo.save(rep);
+
+      // "Add with store": store number == salesman code, name == salesman name.
+      if (dto.createStore && rep.code) {
+        const whRepo = em.getRepository(Warehouse);
+        const exists = await whRepo.exist({ where: { whNumber: rep.code } });
+        if (exists) {
+          throw new ConflictException(`Store ${rep.code} already exists`);
+        }
+        const store = whRepo.create({
+          whNumber: rep.code,
+          whName: rep.nameAr || rep.nameEn || rep.code,
+        });
+        await whRepo.save(store);
+        rep.vanId = store.id;
+        await repRepo.save(rep);
+      }
+
+      return rep;
+    });
   }
 
   async update(id: string, dto: UpdateRepDto): Promise<Rep> {

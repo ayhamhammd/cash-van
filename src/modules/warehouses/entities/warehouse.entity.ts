@@ -10,6 +10,9 @@ export class Warehouse extends BaseEntity {
   @Column({ name: 'wh_name', type: 'text' })
   whName!: string;
 
+  @Column({ name: 'wh_address', type: 'text', nullable: true })
+  whAddress?: string | null;
+
   @Column({
     name: 'wh_credit_box',
     type: 'numeric',

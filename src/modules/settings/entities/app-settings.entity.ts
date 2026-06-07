@@ -5,6 +5,9 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
+/** Whether unit prices already include tax (INCLUSIVE) or tax is added on top (EXCLUSIVE). */
+export type TaxCalcMethod = 'INCLUSIVE' | 'EXCLUSIVE';
+
 @Entity({ name: 'app_settings' })
 export class AppSettings {
   /** Single-row table — id is always 1 (enforced by CHECK constraint at DB level). */
@@ -35,6 +38,10 @@ export class AppSettings {
 
   @Column({ name: 'seller_city_code', type: 'text', nullable: true })
   sellerCityCode?: string | null;
+
+  /** How prices relate to tax for this company (price tax-inclusive vs exclusive). */
+  @Column({ name: 'tax_calc_method', type: 'text', default: 'EXCLUSIVE' })
+  taxCalcMethod!: TaxCalcMethod;
 
   @Column({ type: 'text', default: 'Asia/Amman' })
   timezone!: string;

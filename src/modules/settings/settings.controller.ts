@@ -1,6 +1,21 @@
-import { Body, Controller, Get, Patch, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  FileTypeValidator,
+  Get,
+  MaxFileSizeValidator,
+  ParseFilePipe,
+  Patch,
+  Post,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
@@ -40,6 +55,39 @@ export class SettingsController {
   @ApiOkResponse({ description: 'Updated app settings' })
   update(@Body() dto: UpdateAppSettingsDto) {
     return this.settings.update(dto);
+  }
+
+  @Post('logo')
+  @UseInterceptors(
+    FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024 } }),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
+  })
+  @ApiOperation({
+    summary: 'Upload company logo',
+    description:
+      'Upload a company logo image (PNG/JPEG/WebP/SVG, max 2 MB). Stored inline on the settings row and returned as `logoUrl`. Admin only.',
+  })
+  @ApiOkResponse({ description: 'Updated app settings with the new logo' })
+  uploadLogo(
+    @UploadedFile(
+      new ParseFilePipe({
+        validators: [
+          new MaxFileSizeValidator({ maxSize: 2 * 1024 * 1024 }),
+          new FileTypeValidator({
+            fileType: /^image\/(png|jpe?g|webp|gif|svg\+xml)$/,
+          }),
+        ],
+      }),
+    )
+    file: Express.Multer.File,
+  ) {
+    return this.settings.setLogo(file);
   }
 
   @Patch('jofotara')

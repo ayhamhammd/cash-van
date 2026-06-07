@@ -51,6 +51,9 @@ async function seed(): Promise<void> {
       { transKind: 'ORDER', transName: 'طلبية', sign: 0 }, // reserve until fulfilled
       { transKind: 'TRANSFER_IN', transName: 'تحميل المركبة', sign: 1 }, // van in
       { transKind: 'TRANSFER_OUT', transName: 'تنزيل المركبة', sign: -1 }, // van out
+      { transKind: 'TRANSFER', transName: 'تحويل بين المخازن', sign: 0 }, // stock → stock (uses from/to store)
+      { transKind: 'IN', transName: 'إدخال للمخزن', sign: 1 }, // stock in (to_store)
+      { transKind: 'OUT', transName: 'إخراج من المخزن', sign: -1 }, // stock out (from_store)
       { transKind: 'PURCHASE', transName: 'شراء', sign: 1 }, // warehouse in
       { transKind: 'ADJUSTMENT', transName: 'تسوية', sign: 0 },
       { transKind: 'PAYMENT_IN', transName: 'سند قبض', sign: 0 },

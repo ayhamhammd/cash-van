@@ -39,6 +39,10 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'trans_kind', type: 'text' })
   transKind!: string;
 
+  /** For RETURN vouchers: the original SALE voucher number this return is against. */
+  @Column({ name: 'reference_voucher_number', type: 'text', nullable: true })
+  referenceVoucherNumber?: string | null;
+
   @ManyToOne(() => Customer, { onDelete: 'RESTRICT', nullable: true })
   @JoinColumn({ name: 'customer_number', referencedColumnName: 'customerNumber' })
   customer?: Customer | null;

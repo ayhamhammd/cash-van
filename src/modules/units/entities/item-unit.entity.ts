@@ -42,6 +42,14 @@ export class ItemUnit {
   @Column({ type: 'text' })
   barcode!: string;
 
+  /**
+   * Pieces this unit represents FOR THIS ITEM. Defaults to the unit master's
+   * baseQty on attach, but can be overridden per item (the same "box" unit may
+   * hold a different count for different products).
+   */
+  @Column({ name: 'qty', type: 'integer', default: 1 })
+  qty!: number;
+
   @Column({
     name: 'sale_price',
     type: 'numeric',

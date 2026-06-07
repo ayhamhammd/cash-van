@@ -2,7 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
-import { AppSettings } from './entities/app-settings.entity';
+import { AppSettings, TaxCalcMethod } from './entities/app-settings.entity';
 import { UpdateAppSettingsDto } from './dto/update-settings.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { decryptSecret, encryptSecret, maskSecret } from '../../common/crypto/secret.util';
@@ -17,6 +17,7 @@ export interface AppSettingsView {
   sellerAddress: string | null;
   sellerPhone: string | null;
   sellerCityCode: string | null;
+  taxCalcMethod: TaxCalcMethod;
   timezone: string;
   locale: string;
   aiChatQuota: number;
@@ -103,6 +104,19 @@ export class SettingsService {
     return this.toView(row);
   }
 
+  /**
+   * Store an uploaded company logo. The image is kept inline as a base64 data
+   * URL on the single settings row, so it survives redeploys without any object
+   * storage / writable-disk dependency (deployments use an ephemeral filesystem).
+   */
+  async setLogo(file: Express.Multer.File): Promise<AppSettingsView> {
+    const row = await this.requireRow();
+    row.logoUrl = `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return this.toView(row);
+  }
+
   async updateJoFotara(dto: UpdateJoFotaraDto): Promise<JoFotaraUpdateView> {
     const row = await this.requireRow();
     row.jofotaraClientId = dto.clientId;
@@ -136,6 +150,7 @@ export class SettingsService {
       sellerAddress: row.sellerAddress ?? null,
       sellerPhone: row.sellerPhone ?? null,
       sellerCityCode: row.sellerCityCode ?? null,
+      taxCalcMethod: row.taxCalcMethod,
       timezone: row.timezone,
       locale: row.locale,
       aiChatQuota: row.aiChatQuota,

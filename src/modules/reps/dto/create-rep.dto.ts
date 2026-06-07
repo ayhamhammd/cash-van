@@ -57,6 +57,17 @@ export class CreateRepDto {
   @IsBoolean()
   isActive?: boolean;
 
+  @ApiPropertyOptional({
+    default: false,
+    description:
+      'When true ("add with store"), auto-create a store (warehouse) for ' +
+      'this salesman. The store number equals the salesman code and the ' +
+      'store name equals the salesman name. Requires `code` to be set.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  createStore?: boolean;
+
   @ApiPropertyOptional({ example: '2024-01-15' })
   @IsOptional()
   @IsDateString()

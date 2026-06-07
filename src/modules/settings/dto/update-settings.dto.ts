@@ -1,5 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsIn, IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import type { TaxCalcMethod } from '../entities/app-settings.entity';
+
+const TAX_CALC_METHODS: TaxCalcMethod[] = ['INCLUSIVE', 'EXCLUSIVE'];
 
 export class UpdateAppSettingsDto {
   @ApiPropertyOptional({ example: 'C001', description: 'Single-tenant company id (mobile BFF)' })
@@ -49,6 +52,16 @@ export class UpdateAppSettingsDto {
   @IsString()
   @MaxLength(16)
   sellerCityCode?: string;
+
+  @ApiPropertyOptional({
+    enum: TAX_CALC_METHODS,
+    example: 'EXCLUSIVE',
+    description:
+      'Whether unit prices already include tax (INCLUSIVE) or tax is added on top (EXCLUSIVE).',
+  })
+  @IsOptional()
+  @IsIn(TAX_CALC_METHODS)
+  taxCalcMethod?: TaxCalcMethod;
 
   @ApiPropertyOptional({ example: 'Asia/Amman' })
   @IsOptional()

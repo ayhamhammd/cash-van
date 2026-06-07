@@ -12,6 +12,12 @@ export class CreateWarehouseDto {
   @Length(2, 200)
   whName!: string;
 
+  @ApiPropertyOptional({ example: 'Amman, Jordan', description: 'Store address' })
+  @IsOptional()
+  @IsString()
+  @Length(0, 512)
+  whAddress?: string;
+
   @ApiPropertyOptional({ default: '0' })
   @IsOptional()
   @IsNumberString()
