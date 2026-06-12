@@ -3,7 +3,10 @@ import { IsDateString, IsOptional, IsString } from 'class-validator';
 
 /** Optional filters for GET /vouchers. */
 export class ListVouchersQueryDto {
-  @ApiPropertyOptional({ description: 'Filter by transaction kind (e.g. SALE).' })
+  @ApiPropertyOptional({
+    description:
+      'Filter by transaction kind. Accepts one kind (SALE) or a comma list (SALE,RETURN,ORDER) — used by the Operations hub sub-tabs.',
+  })
   @IsOptional()
   @IsString()
   transKind?: string;

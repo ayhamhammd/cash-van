@@ -147,7 +147,10 @@ export class CreateVoucherDto {
   transKind!: string;
 
   @ApiPropertyOptional({
-    description: 'For RETURN: the original SALE voucher number this return is against.',
+    description:
+      'Multi-purpose reference. RETURN: the original SALE voucher number. ' +
+      'SALE: the ORDER voucher it was converted from. ' +
+      "PURCHASE: the supplier's own invoice number.",
   })
   @IsOptional()
   @IsString()

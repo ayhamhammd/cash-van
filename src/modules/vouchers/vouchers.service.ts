@@ -458,7 +458,19 @@ export class VouchersService {
       .groupBy('h.id')
       .orderBy('h.in_date', 'DESC');
 
-    if (q.transKind) qb.andWhere('h.trans_kind = :tk', { tk: q.transKind });
+    if (q.transKind) {
+      // Accept a single kind or a comma list (SALE,RETURN,ORDER) for the
+      // Operations hub sub-tabs.
+      const kinds = q.transKind
+        .split(',')
+        .map((k) => k.trim())
+        .filter(Boolean);
+      if (kinds.length === 1) {
+        qb.andWhere('h.trans_kind = :tk', { tk: kinds[0] });
+      } else if (kinds.length > 1) {
+        qb.andWhere('h.trans_kind IN (:...tks)', { tks: kinds });
+      }
+    }
     if (q.userCode) qb.andWhere('h.user_code = :uc', { uc: q.userCode });
     if (q.customerNumber)
       qb.andWhere('h.customer_number = :cn', { cn: q.customerNumber });

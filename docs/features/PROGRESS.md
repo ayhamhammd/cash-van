@@ -15,6 +15,7 @@ _Last updated: 2026-06-12 (F10 implemented: backend + dashboard done & verified 
 | F2 | Targets & Commissions | planned | planned | planned | **planned** |
 | F4 | Cheque Lifecycle | planned | planned | planned | **planned** |
 | F7 | Van Stock Audit | planned | planned | planned | **planned** |
+| F11 | Operations Hub (العمليات) | **done** | **done** | n/a | **done** |
 
 ## F10 — Approvals, Notifications & Salesman Permissions
 - [x] BE: permission keys in `users.permissions` (`vouchers.return.direct`, `vouchers.discount.direct`, `vouchers.discount.max:<pct>`, `vouchers.priceOverride`)
@@ -63,6 +64,19 @@ _Last updated: 2026-06-12 (F10 implemented: backend + dashboard done & verified 
 - [ ] FE: `/cheques` board (due / overdue / bounced columns) + actions
 - [ ] MOB: cheque reminders list ("due tomorrow") on Home
 - [ ] E2E: register cheque → due reminder → mark bounced → customer blocked
+
+## F11 — Operations Hub (العمليات) — DONE (verified in browser 2026-06-12)
+- [x] BE: `transKind` comma-list filter on `GET /vouchers` (single value still works)
+- [x] BE: verified ORDER posts regardless of stock — `ORD-MAIN000033` posted at qty 99999 (sign 0 ⇒ no guard; reserve is best-effort)
+- [x] BE: Swagger note — `referenceVoucherNumber` = RETURN original / SALE source-order / PURCHASE supplier invoice
+- [x] FE: السندات nav removed → العمليات added; `/vouchers*` now redirect to `/operations*`
+- [x] FE: `/operations` — 3 sub-tabs (المبيعات / حركة المخزون / المشتريات), per-tab kind chips + store filter, reused list
+- [x] FE: editor handles every kind (existing NewVoucherView), now **always `isPosted:true`** from the dashboard
+- [x] FE: stock preflight hints scoped to `checksFromStock` (SALE/OUT/TRANSFER from-store only); ORDER/IN/RETURN/PURCHASE never checked
+- [x] FE: RETURN against original sale prefills lines (existing); TRANSFER from-store guard verified (EMPTYSTORE→400)
+- [x] FE: **Convert ORDER → SALE** — prefilled unsaved editor (kind/customer/store/lines), save → SALE posted + order fulfilled + cross-link (`INV-MAIN834429` ↔ `ORD-MAIN000032`, order shows تم التحويل)
+- [x] FE: PURCHASE — vendor + supplier invoice number (`VEN-000001` / `SUPP-INV-7788` posted)
+- [x] i18n `ops.*` (ar/en); typecheck + lint + build + test green; browser E2E across all 3 tabs + convert
 
 ## F7 — Van Stock Audit
 - [ ] BE: `van_stock_audits` + `van_stock_audit_lines` entities + migration

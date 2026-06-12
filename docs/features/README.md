@@ -18,6 +18,7 @@ Detailed build specs for the next wave of features, written for the three codeba
 | F5 | Speeding & Driver Behavior | [F5-driver-behavior.md](F5-driver-behavior.md) | S | — |
 | F7 | Van Stock Audit (Spot Count) | [F7-van-stock-audit.md](F7-van-stock-audit.md) | M | — |
 | F10 | Approvals, Notifications & Salesman Permissions | [F10-approvals-notifications-permissions.md](F10-approvals-notifications-permissions.md) | **L** | build **first** — F4/F2 reuse its notification bus |
+| F11 | Operations Hub (العمليات) — replaces the Vouchers tab | [F11-operations-hub.md](F11-operations-hub.md) | M–L | none (F10 already live) |
 
 ## Status
 
