@@ -17,10 +17,11 @@ import type { CustomerType } from '../entities/customer.entity';
 const TYPES: CustomerType[] = ['CASH', 'CREDIT', 'WHOLESALE', 'RETAIL'];
 
 export class CreateCustomerDto {
-  @ApiProperty()
+  @ApiPropertyOptional({ description: 'Auto-generated (CUST-000001) when omitted.' })
+  @IsOptional()
   @IsString()
   @Length(1, 32)
-  customerNumber!: string;
+  customerNumber?: string;
 
   @ApiProperty({ description: 'Display name (legacy field)' })
   @IsString()

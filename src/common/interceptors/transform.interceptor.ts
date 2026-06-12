@@ -3,6 +3,7 @@ import {
   ExecutionContext,
   Injectable,
   NestInterceptor,
+  StreamableFile,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
@@ -22,11 +23,16 @@ export class TransformInterceptor<T>
     next: CallHandler<T>,
   ): Observable<ApiResponse<T>> {
     return next.handle().pipe(
-      map((data) => ({
-        success: true,
-        data,
-        timestamp: new Date().toISOString(),
-      })),
+      map((data) =>
+        // Streamed file downloads must not be wrapped in the JSON envelope.
+        data instanceof StreamableFile
+          ? (data as unknown as ApiResponse<T>)
+          : {
+              success: true,
+              data,
+              timestamp: new Date().toISOString(),
+            },
+      ),
     );
   }
 }

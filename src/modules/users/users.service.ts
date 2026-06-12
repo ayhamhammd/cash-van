@@ -38,6 +38,7 @@ export class UsersService {
       nameAr: dto.nameAr ?? null,
       nameEn: dto.nameEn ?? null,
       email: dto.email ?? null,
+      permissions: dto.permissions ?? [],
       isActive: dto.isActive ?? true,
       passwordHash,
       canMakeVoucher: dto.canMakeVoucher ?? false,

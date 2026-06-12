@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsEmail,
   IsIn,
@@ -65,6 +67,16 @@ export class CreateUserDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Granular dashboard permission keys (e.g. "vouchers.create").',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  permissions?: string[];
 
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canMakeVoucher?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditVoucher?: boolean;

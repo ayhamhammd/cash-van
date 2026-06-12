@@ -443,6 +443,8 @@ export class VouchersService {
 
     if (q.transKind) qb.andWhere('h.trans_kind = :tk', { tk: q.transKind });
     if (q.userCode) qb.andWhere('h.user_code = :uc', { uc: q.userCode });
+    if (q.customerNumber)
+      qb.andWhere('h.customer_number = :cn', { cn: q.customerNumber });
     if (q.dateFrom) qb.andWhere('h.in_date >= :df', { df: q.dateFrom });
     if (q.dateTo) qb.andWhere('h.in_date < (:dt::date + 1)', { dt: q.dateTo });
     if (q.store) {
@@ -497,16 +499,45 @@ export class VouchersService {
    * signedQty is kept for backward compatibility; the item_balance view now
    * reads from_store_number/to_store_number, so transfers carry signedQty = 0.
    */
-  /** Next global serial voucher number: <prefix>-<storeNumber><6-digit serial>. */
+  /**
+   * Preview the next voucher number WITHOUT consuming the sequence — peeks
+   * `last_value`/`is_called` so the dashboard can show the real number before
+   * saving. The created voucher gets this same number (single-cashier safe).
+   */
+  async previewVoucherNumber(
+    transKind: string,
+    store: string,
+  ): Promise<{ voucherNumber: string }> {
+    const rows: Array<{ last_number: string }> = await this.dataSource.query(
+      `SELECT last_number FROM voucher_counters WHERE store_number = $1 AND trans_kind = $2`,
+      [store, transKind],
+    );
+    const next = (rows[0] ? Number(rows[0].last_number) : 0) + 1;
+    const seq = String(next).padStart(6, '0');
+    const prefix =
+      VOUCHER_PREFIX[transKind] ?? transKind.slice(0, 3).toUpperCase();
+    return { voucherNumber: `${prefix}-${store}${seq}` };
+  }
+
+  /**
+   * Next serial number for THIS store + kind (a separate sequence per pair),
+   * atomically incremented via an upsert on `voucher_counters`.
+   * Format: <prefix>-<storeNumber><6-digit serial>.
+   */
   private async nextVoucherNumber(
     em: EntityManager,
     transKind: string,
     store: string,
   ): Promise<string> {
-    const rows: Array<{ n: string }> = await em.query(
-      `SELECT nextval('voucher_number_seq') AS n`,
+    const rows: Array<{ last_number: string }> = await em.query(
+      `INSERT INTO voucher_counters (store_number, trans_kind, last_number)
+         VALUES ($1, $2, 1)
+       ON CONFLICT (store_number, trans_kind)
+         DO UPDATE SET last_number = voucher_counters.last_number + 1
+       RETURNING last_number`,
+      [store, transKind],
     );
-    const seq = String(rows[0]?.n ?? '0').padStart(6, '0');
+    const seq = String(rows[0]?.last_number ?? '1').padStart(6, '0');
     const prefix = VOUCHER_PREFIX[transKind] ?? transKind.slice(0, 3).toUpperCase();
     return `${prefix}-${store}${seq}`;
   }

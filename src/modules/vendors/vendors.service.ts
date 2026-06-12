@@ -21,13 +21,23 @@ export class VendorsService {
   ) {}
 
   async create(dto: CreateVendorDto): Promise<Vendor> {
-    const exists = await this.vendorsRepo.exist({
-      where: { vendorNumber: dto.vendorNumber },
-    });
+    const vendorNumber =
+      dto.vendorNumber?.trim() || (await this.nextVendorNumber());
+    const exists = await this.vendorsRepo.exist({ where: { vendorNumber } });
     if (exists) {
-      throw new ConflictException(`Vendor ${dto.vendorNumber} already exists`);
+      throw new ConflictException(`Vendor ${vendorNumber} already exists`);
     }
-    return this.vendorsRepo.save(this.vendorsRepo.create(dto));
+    return this.vendorsRepo.save(
+      this.vendorsRepo.create({ ...dto, vendorNumber }),
+    );
+  }
+
+  /** Next serial vendor number: VEN-000001. */
+  private async nextVendorNumber(): Promise<string> {
+    const rows: Array<{ n: string }> = await this.vendorsRepo.query(
+      "SELECT nextval('vendor_number_seq') AS n",
+    );
+    return `VEN-${String(rows[0]?.n ?? '0').padStart(6, '0')}`;
   }
 
   async update(id: string, dto: UpdateVendorDto): Promise<Vendor> {

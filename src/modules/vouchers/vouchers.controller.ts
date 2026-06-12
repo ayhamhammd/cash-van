@@ -26,6 +26,7 @@ import { VouchersService } from './vouchers.service';
 import { TransactionKindsService } from './transaction-kinds.service';
 import { CreateVoucherDto } from './dto/create-voucher.dto';
 import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
+import { PreviewVoucherNumberQueryDto } from './dto/preview-number.query';
 import { CreateChequeDto } from './dto/create-cheque.dto';
 import { CreateTransactionKindDto } from './dto/create-transaction-kind.dto';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
@@ -58,6 +59,17 @@ export class VouchersController {
   }
 
   // ---- Vouchers --------------------------------------------------------------
+  @Get('next-number')
+  @ApiOperation({
+    summary: 'Preview next voucher number',
+    description:
+      'Returns the serial number the next voucher of this kind/store will get, without consuming the sequence.',
+  })
+  @ApiOkResponse({ description: 'The next voucher number' })
+  previewNumber(@Query() query: PreviewVoucherNumberQueryDto) {
+    return this.vouchersService.previewVoucherNumber(query.transKind, query.store);
+  }
+
   @Post()
   @RequirePermissions('canMakeVoucher')
   @ApiOperation({

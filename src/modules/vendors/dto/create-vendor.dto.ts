@@ -2,10 +2,11 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsNumberString, IsOptional, IsPhoneNumber, IsString, Length } from 'class-validator';
 
 export class CreateVendorDto {
-  @ApiProperty({ example: 'V-2001', description: 'Unique vendor number' })
+  @ApiPropertyOptional({ description: 'Auto-generated (VEN-000001) when omitted.' })
+  @IsOptional()
   @IsString()
   @Length(1, 32)
-  vendorNumber!: string;
+  vendorNumber?: string;
 
   @ApiProperty({ example: 'Acme Supplies', description: 'Vendor display name' })
   @IsString()

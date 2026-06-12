@@ -12,12 +12,15 @@ import { parse } from 'csv-parse/sync';
 import { Customer } from './entities/customer.entity';
 import { CustomerAiProfile } from './entities/customer-ai-profile.entity';
 import { CustomerVisit } from './entities/customer-visit.entity';
+import { CustomerAttachment } from './entities/customer-attachment.entity';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { ListCustomersQuery } from './dto/list-customers.query';
 import { CreateVisitDto } from './dto/create-visit.dto';
 import { hashPhone } from '../../common/utils/phone-hash.util';
 import { JobsService } from '../../common/jobs/jobs.service';
+import { StorageService } from '../../common/storage/storage.service';
+import { randomUUID } from 'crypto';
 
 export interface CustomerInsights {
   customer: Customer;
@@ -46,22 +49,34 @@ export class CustomersService {
     private readonly aiProfiles: Repository<CustomerAiProfile>,
     @InjectRepository(CustomerVisit)
     private readonly visits: Repository<CustomerVisit>,
+    @InjectRepository(CustomerAttachment)
+    private readonly attachments: Repository<CustomerAttachment>,
     private readonly jobs: JobsService,
+    private readonly storage: StorageService,
   ) {}
 
   async create(dto: CreateCustomerDto): Promise<Customer> {
-    const exists = await this.customers.exist({
-      where: { customerNumber: dto.customerNumber },
-    });
+    const customerNumber =
+      dto.customerNumber?.trim() || (await this.nextCustomerNumber());
+    const exists = await this.customers.exist({ where: { customerNumber } });
     if (exists) {
-      throw new ConflictException(`Customer ${dto.customerNumber} already exists`);
+      throw new ConflictException(`Customer ${customerNumber} already exists`);
     }
     const entity = this.customers.create({
       ...dto,
+      customerNumber,
       nameAr: dto.nameAr ?? dto.customerName,
       phoneHash: hashPhone(dto.phone),
     });
     return this.customers.save(entity);
+  }
+
+  /** Next serial customer number: CUST-000001. */
+  private async nextCustomerNumber(): Promise<string> {
+    const rows: Array<{ n: string }> = await this.customers.query(
+      "SELECT nextval('customer_number_seq') AS n",
+    );
+    return `CUST-${String(rows[0]?.n ?? '0').padStart(6, '0')}`;
   }
 
   async update(id: string, dto: UpdateCustomerDto): Promise<Customer> {
@@ -257,5 +272,99 @@ export class CustomersService {
     const entity = this.aiProfiles.create({ ...profile, updatedAt: new Date() });
     await this.aiProfiles.save(entity);
     return this.aiProfiles.findOneOrFail({ where: { customerId: profile.customerId } });
+  }
+
+  // ---- Attachments (documents / scans / data sheets) --------------------
+
+  /** Accepted upload types: documents + spreadsheets/images. */
+  private static readonly ATTACHMENT_MIME_ALLOW = new Set<string>([
+    'application/pdf',
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+    'text/csv',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ]);
+
+  private static readonly ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+
+  /** List a customer's attachments, newest first. */
+  async listAttachments(customerId: string): Promise<CustomerAttachment[]> {
+    await this.findOneOrThrow(customerId);
+    return this.attachments.find({
+      where: { customerId },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  /** Store an uploaded file against a customer and record its metadata. */
+  async addAttachment(
+    customerId: string,
+    file: Express.Multer.File | undefined,
+    uploadedBy: string | null,
+  ): Promise<CustomerAttachment> {
+    await this.findOneOrThrow(customerId);
+    if (!file) {
+      throw new BadRequestException('No file provided');
+    }
+    if (!CustomersService.ATTACHMENT_MIME_ALLOW.has(file.mimetype)) {
+      throw new BadRequestException(`Unsupported file type: ${file.mimetype}`);
+    }
+    if (file.size > CustomersService.ATTACHMENT_MAX_BYTES) {
+      throw new BadRequestException('File too large (max 10 MB)');
+    }
+
+    const original = this.sanitizeFilename(file.originalname || 'file');
+    const key = `customers/${customerId}/${randomUUID()}-${original}`;
+    const url = await this.storage.save(key, file.buffer);
+
+    const row = this.attachments.create({
+      customerId,
+      storageKey: key,
+      url,
+      originalName: file.originalname || original,
+      mimeType: file.mimetype,
+      sizeBytes: file.size,
+      uploadedBy: uploadedBy ?? null,
+    });
+    return this.attachments.save(row);
+  }
+
+  /** Fetch an attachment row + its bytes for an authenticated download. */
+  async getAttachmentFile(
+    customerId: string,
+    attachmentId: string,
+  ): Promise<{ attachment: CustomerAttachment; buffer: Buffer }> {
+    const row = await this.attachments.findOne({
+      where: { id: attachmentId, customerId },
+    });
+    if (!row) {
+      throw new NotFoundException('Attachment not found');
+    }
+    const buffer = await this.storage.read(row.storageKey);
+    return { attachment: row, buffer };
+  }
+
+  /** Delete an attachment (its bytes and the row). */
+  async removeAttachment(customerId: string, attachmentId: string): Promise<void> {
+    const row = await this.attachments.findOne({
+      where: { id: attachmentId, customerId },
+    });
+    if (!row) {
+      throw new NotFoundException('Attachment not found');
+    }
+    await this.storage.delete(row.storageKey);
+    await this.attachments.delete({ id: attachmentId });
+  }
+
+  /** Strip path separators / control chars so the storage key stays safe. */
+  private sanitizeFilename(name: string): string {
+    return name
+      .replace(/[/\\?%*:|"<>\x00-\x1f]/g, '_')
+      .replace(/\s+/g, '_')
+      .slice(0, 120);
   }
 }

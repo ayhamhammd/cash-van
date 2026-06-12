@@ -10,11 +10,14 @@ import {
   Patch,
   Post,
   Query,
+  Res,
+  StreamableFile,
   UploadedFile,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -28,6 +31,7 @@ import {
 } from '@nestjs/swagger';
 
 import { CustomersService } from './customers.service';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { ListCustomersQuery } from './dto/list-customers.query';
@@ -167,6 +171,84 @@ export class CustomersController {
   @ApiCreatedResponse({ description: 'Import summary (created/updated/skipped counts)' })
   import(@UploadedFile() file: Express.Multer.File) {
     return this.customers.importCsv(file.buffer);
+  }
+
+  @Get(':id/attachments')
+  @ApiOperation({
+    summary: 'List customer attachments',
+    description: 'Files (documents, scans, data sheets) attached to a customer.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
+  @ApiOkResponse({ description: 'Attachment metadata, newest first' })
+  listAttachments(@Param('id', ParseUUIDPipe) id: string) {
+    return this.customers.listAttachments(id);
+  }
+
+  @Post(':id/attachments')
+  @Roles('admin', 'manager')
+  @UseInterceptors(FileInterceptor('file'))
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
+  })
+  @ApiOperation({
+    summary: 'Upload customer attachment',
+    description:
+      'Attach a file (PDF, image, CSV/Excel, Word — max 10 MB) to a customer. Admin/manager only.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
+  @ApiCreatedResponse({ description: 'The stored attachment' })
+  addAttachment(
+    @Param('id', ParseUUIDPipe) id: string,
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser('sub') userId: string,
+  ) {
+    return this.customers.addAttachment(id, file, userId ?? null);
+  }
+
+  @Get(':id/attachments/:attachmentId/download')
+  @ApiOperation({
+    summary: 'Download a customer attachment',
+    description: 'Streams the stored file bytes (authenticated).',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
+  @ApiParam({ name: 'attachmentId', format: 'uuid', description: 'Attachment id' })
+  async downloadAttachment(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('attachmentId', ParseUUIDPipe) attachmentId: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { attachment, buffer } = await this.customers.getAttachmentFile(
+      id,
+      attachmentId,
+    );
+    res.set({
+      'Content-Type': attachment.mimeType,
+      'Content-Disposition': `attachment; filename="${encodeURIComponent(
+        attachment.originalName,
+      )}"`,
+    });
+    return new StreamableFile(buffer);
+  }
+
+  @Delete(':id/attachments/:attachmentId')
+  @Roles('admin', 'manager')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Delete customer attachment',
+    description: 'Remove an attached file (bytes + record). Admin/manager only.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
+  @ApiParam({ name: 'attachmentId', format: 'uuid', description: 'Attachment id' })
+  @ApiNoContentResponse({ description: 'Attachment deleted' })
+  removeAttachment(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('attachmentId', ParseUUIDPipe) attachmentId: string,
+  ) {
+    return this.customers.removeAttachment(id, attachmentId);
   }
 
   @Delete(':id')

@@ -21,6 +21,8 @@ export interface LoginResponse {
     /** Field-rep id linked to this user, or null if not a rep. */
     repId: string | null;
     permissions: Record<string, boolean>;
+    /** Granular dashboard permission keys. */
+    permKeys: string[];
   };
 }
 
@@ -57,6 +59,7 @@ export class AuthService {
     const repId = rep?.id ?? null;
 
     const permissions = this.extractPermissions(user);
+    const permKeys = user.permissions ?? [];
     const payload: JwtPayload = {
       sub: user.id,
       v: 2,
@@ -65,6 +68,7 @@ export class AuthService {
       role: user.role ?? 'viewer',
       repId,
       permissions,
+      permKeys,
     };
     const accessToken = await this.jwtService.signAsync(payload);
 
@@ -78,6 +82,7 @@ export class AuthService {
         role: user.role ?? 'viewer',
         repId,
         permissions,
+        permKeys,
       },
     };
   }

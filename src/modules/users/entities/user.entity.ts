@@ -64,4 +64,12 @@ export class User extends BaseEntity {
 
   @Column({ name: 'can_edit_expiry', type: 'boolean', default: false })
   canEditExpiry!: boolean;
+
+  /**
+   * Granular dashboard permission keys (e.g. "vouchers.create", "items.edit").
+   * The flexible, admin-managed permission set for dashboard users. Admin role
+   * implicitly has everything regardless of this list.
+   */
+  @Column({ name: 'permissions', type: 'jsonb', default: () => "'[]'::jsonb" })
+  permissions!: string[];
 }

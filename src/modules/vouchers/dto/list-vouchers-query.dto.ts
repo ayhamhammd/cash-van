@@ -13,6 +13,11 @@ export class ListVouchersQueryDto {
   @IsString()
   userCode?: string;
 
+  @ApiPropertyOptional({ description: 'Filter by customer number (for statements).' })
+  @IsOptional()
+  @IsString()
+  customerNumber?: string;
+
   @ApiPropertyOptional({ description: 'Filter by a store/warehouse touched by any line.' })
   @IsOptional()
   @IsString()

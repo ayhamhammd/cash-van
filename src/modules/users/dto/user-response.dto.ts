@@ -18,6 +18,7 @@ export class UserResponseDto {
   @ApiProperty() canEditCustomerCredit!: boolean;
   @ApiProperty() canAddItems!: boolean;
   @ApiProperty() canEditExpiry!: boolean;
+  @ApiProperty({ type: [String] }) permissions!: string[];
   @ApiProperty() createdAt!: Date;
   @ApiProperty() updatedAt!: Date;
 
@@ -39,6 +40,7 @@ export class UserResponseDto {
       canEditCustomerCredit: u.canEditCustomerCredit,
       canAddItems: u.canAddItems,
       canEditExpiry: u.canEditExpiry,
+      permissions: u.permissions ?? [],
       createdAt: u.createdAt,
       updatedAt: u.updatedAt,
     };
