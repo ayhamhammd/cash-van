@@ -78,4 +78,20 @@ export class EventBridgeService {
   onChequeScanned(p: Record<string, unknown>): void {
     this.gateway.broadcast('cheque.scanned', p);
   }
+
+  // F10 — approvals + notification inbox
+  @OnEvent('approval.requested')
+  onApprovalRequested(p: Record<string, unknown>): void {
+    this.gateway.broadcast('approval.requested', p);
+  }
+
+  @OnEvent('approval.decided')
+  onApprovalDecided(p: Record<string, unknown>): void {
+    this.gateway.broadcast('approval.decided', p);
+  }
+
+  @OnEvent('notification.created')
+  onNotificationCreated(p: Record<string, unknown>): void {
+    this.gateway.broadcast('notification.created', p);
+  }
 }

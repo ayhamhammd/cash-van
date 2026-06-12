@@ -23,6 +23,7 @@ import {
   VoucherLineDto,
 } from './dto/create-voucher.dto';
 import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
+import { UserContextService } from '../../common/context/user-context.service';
 
 /**
  * How each voucher kind moves the salesman's van stock when posted:
@@ -71,6 +72,13 @@ interface ComputedLine {
   total: number;
 }
 
+/** Permission keys gating sensitive salesman actions (F10). */
+export const PERM_RETURN_DIRECT = 'vouchers.return.direct';
+export const PERM_DISCOUNT_DIRECT = 'vouchers.discount.direct';
+export const PERM_PRICE_OVERRIDE = 'vouchers.priceOverride';
+/** Prefix key encoding the max direct-discount %, e.g. "vouchers.discount.max:5". */
+export const PERM_DISCOUNT_MAX_PREFIX = 'vouchers.discount.max:';
+
 @Injectable()
 export class VouchersService {
   constructor(
@@ -79,9 +87,18 @@ export class VouchersService {
     private readonly headersRepo: Repository<VoucherHeader>,
     @InjectRepository(PaymentCheque)
     private readonly chequesRepo: Repository<PaymentCheque>,
+    private readonly userCtx: UserContextService,
   ) {}
 
   async create(dto: CreateVoucherDto): Promise<VoucherHeader> {
+    // F10 gate: salesmen need explicit permission for returns, discounts and
+    // price overrides — otherwise the client must file an approval request
+    // (the approving manager re-runs create() under their own role).
+    await this.enforceSalesmanPolicy(dto);
+    return this.createUnchecked(dto);
+  }
+
+  private async createUnchecked(dto: CreateVoucherDto): Promise<VoucherHeader> {
     return this.dataSource.transaction(async (em) => {
       const tk = await this.loadTransKind(em, dto.transKind);
       const isTransferVoucher = dto.transKind === TRANSFER_KIND;
@@ -629,5 +646,104 @@ export class VouchersService {
       throw new BadRequestException(`Unknown trans_kind: ${transKind}`);
     }
     return tk;
+  }
+
+  // ---- F10: salesman permission gate ------------------------------------
+
+  /**
+   * Throws 403 `APPROVAL_REQUIRED:<TYPE>` when the calling salesman lacks the
+   * permission for a gated action. Admin/manager roles (and internal calls
+   * with no request context, e.g. jobs or approval execution) pass through.
+   * Permissions are read fresh from the DB so edits apply without re-login.
+   */
+  private async enforceSalesmanPolicy(dto: CreateVoucherDto): Promise<void> {
+    const ctx = this.userCtx.get();
+    if (!ctx) return; // internal call (job / approval execution) — trusted
+    if (ctx.role === 'admin' || ctx.role === 'manager') return;
+
+    const user = await this.dataSource.getRepository(User).findOne({
+      where: { id: ctx.userId },
+    });
+    if (!user || user.userType === 'ADMIN') return;
+    const keys: string[] = user.permissions ?? [];
+    const has = (k: string): boolean => keys.includes(k);
+
+    const num = (v: string | number | undefined | null): number => {
+      const n = typeof v === 'number' ? v : Number.parseFloat(v ?? '0');
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    // 1) RETURN vouchers
+    if (dto.transKind === 'RETURN' && !has(PERM_RETURN_DIRECT)) {
+      throw new ForbiddenException('APPROVAL_REQUIRED:RETURN_VOUCHER');
+    }
+
+    // 2) Discounts (header + per-line), with an optional max-% cap
+    const gross = dto.transactions.reduce(
+      (s, l) => s + num(l.itemQty) * num(l.unitPrice),
+      0,
+    );
+    const lineDisc = dto.transactions.reduce(
+      (s, l) =>
+        s +
+        num(l.discountValue) +
+        (num(l.discountPercentage) / 100) * num(l.itemQty) * num(l.unitPrice),
+      0,
+    );
+    const headerDisc =
+      num(dto.totalDiscountValue) +
+      (num(dto.totalDiscountPercentage) / 100) * gross;
+    const totalDisc = lineDisc + headerDisc;
+    if (totalDisc > 0.0005) {
+      if (!has(PERM_DISCOUNT_DIRECT)) {
+        throw new ForbiddenException('APPROVAL_REQUIRED:VOUCHER_DISCOUNT');
+      }
+      const maxKey = keys.find((k) => k.startsWith(PERM_DISCOUNT_MAX_PREFIX));
+      if (maxKey) {
+        const maxPct = num(maxKey.slice(PERM_DISCOUNT_MAX_PREFIX.length));
+        const effPct = gross > 0 ? (totalDisc / gross) * 100 : 0;
+        if (effPct > maxPct + 1e-9) {
+          throw new ForbiddenException('APPROVAL_REQUIRED:VOUCHER_DISCOUNT');
+        }
+      }
+    }
+
+    // 3) Price overrides on SALE lines: flag only when the line UNDERCUTS
+    // every legitimate price for the item (catalog, item-units, active price
+    // rules). Selling above catalog is allowed — it doesn't hurt the owner.
+    if (dto.transKind === 'SALE' && !has(PERM_PRICE_OVERRIDE)) {
+      for (const line of dto.transactions) {
+        const lp = num(line.unitPrice);
+        if (lp <= 0) continue;
+        const rows: Array<{ p: number | string | null }> = await this.dataSource.query(
+          `SELECT ic.price::float8 / 1000 AS p
+             FROM item_cart ic WHERE ic.item_number = $1
+           UNION ALL
+           SELECT iu.sale_price::float8
+             FROM item_units iu
+             JOIN item_cart ic2 ON ic2.id = iu.item_id
+            WHERE ic2.item_number = $1
+           UNION ALL
+           SELECT CASE
+                    WHEN pr.fixed_price IS NOT NULL THEN pr.fixed_price::float8 / 1000
+                    ELSE ic3.price::float8 / 1000 * (1 - pr.discount_pct / 100.0)
+                  END
+             FROM price_rules pr
+             JOIN item_cart ic3 ON ic3.id = pr.product_id
+            WHERE ic3.item_number = $1
+              AND (pr.valid_from IS NULL OR pr.valid_from <= CURRENT_DATE)
+              AND (pr.valid_to   IS NULL OR pr.valid_to   >= CURRENT_DATE)`,
+          [line.itemNumber],
+        );
+        const candidates = rows
+          .map((r) => Number(r.p))
+          .filter((n) => Number.isFinite(n) && n > 0);
+        if (candidates.length === 0) continue; // unknown item → other checks decide
+        const floor = Math.min(...candidates);
+        if (lp < floor - 0.0005) {
+          throw new ForbiddenException('APPROVAL_REQUIRED:PRICE_OVERRIDE');
+        }
+      }
+    }
   }
 }

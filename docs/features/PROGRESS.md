@@ -3,13 +3,13 @@
 Status values: `planned` → `in-progress` → `review` → `done`. Update the table + the
 per-feature checklists as work lands. One PR per checklist line is a good granularity.
 
-_Last updated: 2026-06-11 (specs written, nothing started)._
+_Last updated: 2026-06-12 (F10 implemented: backend + dashboard done & verified E2E; mobile plumbing done, screen pre-gating pending)._
 
 ## Summary
 
 | # | Feature | Backend | Dashboard | Mobile | Overall |
 |---|---------|---------|-----------|--------|---------|
-| F10 | Approvals, Notifications & Permissions | planned | planned | planned | **planned** |
+| F10 | Approvals, Notifications & Permissions | **done** | **done** | **in-progress** | **in-progress** |
 | F3 | Geofenced Visit Verification | planned | planned | n/a | **planned** |
 | F5 | Speeding & Driver Behavior | planned | planned | n/a | **planned** |
 | F2 | Targets & Commissions | planned | planned | planned | **planned** |
@@ -17,18 +17,22 @@ _Last updated: 2026-06-11 (specs written, nothing started)._
 | F7 | Van Stock Audit | planned | planned | planned | **planned** |
 
 ## F10 — Approvals, Notifications & Salesman Permissions
-- [ ] BE: `rep_permissions` defaults + `users.permissions` keys (`vouchers.return.direct`, `vouchers.discount.max`, `vouchers.priceOverride`)
-- [ ] BE: `approval_requests` entity + migration
-- [ ] BE: `notifications` entity + migration (per-user inbox)
-- [ ] BE: ApprovalsModule — create/list/approve/reject endpoints + auto-execute on approve
-- [ ] BE: events `approval.requested|decided`, `notification.created` → EventBridge → `/ws/ops`
-- [ ] BE: enforce permission checks inside `VouchersService.create` (server-side, not just UI)
-- [ ] FE: notification bell (topbar) + inbox dropdown + unread badge
-- [ ] FE: Approvals queue page (`/approvals`) with diff view + approve/reject
-- [ ] FE: permission editor in user/rep create+edit drawer (toggles + max-discount %)
-- [ ] MOB: permissions in login payload → SessionStore; gate return/discount/price UI
-- [ ] MOB: "request approval" flow + pending banner + decision push handling
-- [ ] E2E: rep without permission → request → manager approves → voucher posts
+- [x] BE: permission keys in `users.permissions` (`vouchers.return.direct`, `vouchers.discount.direct`, `vouchers.discount.max:<pct>`, `vouchers.priceOverride`)
+- [x] BE: `approval_requests` entity + migration (1718500000000)
+- [x] BE: `notifications` entity + migration (per-user inbox, manager fan-out)
+- [x] BE: ApprovalsModule — create/list/mine/approve/reject + **approve executes the voucher** (failure → honest reject with reason)
+- [x] BE: events `approval.requested|decided`, `notification.created` → EventBridge → `/ws/ops`
+- [x] BE: enforcement in `VouchersService.create` — 403 `APPROVAL_REQUIRED:<TYPE>`; fresh DB read (edits apply without re-login); price check tolerates item-units + active price-rules, flags undercuts only
+- [x] FE: notification bell (topbar) + dropdown + unread badge + read/read-all
+- [x] FE: `/approvals` queue (tabs, proposed-voucher drawer, approve/reject with reason)
+- [x] FE: permission editor — "Salesman (mobile)" group in user drawer + max-discount % input
+- [x] MOB: `permKeys` in login → `SessionStore.currentPermKeys` + `can()` / `discountMaxPct()`
+- [x] MOB: `ApprovalRequired` error type (403 detail parse) + `ApprovalApi` (create/mine)
+- [x] MOB: SyncRepository auto-converts a blocked voucher push into an approval request (works offline-first — same path)
+- [ ] MOB: pre-gate UI in Sale/Return screens (hide discount/price edit, "إرسال طلب موافقة" CTA) — currently the request files automatically at sync instead
+- [ ] MOB: "طلباتي" list screen + poll `/approvals/mine` in SyncScheduler for decision banners
+- [x] E2E: rep w/o permission → 403 → request → manager queue + bell → approve → `RET-MAIN000025` / `INV-MAIN834428` posted → rep notified (verified by curl **and** through the dashboard UI)
+- [x] E2E: discount cap — `max:5` → 4% posts (201), 6% blocked (403)
 
 ## F3 — Geofenced Visit Verification
 - [ ] BE: `verified`, `distance_m` columns on `customer_visits` + migration

@@ -40,6 +40,8 @@ import { RealtimeModule } from './realtime/realtime.module';
 import { TaxModule } from './modules/tax/tax.module';
 import { MobileModule } from './modules/mobile/mobile.module';
 import { UnitsModule } from './modules/units/units.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
+import { ApprovalsModule } from './modules/approvals/approvals.module';
 
 @Module({
   imports: [
@@ -91,6 +93,8 @@ import { UnitsModule } from './modules/units/units.module';
     TaxModule,
     MobileModule,
     UnitsModule,
+    NotificationsModule,
+    ApprovalsModule,
   ],
   controllers: [HealthController],
   providers: [
