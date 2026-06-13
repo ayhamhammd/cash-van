@@ -53,6 +53,7 @@ const VOUCHER_PREFIX: Record<string, string> = {
   SALE: 'INV',
   RETURN: 'RET',
   ORDER: 'ORD',
+  VENDOR_RETURN: 'VRT',
   PURCHASE: 'PUR',
   IN: 'IN',
   OUT: 'OUT',

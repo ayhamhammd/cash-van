@@ -78,6 +78,13 @@ _Last updated: 2026-06-12 (F10 implemented: backend + dashboard done & verified 
 - [x] FE: PURCHASE — vendor + supplier invoice number (`VEN-000001` / `SUPP-INV-7788` posted)
 - [x] i18n `ops.*` (ar/en); typecheck + lint + build + test green; browser E2E across all 3 tabs + convert
 
+### F11.1 — kind/party refinements (per owner request, verified 2026-06-12)
+- [x] BE: new `VENDOR_RETURN` kind (sign -1, prefix VRT) via migration `1718600000000`; verified 201 + from-store guard (EMPTYSTORE→400)
+- [x] FE: kind dropdown restricted to exactly **SALE, RETURN, ORDER, VENDOR_RETURN, PURCHASE, IN, OUT, TRANSFER** (legacy ADJUSTMENT/PAYMENT_*/TRANSFER_IN/OUT removed)
+- [x] FE: **IN / OUT** → store only, no party; **PURCHASE / VENDOR_RETURN** → vendor + supplier invoice #, no customer
+- [x] FE: **TRANSFER** → Kind · From store · To store · Voucher# on one row (from+to together, not split)
+- [x] FE: stock guard now covers VENDOR_RETURN (out-movement); purchases tab hosts PURCHASE + VENDOR_RETURN
+
 ## F7 — Van Stock Audit
 - [ ] BE: `van_stock_audits` + `van_stock_audit_lines` entities + migration
 - [ ] BE: create/submit/approve endpoints; variance computation vs `van_stock`
