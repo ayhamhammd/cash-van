@@ -534,6 +534,29 @@ export class VouchersService {
    * `last_value`/`is_called` so the dashboard can show the real number before
    * saving. The created voucher gets this same number (single-cashier safe).
    */
+  /**
+   * Consume the next serial for (kind, store) and return it — used by the sync
+   * inbox to hand the mobile app an authoritative number at intake, so a client
+   * can never choose a colliding number.
+   */
+  async reserveVoucherNumber(transKind: string, store: string): Promise<string> {
+    return this.dataSource.transaction((em) =>
+      this.nextVoucherNumber(em, transKind, store),
+    );
+  }
+
+  /** The store number of a rep's van (rep.van_id → warehouse) — null if unlinked. */
+  async resolveRepVanStore(repId: string): Promise<string | null> {
+    const rows: Array<{ wh_number: string }> = await this.dataSource.query(
+      `SELECT w.wh_number FROM reps r
+         JOIN warehouses w ON w.id = r.van_id
+        WHERE r.id = $1 AND r.van_id IS NOT NULL
+        LIMIT 1`,
+      [repId],
+    );
+    return rows[0]?.wh_number ?? null;
+  }
+
   async previewVoucherNumber(
     transKind: string,
     store: string,

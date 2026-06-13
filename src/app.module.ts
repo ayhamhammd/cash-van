@@ -41,6 +41,7 @@ import { TaxModule } from './modules/tax/tax.module';
 import { MobileModule } from './modules/mobile/mobile.module';
 import { UnitsModule } from './modules/units/units.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { SyncModule } from './modules/sync/sync.module';
 import { ApprovalsModule } from './modules/approvals/approvals.module';
 
 @Module({
@@ -95,6 +96,7 @@ import { ApprovalsModule } from './modules/approvals/approvals.module';
     UnitsModule,
     NotificationsModule,
     ApprovalsModule,
+    SyncModule,
   ],
   controllers: [HealthController],
   providers: [
