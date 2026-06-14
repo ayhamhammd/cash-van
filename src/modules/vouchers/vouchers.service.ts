@@ -582,17 +582,29 @@ export class VouchersService {
     transKind: string,
     store: string,
   ): Promise<string> {
-    const rows: Array<{ last_number: string }> = await em.query(
-      `INSERT INTO voucher_counters (store_number, trans_kind, last_number)
-         VALUES ($1, $2, 1)
-       ON CONFLICT (store_number, trans_kind)
-         DO UPDATE SET last_number = voucher_counters.last_number + 1
-       RETURNING last_number`,
-      [store, transKind],
-    );
-    const seq = String(rows[0]?.last_number ?? '1').padStart(6, '0');
     const prefix = VOUCHER_PREFIX[transKind] ?? transKind.slice(0, 3).toUpperCase();
-    return `${prefix}-${store}${seq}`;
+    // Bump the per-(store,kind) counter and skip any number that already exists
+    // (e.g. older client-numbered vouchers), so we always return the true
+    // next-available number and never collide.
+    for (let attempt = 0; attempt < 1000; attempt++) {
+      const rows: Array<{ last_number: string }> = await em.query(
+        `INSERT INTO voucher_counters (store_number, trans_kind, last_number)
+           VALUES ($1, $2, 1)
+         ON CONFLICT (store_number, trans_kind)
+           DO UPDATE SET last_number = voucher_counters.last_number + 1
+         RETURNING last_number`,
+        [store, transKind],
+      );
+      const seq = String(rows[0]?.last_number ?? '1').padStart(6, '0');
+      const candidate = `${prefix}-${store}${seq}`;
+      const taken = await em
+        .getRepository(VoucherHeader)
+        .exist({ where: { voucherNumber: candidate } });
+      if (!taken) return candidate;
+    }
+    throw new ConflictException(
+      `Could not allocate a free voucher number for ${transKind}/${store}`,
+    );
   }
 
   /** Current posted stock balance (pieces) for an item in a store. */
