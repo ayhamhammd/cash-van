@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional, IntersectionType } from '@nestjs/swagger';
-import { IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsIn, IsInt, IsObject, IsOptional, IsString, Max, Min } from 'class-validator';
 
 import { CreateVoucherDto } from '../../vouchers/dto/create-voucher.dto';
 import { CreateCollectionDto } from '../../collections/dto/create-collection.dto';
@@ -23,6 +23,18 @@ export class SyncCollectionDto extends IntersectionType(
   CreateCollectionDto,
   ClientRefDto,
 ) {}
+
+/** Edit a staged document's raw payload before re-promoting it. */
+export class UpdateInboxPayloadDto {
+  @ApiProperty({
+    description:
+      "The full document payload to replace the staged one (e.g. add a RETURN's referenceVoucherNumber). Editing resets the row to pending and clears the error.",
+    type: 'object',
+    additionalProperties: true,
+  })
+  @IsObject()
+  payload!: Record<string, unknown>;
+}
 
 export class ListInboxQueryDto {
   @ApiPropertyOptional({ enum: ['pending', 'posted', 'failed'] })

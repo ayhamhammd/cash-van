@@ -6,9 +6,11 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseIntPipe,
   ParseUUIDPipe,
   Post,
   Put,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -17,6 +19,7 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
 
@@ -45,6 +48,22 @@ export class JourneyPlanController {
   @ApiOkResponse({ description: 'Journey-plan entries' })
   list(@Param('repId', ParseUUIDPipe) repId: string) {
     return this.journeyPlan.list(repId);
+  }
+
+  @Get('day')
+  @ApiOperation({
+    summary: "Outlets for a rep on a weekday",
+    description:
+      'Active outlets the rep visits on the given weekday (0=Sun..6=Sat), ordered for the day map view. Admin/manager only.',
+  })
+  @ApiParam({ name: 'repId', format: 'uuid', description: 'Rep id' })
+  @ApiQuery({ name: 'weekday', description: '0=Sunday .. 6=Saturday', example: 0 })
+  @ApiOkResponse({ description: 'Ordered outlets for that weekday' })
+  day(
+    @Param('repId', ParseUUIDPipe) repId: string,
+    @Query('weekday', ParseIntPipe) weekday: number,
+  ) {
+    return this.journeyPlan.day(repId, weekday);
   }
 
   @Put(':customerId')

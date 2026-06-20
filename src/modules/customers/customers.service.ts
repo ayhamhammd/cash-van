@@ -102,7 +102,8 @@ export class CustomersService {
       .take(query.limit ?? 25)
       .skip(query.offset ?? 0);
 
-    if (query.repId) qb.andWhere('c.rep_id = :repId', { repId: query.repId });
+    if (query.unassigned) qb.andWhere('c.rep_id IS NULL');
+    else if (query.repId) qb.andWhere('c.rep_id = :repId', { repId: query.repId });
     if (query.regionId) qb.andWhere('c.region_id = :regionId', { regionId: query.regionId });
     if (query.isActive !== undefined) qb.andWhere('c.is_active = :a', { a: query.isActive });
 

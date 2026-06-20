@@ -12,6 +12,7 @@ import { JourneyPlanService } from './journey-plan.service';
 import { RouteAdherenceService } from './route-adherence.service';
 import { RoutesController } from './routes.controller';
 import { JourneyPlanController } from './journey-plan.controller';
+import { MyRouteController } from './my-route.controller';
 
 @Module({
   imports: [
@@ -23,7 +24,7 @@ import { JourneyPlanController } from './journey-plan.controller';
       Customer,
     ]),
   ],
-  controllers: [RoutesController, JourneyPlanController],
+  controllers: [RoutesController, JourneyPlanController, MyRouteController],
   providers: [RoutesService, JourneyPlanService, RouteAdherenceService],
   exports: [RoutesService, JourneyPlanService, RouteAdherenceService],
 })

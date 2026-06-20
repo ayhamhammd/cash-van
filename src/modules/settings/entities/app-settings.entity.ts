@@ -67,6 +67,24 @@ export class AppSettings {
   @Column({ name: 'jofotara_sandbox', type: 'boolean', default: true })
   jofotaraSandbox!: boolean;
 
+  // ── ERP (erp-saas) integration ────────────────────────────────────────────
+  /** The toggle: work WITH the ERP (sync items/units/stores/stock) or standalone. */
+  @Column({ name: 'erp_sync_enabled', type: 'boolean', default: false })
+  erpSyncEnabled!: boolean;
+
+  /** ERP origin (e.g. https://erp.example.com); the API base "/api/v1" is appended. */
+  @Column({ name: 'erp_base_url', type: 'text', nullable: true })
+  erpBaseUrl?: string | null;
+
+  @Column({ name: 'erp_api_key_encrypted', type: 'text', nullable: true, select: false })
+  erpApiKeyEncrypted?: string | null;
+
+  @Column({ name: 'erp_api_key_last4', type: 'text', nullable: true })
+  erpApiKeyLast4?: string | null;
+
+  @Column({ name: 'erp_last_sync_at', type: 'timestamptz', nullable: true })
+  erpLastSyncAt?: Date | null;
+
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 

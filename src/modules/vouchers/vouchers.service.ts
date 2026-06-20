@@ -444,7 +444,9 @@ export class VouchersService {
 
   async list(
     q: ListVouchersQueryDto = {},
-  ): Promise<Array<VoucherHeader & { storeNumber: string | null }>> {
+  ): Promise<
+    Array<VoucherHeader & { storeNumber: string | null; customerName: string | null }>
+  > {
     const qb = this.headersRepo
       .createQueryBuilder('h')
       .leftJoin(
@@ -452,10 +454,12 @@ export class VouchersService {
         'vt',
         'vt.voucher_number = h.voucher_number',
       )
+      .leftJoin('customers', 'cust', 'cust.customer_number = h.customer_number')
       .addSelect(
         'MIN(COALESCE(vt.store_number, vt.from_store_number, vt.to_store_number))',
         'storeNumber',
       )
+      .addSelect('MIN(COALESCE(cust.name_ar, cust.name_en))', 'customerName')
       .groupBy('h.id')
       .orderBy('h.in_date', 'DESC');
 
@@ -475,6 +479,8 @@ export class VouchersService {
     if (q.userCode) qb.andWhere('h.user_code = :uc', { uc: q.userCode });
     if (q.customerNumber)
       qb.andWhere('h.customer_number = :cn', { cn: q.customerNumber });
+    if (q.voucherNumber)
+      qb.andWhere('h.voucher_number = :vn', { vn: q.voucherNumber });
     if (q.dateFrom) qb.andWhere('h.in_date >= :df', { df: q.dateFrom });
     if (q.dateTo) qb.andWhere('h.in_date < (:dt::date + 1)', { dt: q.dateTo });
     if (q.store) {
@@ -490,6 +496,7 @@ export class VouchersService {
     return entities.map((e, i) => ({
       ...e,
       storeNumber: (raw[i]?.storeNumber as string | null) ?? null,
+      customerName: (raw[i]?.customerName as string | null) ?? null,
     }));
   }
 
@@ -721,10 +728,7 @@ export class VouchersService {
       return Number.isFinite(n) ? n : 0;
     };
 
-    // 1) RETURN vouchers
-    if (dto.transKind === 'RETURN' && !has(PERM_RETURN_DIRECT)) {
-      throw new ForbiddenException('APPROVAL_REQUIRED:RETURN_VOUCHER');
-    }
+    // 1) RETURN vouchers — post directly like SALE/ORDER (no approval gate).
 
     // 2) Discounts (header + per-line), with an optional max-% cap
     const gross = dto.transactions.reduce(

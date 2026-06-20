@@ -24,6 +24,7 @@ import {
 import { SettingsService } from './settings.service';
 import { UpdateAppSettingsDto } from './dto/update-settings.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
+import { UpdateErpDto } from './dto/update-erp.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 
@@ -99,5 +100,26 @@ export class SettingsController {
   @ApiOkResponse({ description: 'Credentials stored (secret encrypted + masked)' })
   updateJoFotara(@Body() dto: UpdateJoFotaraDto) {
     return this.settings.updateJoFotara(dto);
+  }
+
+  @Patch('erp')
+  @ApiOperation({
+    summary: 'Configure the ERP connection + toggle',
+    description:
+      'Enable/disable working with the ERP and set its base URL + API key (encrypted). Omit apiKey to keep the current one. Admin only.',
+  })
+  @ApiOkResponse({ description: 'ERP settings (key masked)' })
+  updateErp(@Body() dto: UpdateErpDto) {
+    return this.settings.updateErp(dto);
+  }
+
+  @Post('erp/test')
+  @ApiOperation({
+    summary: 'Test the ERP connection',
+    description: 'Probes the configured ERP (health + a 1-row catalog read) with the stored key. Admin only.',
+  })
+  @ApiOkResponse({ description: '{ ok, message }' })
+  testErp() {
+    return this.settings.testErp();
   }
 }

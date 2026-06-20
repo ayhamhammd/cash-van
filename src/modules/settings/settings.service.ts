@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import { AppSettings, TaxCalcMethod } from './entities/app-settings.entity';
 import { UpdateAppSettingsDto } from './dto/update-settings.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
+import { UpdateErpDto } from './dto/update-erp.dto';
 import { decryptSecret, encryptSecret, maskSecret } from '../../common/crypto/secret.util';
 import { UserContextService } from '../../common/context/user-context.service';
 
@@ -28,9 +29,18 @@ export interface AppSettingsView {
     sandbox: boolean;
     isConfigured: boolean;
   };
+  erp: {
+    enabled: boolean;
+    baseUrl: string | null;
+    apiKeyLast4: string | null;
+    isConfigured: boolean;
+    lastSyncAt: Date | null;
+  };
   updatedAt: Date;
   updatedBy: string | null;
 }
+
+export type ErpView = AppSettingsView['erp'];
 
 export interface JoFotaraUpdateView {
   clientId: string;
@@ -161,8 +171,82 @@ export class SettingsService {
         sandbox: row.jofotaraSandbox,
         isConfigured: !!row.jofotaraClientId && !!row.jofotaraSecretLast4,
       },
+      erp: {
+        enabled: row.erpSyncEnabled,
+        baseUrl: row.erpBaseUrl ?? null,
+        apiKeyLast4: row.erpApiKeyLast4 ?? null,
+        isConfigured: !!row.erpBaseUrl && !!row.erpApiKeyLast4,
+        lastSyncAt: row.erpLastSyncAt ?? null,
+      },
       updatedAt: row.updatedAt,
       updatedBy: row.updatedBy ?? null,
     };
+  }
+
+  /** Set the ERP toggle + connection. The API key is encrypted; omit it to keep the current one. */
+  async updateErp(dto: UpdateErpDto): Promise<ErpView> {
+    const row = await this.requireRow();
+    row.erpSyncEnabled = dto.enabled;
+    if (dto.baseUrl !== undefined) {
+      row.erpBaseUrl = dto.baseUrl.replace(/\/+$/, '') || null;
+    }
+    if (dto.apiKey) {
+      row.erpApiKeyEncrypted = encryptSecret(dto.apiKey);
+      row.erpApiKeyLast4 = maskSecret(dto.apiKey).slice(-4);
+    }
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return {
+      enabled: row.erpSyncEnabled,
+      baseUrl: row.erpBaseUrl ?? null,
+      apiKeyLast4: row.erpApiKeyLast4 ?? null,
+      isConfigured: !!row.erpBaseUrl && !!row.erpApiKeyLast4,
+      lastSyncAt: row.erpLastSyncAt ?? null,
+    };
+  }
+
+  /** Internal: decrypted ERP connection for the sync engine. */
+  async getErpConfig(): Promise<{ enabled: boolean; baseUrl: string | null; apiKey: string | null }> {
+    const row = await this.repo
+      .createQueryBuilder('s')
+      .addSelect('s.erpApiKeyEncrypted')
+      .where('s.id = 1')
+      .getOne();
+    if (!row) throw new NotFoundException('app_settings row missing — re-run migrations');
+    return {
+      enabled: row.erpSyncEnabled,
+      baseUrl: row.erpBaseUrl ?? null,
+      apiKey: row.erpApiKeyEncrypted ? decryptSecret(row.erpApiKeyEncrypted) : null,
+    };
+  }
+
+  /** Probe the ERP with the stored credentials (health + a 1-row catalog read). */
+  async testErp(): Promise<{ ok: boolean; message: string }> {
+    const cfg = await this.getErpConfig();
+    if (!cfg.baseUrl || !cfg.apiKey) {
+      return { ok: false, message: 'ERP base URL or API key not configured' };
+    }
+    const base = cfg.baseUrl.replace(/\/+$/, '');
+    try {
+      const health = await fetch(`${base}/api/v1/health`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!health.ok) {
+        return { ok: false, message: `Health check failed (HTTP ${health.status})` };
+      }
+      const skus = await fetch(`${base}/api/v1/skus?pageSize=1`, {
+        headers: { Authorization: `Bearer ${cfg.apiKey}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (skus.status === 401 || skus.status === 403) {
+        return { ok: false, message: 'API key rejected by the ERP (check key/scopes)' };
+      }
+      if (!skus.ok) {
+        return { ok: false, message: `Catalog read failed (HTTP ${skus.status})` };
+      }
+      return { ok: true, message: 'Connected to the ERP successfully' };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : 'ERP unreachable' };
+    }
   }
 }

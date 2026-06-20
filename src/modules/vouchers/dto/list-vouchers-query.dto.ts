@@ -21,6 +21,11 @@ export class ListVouchersQueryDto {
   @IsString()
   customerNumber?: string;
 
+  @ApiPropertyOptional({ description: 'Exact voucher number (app return-source lookup).' })
+  @IsOptional()
+  @IsString()
+  voucherNumber?: string;
+
   @ApiPropertyOptional({ description: 'Filter by a store/warehouse touched by any line.' })
   @IsOptional()
   @IsString()
