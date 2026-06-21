@@ -72,6 +72,10 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'total_discount_percentage', type: 'numeric', precision: 5, scale: 2, default: 0 })
   totalDiscountPercentage!: string;
 
+  /** Ids of offers applied to this sale (offers engine). Empty when none. */
+  @Column({ name: 'applied_offer_ids', type: 'jsonb', default: () => "'[]'::jsonb" })
+  appliedOfferIds!: string[];
+
   @Column({ name: 'is_posted', type: 'boolean', default: false })
   isPosted!: boolean;
 

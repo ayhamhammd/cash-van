@@ -125,6 +125,17 @@ Compact list of every endpoint for AI context. Full spec: [openapi.yaml](openapi
 - `DELETE /api/v1/notification-rules/{id}` — Delete notification rule
 - `POST /api/v1/notification-rules/{id}/test` — Test notification rule
 
+## offers
+
+- `GET /api/v1/offers` — List offers (filter by status/type/search) + stats
+- `POST /api/v1/offers` — Create offer
+- `POST /api/v1/offers/evaluate` — Evaluate offers against a cart (preview)
+- `GET /api/v1/offers/{id}` — Get offer
+- `PATCH /api/v1/offers/{id}` — Update offer
+- `POST /api/v1/offers/{id}/toggle` — Toggle offer active/paused
+- `DELETE /api/v1/offers/{id}` — Delete offer (soft)
+- `GET /api/v1/offers/{id}/redemptions` — Per-offer redemption report
+
 ## price-rules
 
 - `GET /api/v1/price-rules` — List price rules

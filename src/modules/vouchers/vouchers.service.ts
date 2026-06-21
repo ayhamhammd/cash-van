@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -24,6 +25,7 @@ import {
 } from './dto/create-voucher.dto';
 import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
 import { UserContextService } from '../../common/context/user-context.service';
+import { OffersService } from '../offers/offers.service';
 
 /**
  * How each voucher kind moves the salesman's van stock when posted:
@@ -89,14 +91,50 @@ export class VouchersService {
     @InjectRepository(PaymentCheque)
     private readonly chequesRepo: Repository<PaymentCheque>,
     private readonly userCtx: UserContextService,
+    private readonly offers: OffersService,
   ) {}
+
+  private readonly logger = new Logger(VouchersService.name);
 
   async create(dto: CreateVoucherDto): Promise<VoucherHeader> {
     // F10 gate: salesmen need explicit permission for returns, discounts and
     // price overrides — otherwise the client must file an approval request
     // (the approving manager re-runs create() under their own role).
     await this.enforceSalesmanPolicy(dto);
-    return this.createUnchecked(dto);
+    const header = await this.createUnchecked(dto);
+    await this.recordOfferRedemptions(dto, header);
+    return header;
+  }
+
+  /**
+   * Best-effort offer-redemption recording. Runs AFTER the sale transaction has
+   * committed and is fully guarded — a failure here is logged and swallowed so
+   * it can never roll back or block a sale. The applied offer ids are already
+   * persisted on the header by createUnchecked().
+   */
+  private async recordOfferRedemptions(
+    dto: CreateVoucherDto,
+    header: VoucherHeader,
+  ): Promise<void> {
+    const offerIds = dto.appliedOfferIds ?? [];
+    if (dto.transKind !== 'SALE' || offerIds.length === 0) return;
+    try {
+      await this.offers.recordRedemptions({
+        voucherNumber: header.voucherNumber,
+        customerNumber: header.customerNumber ?? null,
+        offerIds,
+        lines: dto.transactions.map((l) => ({
+          itemNumber: l.itemNumber,
+          qty: Number(l.itemQty) || 0,
+        })),
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Offer redemption recording failed for voucher ${header.voucherNumber}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   private async createUnchecked(dto: CreateVoucherDto): Promise<VoucherHeader> {
@@ -202,6 +240,7 @@ export class VouchersService {
         netTotal: netTotal.toFixed(2),
         totalDiscountValue: (dto.totalDiscountValue ?? '0').toString(),
         totalDiscountPercentage: (dto.totalDiscountPercentage ?? '0').toString(),
+        appliedOfferIds: dto.appliedOfferIds ?? [],
         isPosted: dto.isPosted ?? false,
         isEdit: false,
       });
