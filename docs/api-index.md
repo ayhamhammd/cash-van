@@ -5,6 +5,11 @@ Compact list of every endpoint for AI context. Full spec: [openapi.yaml](openapi
 - Success: `{ success, data, timestamp }`  · Error: `{ statusCode, message, error, path, timestamp }` (400/401/403/404/409/500)
 - All except `POST /api/v1/auth/login` require `Authorization: Bearer <JWT>`
 
+## ai-agent
+
+- `POST /api/v1/agent/chat` — Chat with the AI report agent (SSE stream; ADMIN only)
+- `GET /api/v1/agent/reports/{id}` — Download a generated report file (xlsx/json/md/txt)
+
 ## audit-log
 
 - `GET /api/v1/audit-log` — Query audit log

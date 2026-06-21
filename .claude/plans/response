@@ -1,0 +1,38 @@
+Connection closed
+09:35:21
+done
+{"conversationId":"9cadbaee-bf5f-43c5-baf2-b467a02b23d3","reportIds":[],"stopReason":"end_turn"}
+09:35:21
+text
+{"delta":"مثل Excel أو JSON أو Markdown)؟"}
+09:35:21
+text
+{"delta":"أسماء المندوبين وأكوادهم، سأستخرج البيانات من جدول `reps`.\n\nهل تفضل التقرير بصيغة نصية هنا في الدردشة، أو كملف قابل للتنزيل ("}
+09:35:21
+text
+{"delta":"تأكيد، يمكنني مساعدتك في ذلك. للحصول على تقرير ب"}
+09:35:21
+text
+{"delta":"بال"}
+09:35:21
+tool_result_summary
+{"id":"get_schema-0","name":"get_schema","ok":true,"summary":"schema returned"}
+09:35:20
+tool_start
+{"id":"get_schema-0","name":"get_schema","input":{}}
+09:35:20
+Connected to http://127.0.0.1:3000/api/v1/agent/chat
+09:35:18
+Connection closed
+09:33:27
+done
+{"conversationId":"e64ef2f6-bb17-4e35-95ab-766768d5375e","reportIds":[],"stopReason":"end_turn"}
+09:33:27
+text
+{"delta":" I help you today?\n"}
+09:33:27
+text
+{"delta":"Hello! How can"}
+09:33:27
+Connected to http://127.0.0.1:3000/api/v1/agent/chat
+09:33:25

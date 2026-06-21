@@ -1,0 +1,77 @@
+{
+  "info": {
+    "name": "VanFlow — AI Report Agent",
+    "description": "Login → chat with the AI report agent (SSE) → download the generated report. Uses 127.0.0.1 (not localhost) because the API listens on IPv4. Requires the app running and an ADMIN user.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:3000/api/v1" },
+    { "key": "token", "value": "" },
+    { "key": "reportId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Login (saves token)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const t = pm.response.json().data.accessToken;",
+              "pm.collectionVariables.set('token', t);",
+              "pm.test('got admin token', () => pm.expect(t).to.be.a('string').and.not.empty);",
+              "console.log('token saved to collection variable');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userNumber\": \"admin\",\n  \"password\": \"admin1234\"\n}"
+        }
+      }
+    },
+    {
+      "name": "2. Agent chat (SSE) — saves reportId",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const m = pm.response.text().match(/\"reportId\":\"([0-9a-f-]+)\"/);",
+              "if (m) { pm.collectionVariables.set('reportId', m[1]); console.log('reportId =', m[1]); }",
+              "else { console.log('No report generated (text-only answer).'); }"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Accept", "value": "text/event-stream" }
+        ],
+        "url": "{{baseUrl}}/agent/chat",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"prompt\": \"Give me a JSON file of all sales reps with their code and name\"\n}"
+        }
+      }
+    },
+    {
+      "name": "3. Download report (xlsx/json/md/txt)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{baseUrl}}/agent/reports/{{reportId}}"
+      }
+    }
+  ]
+}

@@ -42,6 +42,7 @@ import { MobileModule } from './modules/mobile/mobile.module';
 import { UnitsModule } from './modules/units/units.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { ApprovalsModule } from './modules/approvals/approvals.module';
+import { AgentModule } from './modules/agent/agent.module';
 
 @Module({
   imports: [
@@ -95,6 +96,7 @@ import { ApprovalsModule } from './modules/approvals/approvals.module';
     UnitsModule,
     NotificationsModule,
     ApprovalsModule,
+    AgentModule,
   ],
   controllers: [HealthController],
   providers: [

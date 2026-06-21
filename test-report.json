@@ -1,0 +1,32 @@
+[
+  {
+    "code": "S-0003",
+    "name_en": "جهاد",
+    "name_ar": "جهاد"
+  },
+  {
+    "code": "S-101",
+    "name_en": "Samer Khaled",
+    "name_ar": "سامر خالد"
+  },
+  {
+    "code": "S-102",
+    "name_en": "Laith Omar",
+    "name_ar": "ليث عمر"
+  },
+  {
+    "code": "S-103",
+    "name_en": "Mohammad Nasser",
+    "name_ar": "محمد ناصر"
+  },
+  {
+    "code": "S012",
+    "name_en": "Ahmad Al-Masri",
+    "name_ar": "احمد المصري"
+  },
+  {
+    "code": null,
+    "name_en": "Khaled Al-Ali",
+    "name_ar": "علي"
+  }
+]
