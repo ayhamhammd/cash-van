@@ -96,6 +96,29 @@ services:
         sync: false
       - key: PHONE_HASH_SECRET
         generateValue: true
+      # --- AI report agent ---------------------------------------------------
+      - key: LLM_PROVIDER
+        value: anthropic
+      # Cheapest Claude model — conserves the small API budget.
+      - key: AGENT_MODEL
+        value: claude-haiku-4-5-20251001
+      # Your Anthropic API key. Set it in the dashboard (kept out of git).
+      # The agent streams a clean error if it's missing; the API still boots.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Read-only role for the agent's generated SQL. REQUIRED in production.
+      # Pointed at the main DB creds for zero-setup (the agent still runs every
+      # statement in a READ ONLY, always-rolled-back transaction). To harden,
+      # provision a dedicated role with scripts/sql/report-agent-role.sql and
+      # change REPORT_DB_USER/REPORT_DB_PASSWORD to it.
+      - key: REPORT_DB_USER
+        fromDatabase:
+          name: cashvan-db
+          property: user
+      - key: REPORT_DB_PASSWORD
+        fromDatabase:
+          name: cashvan-db
+          property: password
 
   # ---- Frontend dashboard (separate repo) -------------------------------------
   - type: web
