@@ -534,6 +534,29 @@ export class VouchersService {
    * `last_value`/`is_called` so the dashboard can show the real number before
    * saving. The created voucher gets this same number (single-cashier safe).
    */
+  /**
+   * Consume the next serial for (kind, store) and return it — used by the sync
+   * inbox to hand the mobile app an authoritative number at intake, so a client
+   * can never choose a colliding number.
+   */
+  async reserveVoucherNumber(transKind: string, store: string): Promise<string> {
+    return this.dataSource.transaction((em) =>
+      this.nextVoucherNumber(em, transKind, store),
+    );
+  }
+
+  /** The store number of a rep's van (rep.van_id → warehouse) — null if unlinked. */
+  async resolveRepVanStore(repId: string): Promise<string | null> {
+    const rows: Array<{ wh_number: string }> = await this.dataSource.query(
+      `SELECT w.wh_number FROM reps r
+         JOIN warehouses w ON w.id = r.van_id
+        WHERE r.id = $1 AND r.van_id IS NOT NULL
+        LIMIT 1`,
+      [repId],
+    );
+    return rows[0]?.wh_number ?? null;
+  }
+
   async previewVoucherNumber(
     transKind: string,
     store: string,
@@ -559,17 +582,29 @@ export class VouchersService {
     transKind: string,
     store: string,
   ): Promise<string> {
-    const rows: Array<{ last_number: string }> = await em.query(
-      `INSERT INTO voucher_counters (store_number, trans_kind, last_number)
-         VALUES ($1, $2, 1)
-       ON CONFLICT (store_number, trans_kind)
-         DO UPDATE SET last_number = voucher_counters.last_number + 1
-       RETURNING last_number`,
-      [store, transKind],
-    );
-    const seq = String(rows[0]?.last_number ?? '1').padStart(6, '0');
     const prefix = VOUCHER_PREFIX[transKind] ?? transKind.slice(0, 3).toUpperCase();
-    return `${prefix}-${store}${seq}`;
+    // Bump the per-(store,kind) counter and skip any number that already exists
+    // (e.g. older client-numbered vouchers), so we always return the true
+    // next-available number and never collide.
+    for (let attempt = 0; attempt < 1000; attempt++) {
+      const rows: Array<{ last_number: string }> = await em.query(
+        `INSERT INTO voucher_counters (store_number, trans_kind, last_number)
+           VALUES ($1, $2, 1)
+         ON CONFLICT (store_number, trans_kind)
+           DO UPDATE SET last_number = voucher_counters.last_number + 1
+         RETURNING last_number`,
+        [store, transKind],
+      );
+      const seq = String(rows[0]?.last_number ?? '1').padStart(6, '0');
+      const candidate = `${prefix}-${store}${seq}`;
+      const taken = await em
+        .getRepository(VoucherHeader)
+        .exist({ where: { voucherNumber: candidate } });
+      if (!taken) return candidate;
+    }
+    throw new ConflictException(
+      `Could not allocate a free voucher number for ${transKind}/${store}`,
+    );
   }
 
   /** Current posted stock balance (pieces) for an item in a store. */

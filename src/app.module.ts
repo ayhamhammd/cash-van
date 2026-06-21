@@ -41,6 +41,7 @@ import { TaxModule } from './modules/tax/tax.module';
 import { MobileModule } from './modules/mobile/mobile.module';
 import { UnitsModule } from './modules/units/units.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { SyncModule } from './modules/sync/sync.module';
 import { ApprovalsModule } from './modules/approvals/approvals.module';
 import { AgentModule } from './modules/agent/agent.module';
 
@@ -96,6 +97,7 @@ import { AgentModule } from './modules/agent/agent.module';
     UnitsModule,
     NotificationsModule,
     ApprovalsModule,
+    SyncModule,
     AgentModule,
   ],
   controllers: [HealthController],
