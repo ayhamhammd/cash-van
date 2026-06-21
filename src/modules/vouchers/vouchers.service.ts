@@ -26,6 +26,8 @@ import {
 import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
 import { UserContextService } from '../../common/context/user-context.service';
 import { OffersService } from '../offers/offers.service';
+import { OffersEngineService } from '../offers/offers-engine.service';
+import type { EvaluationResult } from '../offers/offers.types';
 
 /**
  * How each voucher kind moves the salesman's van stock when posted:
@@ -92,6 +94,7 @@ export class VouchersService {
     private readonly chequesRepo: Repository<PaymentCheque>,
     private readonly userCtx: UserContextService,
     private readonly offers: OffersService,
+    private readonly offersEngine: OffersEngineService,
   ) {}
 
   private readonly logger = new Logger(VouchersService.name);
@@ -99,33 +102,127 @@ export class VouchersService {
   async create(dto: CreateVoucherDto): Promise<VoucherHeader> {
     // F10 gate: salesmen need explicit permission for returns, discounts and
     // price overrides — otherwise the client must file an approval request
-    // (the approving manager re-runs create() under their own role).
+    // (the approving manager re-runs create() under their own role). Runs BEFORE
+    // offers so system-granted offer discounts bypass the manual-discount gate.
     await this.enforceSalesmanPolicy(dto);
+    const offerResult = await this.applyOffers(dto);
     const header = await this.createUnchecked(dto);
-    await this.recordOfferRedemptions(dto, header);
+    await this.recordOfferRedemptions(header, offerResult);
     return header;
   }
 
   /**
-   * Best-effort offer-redemption recording. Runs AFTER the sale transaction has
-   * committed and is fully guarded — a failure here is logged and swallowed so
-   * it can never roll back or block a sale. The applied offer ids are already
-   * persisted on the header by createUnchecked().
+   * Server-authoritative offer application (SALE only). Re-evaluates active offers
+   * against the cart and bakes the result into the dto BEFORE the voucher is
+   * built: per-line discounts (added to discountValue), the invoice discount
+   * (added to the header discount), and free lines (appended as 100%-discount
+   * transactions, net 0). The applied offer ids are stamped on the dto so the
+   * client can never under- or over-claim. Best-effort and fully guarded — any
+   * failure leaves the sale exactly as the client sent it (offers never block a
+   * sale). Returns the evaluation when something applied, else null.
+   *
+   * Money: the engine works in integer fils off each item's DB price; vouchers
+   * use major-unit decimal strings — we translate fils → JOD (÷1000) so the
+   * posted voucher matches exactly what /offers/evaluate previewed.
+   */
+  private async applyOffers(
+    dto: CreateVoucherDto,
+  ): Promise<EvaluationResult | null> {
+    if (dto.transKind !== 'SALE' || !dto.transactions?.length) return null;
+    try {
+      const cart = dto.transactions.map((l) => ({
+        itemNumber: l.itemNumber,
+        qty: Number(l.itemQty) || 0,
+      }));
+      const result = await this.offersEngine.evaluate(cart, {
+        customerNumber: dto.customerNumber ?? null,
+        at: dto.inDate ? new Date(dto.inDate) : undefined,
+      });
+      if (!result.appliedOffers.length) return null;
+
+      // 1) per-line discounts (fils → JOD, added to any manual discountValue).
+      for (const l of result.lines) {
+        if (l.lineDiscountFils <= 0) continue;
+        const target = dto.transactions.find(
+          (t) => t.itemNumber === l.itemNumber,
+        );
+        if (!target) continue;
+        const existing = Number(target.discountValue ?? 0);
+        target.discountValue = (existing + l.lineDiscountFils / 1000).toFixed(3);
+      }
+
+      // 2) invoice-level discount → header discount.
+      if (result.invoiceDiscountFils > 0) {
+        const existing = Number(dto.totalDiscountValue ?? 0);
+        dto.totalDiscountValue = (
+          existing +
+          result.invoiceDiscountFils / 1000
+        ).toFixed(3);
+      }
+
+      // 3) free lines → appended as their own line at real price, 100% discount.
+      if (result.freeLines.length) {
+        const names = await this.loadItemNames(
+          result.freeLines.map((f) => f.itemNumber),
+        );
+        const saleStore = dto.transactions.find((t) => t.storeNumber)
+          ?.storeNumber;
+        for (const f of result.freeLines) {
+          dto.transactions.push({
+            itemNumber: f.itemNumber,
+            itemName: names.get(f.itemNumber) ?? f.itemNumber,
+            itemQty: String(f.qty),
+            unitPrice: (f.unitPriceFils / 1000).toFixed(3),
+            discountPercentage: '100',
+            discountValue: '0',
+            unitBaseQty: 1,
+            storeNumber: saleStore,
+          });
+        }
+      }
+
+      // 4) stamp the applied offer ids (server is authoritative).
+      dto.appliedOfferIds = result.appliedOffers.map((o) => o.offerId);
+      return result;
+    } catch (err) {
+      this.logger.warn(
+        `Offer application skipped for voucher: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  private async loadItemNames(
+    itemNumbers: string[],
+  ): Promise<Map<string, string>> {
+    const unique = [...new Set(itemNumbers)];
+    if (!unique.length) return new Map();
+    const items = await this.dataSource
+      .getRepository(ItemCart)
+      .find({ where: { itemNumber: In(unique) } });
+    return new Map(items.map((i) => [i.itemNumber, i.name ?? i.itemNumber]));
+  }
+
+  /**
+   * Best-effort redemption recording from the server's own evaluation. Runs
+   * AFTER the sale committed and is fully guarded — a failure is logged and
+   * swallowed so it can never roll back or block a sale.
    */
   private async recordOfferRedemptions(
-    dto: CreateVoucherDto,
     header: VoucherHeader,
+    result: EvaluationResult | null,
   ): Promise<void> {
-    const offerIds = dto.appliedOfferIds ?? [];
-    if (dto.transKind !== 'SALE' || offerIds.length === 0) return;
+    if (!result || !result.appliedOffers.length) return;
     try {
-      await this.offers.recordRedemptions({
+      await this.offers.recordApplied({
         voucherNumber: header.voucherNumber,
         customerNumber: header.customerNumber ?? null,
-        offerIds,
-        lines: dto.transactions.map((l) => ({
-          itemNumber: l.itemNumber,
-          qty: Number(l.itemQty) || 0,
+        applied: result.appliedOffers.map((o) => ({
+          offerId: o.offerId,
+          discountFils: o.discountFils,
+          freeItems: o.freeItems,
         })),
       });
     } catch (err) {

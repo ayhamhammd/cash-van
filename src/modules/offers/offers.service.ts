@@ -17,6 +17,7 @@ import type { OfferRewardDto, OfferTriggerDto } from './dto/offer-config.dto';
 import type {
   AppliesTo,
   CartLineInput,
+  FreeItemSpec,
   OfferEligibility,
   OfferRewardConfig,
   OfferTriggerConfig,
@@ -251,6 +252,36 @@ export class OffersService {
     await this.redemptionsRepo.save(rows);
     for (const r of rewards) {
       await this.offersRepo.increment({ id: r.offerId }, 'redemptionCount', 1);
+    }
+  }
+
+  /**
+   * Record redemptions from an already-computed evaluation (server-authoritative
+   * path: VouchersService applies offers itself, so the discount/free amounts are
+   * known and need no recompute). One ledger row per applied offer.
+   */
+  async recordApplied(params: {
+    voucherNumber?: string | null;
+    customerNumber?: string | null;
+    applied: Array<{
+      offerId: string;
+      discountFils: number;
+      freeItems: FreeItemSpec[];
+    }>;
+  }): Promise<void> {
+    if (!params.applied.length) return;
+    const rows = params.applied.map((a) =>
+      this.redemptionsRepo.create({
+        offerId: a.offerId,
+        voucherNumber: params.voucherNumber ?? null,
+        customerNumber: params.customerNumber ?? null,
+        discountFils: a.discountFils,
+        freeItems: a.freeItems,
+      }),
+    );
+    await this.redemptionsRepo.save(rows);
+    for (const a of params.applied) {
+      await this.offersRepo.increment({ id: a.offerId }, 'redemptionCount', 1);
     }
   }
 
