@@ -6,7 +6,8 @@ export type UserPermission =
   | 'canAddCustomer'
   | 'canEditCustomerCredit'
   | 'canAddItems'
-  | 'canEditExpiry';
+  | 'canEditExpiry'
+  | 'canManageOffers';
 
 export const PERMISSIONS_KEY = 'requiredPermissions';
 export const RequirePermissions = (...perms: UserPermission[]) =>

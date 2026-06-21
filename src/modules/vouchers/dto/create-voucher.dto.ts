@@ -191,6 +191,17 @@ export class CreateVoucherDto {
   @IsBoolean()
   isPosted?: boolean;
 
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'SALE only. Offer ids applied to this sale (from POST /offers/evaluate). ' +
+      'Stamped onto the voucher; redemptions recorded best-effort.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  appliedOfferIds?: string[];
+
   @ApiProperty({ type: [VoucherLineDto] })
   @IsArray()
   @ArrayMinSize(1)

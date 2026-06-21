@@ -5,6 +5,11 @@ Compact list of every endpoint for AI context. Full spec: [openapi.yaml](openapi
 - Success: `{ success, data, timestamp }`  · Error: `{ statusCode, message, error, path, timestamp }` (400/401/403/404/409/500)
 - All except `POST /api/v1/auth/login` require `Authorization: Bearer <JWT>`
 
+## ai-agent
+
+- `POST /api/v1/agent/chat` — Chat with the AI report agent (SSE stream; ADMIN only)
+- `GET /api/v1/agent/reports/{id}` — Download a generated report file (xlsx/json/md/txt)
+
 ## audit-log
 
 - `GET /api/v1/audit-log` — Query audit log
@@ -119,6 +124,17 @@ Compact list of every endpoint for AI context. Full spec: [openapi.yaml](openapi
 - `PATCH /api/v1/notification-rules/{id}` — Update notification rule
 - `DELETE /api/v1/notification-rules/{id}` — Delete notification rule
 - `POST /api/v1/notification-rules/{id}/test` — Test notification rule
+
+## offers
+
+- `GET /api/v1/offers` — List offers (filter by status/type/search) + stats
+- `POST /api/v1/offers` — Create offer
+- `POST /api/v1/offers/evaluate` — Evaluate offers against a cart (preview)
+- `GET /api/v1/offers/{id}` — Get offer
+- `PATCH /api/v1/offers/{id}` — Update offer
+- `POST /api/v1/offers/{id}/toggle` — Toggle offer active/paused
+- `DELETE /api/v1/offers/{id}` — Delete offer (soft)
+- `GET /api/v1/offers/{id}/redemptions` — Per-offer redemption report
 
 ## price-rules
 

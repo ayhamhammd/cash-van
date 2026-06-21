@@ -1,11 +1,10 @@
-# Render Blueprint — deploys the WHOLE VanFlow stack to ONE free Render
-# account: NestJS backend + Next.js frontend + a free managed PostgreSQL.
+# Render Blueprint — backend half of the VanFlow stack on ONE free Render
+# account: NestJS API + a free managed PostgreSQL. The Next.js frontend lives
+# in its own repo and is deployed from ITS OWN render.yaml as a separate
+# blueprint (see Flow-Van-Frontend/render.yaml).
 #
 # Connect at https://render.com → "New +" → "Blueprint", pick this repo/branch
-# (deploy/render). Render reads this file and creates all three resources.
-#
-# Because the frontend lives in a separate Git repo, it is a second free web
-# service (cross-repo `repo:` below). One account, one blueprint, $0.
+# (deploy/render). Render reads this file and creates the DB + API.
 #
 # FREE-TIER NOTES:
 #   * Web services spin down after ~15 min idle (cold start on next request).
@@ -13,8 +12,6 @@
 #     DB, create a Neon (neon.tech) Postgres and replace the DB_* values below.
 #   * Container disk is ephemeral — uploaded files do NOT survive restarts.
 #     Wire object storage (R2/S3) for durable uploads.
-#   * NEXT_PUBLIC_* are inlined into the frontend at BUILD time. After the API
-#     URL is known, set them on the frontend service and redeploy it.
 
 databases:
   - name: cashvan-db
@@ -96,31 +93,26 @@ services:
         sync: false
       - key: PHONE_HASH_SECRET
         generateValue: true
-
-  # ---- Frontend dashboard (separate repo) -------------------------------------
-  - type: web
-    name: cashvan-web
-    runtime: node
-    plan: free
-    region: frankfurt
-    repo: https://github.com/JehadEAlomour/Flow-Van-Frontend
-    branch: deploy/render
-    buildCommand: npm ci && npm run build
-    startCommand: npm run start:render
-    autoDeploy: true
-    envVars:
-      - key: NODE_VERSION
-        value: "20"
-      # Point these at the backend service URL (above). Inlined at build time,
-      # so set the real values then trigger a redeploy of this service.
-      #   https://cashvan-api.onrender.com/api/v1   and   https://cashvan-api.onrender.com
-      - key: NEXT_PUBLIC_API_BASE_URL
+      # --- AI report agent ---------------------------------------------------
+      - key: LLM_PROVIDER
+        value: anthropic
+      # Cheapest Claude model — conserves the small API budget.
+      - key: AGENT_MODEL
+        value: claude-haiku-4-5-20251001
+      # Your Anthropic API key. Set it in the dashboard (kept out of git).
+      # The agent streams a clean error if it's missing; the API still boots.
+      - key: ANTHROPIC_API_KEY
         sync: false
-      - key: NEXT_PUBLIC_WS_URL
-        sync: false
-      - key: NEXT_PUBLIC_DEFAULT_LOCALE
-        value: ar
-      - key: NEXT_PUBLIC_AI_ENABLED
-        value: "false"
-      - key: NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
-        sync: false
+      # Read-only role for the agent's generated SQL. REQUIRED in production.
+      # Pointed at the main DB creds for zero-setup (the agent still runs every
+      # statement in a READ ONLY, always-rolled-back transaction). To harden,
+      # provision a dedicated role with scripts/sql/report-agent-role.sql and
+      # change REPORT_DB_USER/REPORT_DB_PASSWORD to it.
+      - key: REPORT_DB_USER
+        fromDatabase:
+          name: cashvan-db
+          property: user
+      - key: REPORT_DB_PASSWORD
+        fromDatabase:
+          name: cashvan-db
+          property: password

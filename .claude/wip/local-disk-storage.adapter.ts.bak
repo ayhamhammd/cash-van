@@ -1,0 +1,60 @@
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { promises as fs } from 'fs';
+import { dirname, join, normalize, resolve, sep } from 'path';
+
+import { PutOptions, StorageService } from './storage.service';
+
+@Injectable()
+export class LocalDiskStorageAdapter implements StorageService {
+  private readonly logger = new Logger(LocalDiskStorageAdapter.name);
+  private readonly root: string;
+  private readonly publicBase: string;
+
+  constructor(config: ConfigService) {
+    this.root = resolve(config.get<string>('storage.localRoot', './storage'));
+    this.publicBase = config.get<string>('storage.publicBaseUrl', '/storage');
+  }
+
+  async put(key: string, body: Buffer, _options?: PutOptions): Promise<{ key: string }> {
+    const absPath = this.toAbs(key);
+    await fs.mkdir(dirname(absPath), { recursive: true });
+    await fs.writeFile(absPath, body);
+    return { key };
+  }
+
+  async get(key: string): Promise<Buffer> {
+    try {
+      return await fs.readFile(this.toAbs(key));
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new NotFoundException(`Storage key not found: ${key}`);
+      }
+      throw err;
+    }
+  }
+
+  async getUrl(key: string, _ttlSec?: number): Promise<string> {
+    return `${this.publicBase}/${encodeURI(key)}`;
+  }
+
+  async delete(key: string): Promise<void> {
+    try {
+      await fs.unlink(this.toAbs(key));
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err;
+      }
+    }
+  }
+
+  /** Resolves and guards against path traversal (../ escapes the root). */
+  private toAbs(key: string): string {
+    const normalized = normalize(key).replace(/^([./\\])+/, '');
+    const abs = resolve(join(this.root, normalized));
+    if (abs !== this.root && !abs.startsWith(this.root + sep)) {
+      throw new Error(`Storage key escapes root: ${key}`);
+    }
+    return abs;
+  }
+}

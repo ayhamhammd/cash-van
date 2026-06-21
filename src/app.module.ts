@@ -44,6 +44,8 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { SyncModule } from './modules/sync/sync.module';
 import { ErpSyncModule } from './modules/erp-sync/erp-sync.module';
 import { ApprovalsModule } from './modules/approvals/approvals.module';
+import { AgentModule } from './modules/agent/agent.module';
+import { OffersModule } from './modules/offers/offers.module';
 
 @Module({
   imports: [
@@ -99,6 +101,8 @@ import { ApprovalsModule } from './modules/approvals/approvals.module';
     ApprovalsModule,
     SyncModule,
     ErpSyncModule,
+    AgentModule,
+    OffersModule,
   ],
   controllers: [HealthController],
   providers: [
