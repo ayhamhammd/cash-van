@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 
 import { StorageService } from '../../../common/storage/storage.service';
 import { AgentConversation } from '../entities/agent-conversation.entity';
@@ -78,7 +78,7 @@ export class AgentStoreService {
     input: CreateReportInput,
     extension: string,
   ): Promise<ReportRef> {
-    const id = uuidv4();
+    const id = randomUUID();
     const storageKey = `agent-reports/${id}.${extension}`;
     await this.storage.save(storageKey, input.buffer);
 
