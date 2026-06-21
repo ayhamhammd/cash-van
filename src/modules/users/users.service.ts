@@ -60,6 +60,7 @@ export class UsersService {
   async changePassword(id: string, newPassword: string): Promise<void> {
     const user = await this.findOneOrThrow(id);
     user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    user.mustChangePassword = false; // they've now set their own
     await this.usersRepo.save(user);
   }
 

@@ -29,4 +29,24 @@ export class UpdateErpDto {
   @IsString()
   @MaxLength(512)
   apiKey?: string;
+
+  @ApiPropertyOptional({
+    description: 'Cash-van store the ERP van warehouse maps to (e.g. "VAN-01"), for stock sync.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  vanStore?: string;
+
+  @ApiPropertyOptional({ description: 'ERP category id used when mirroring a new item to the ERP.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  defaultCategoryId?: string;
+
+  @ApiPropertyOptional({ description: 'ERP tax-rate id used when mirroring a new item to the ERP.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  defaultTaxRateId?: string;
 }

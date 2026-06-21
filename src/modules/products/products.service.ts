@@ -1,5 +1,6 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Brackets, IsNull, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
@@ -12,6 +13,7 @@ export class ProductsService {
   constructor(
     @InjectRepository(ItemCart)
     private readonly products: Repository<ItemCart>,
+    private readonly events: EventEmitter2,
   ) {}
 
   async list(query: ListProductsQuery): Promise<{ items: ItemCart[]; total: number }> {
@@ -69,7 +71,15 @@ export class ProductsService {
       taxRate: (dto.taxRate ?? 0.16).toString(),
       taxPercentage: ((dto.taxRate ?? 0.16) * 100).toFixed(2),
     });
-    return this.products.save(entity);
+    const saved = await this.products.save(entity);
+    // Mirror to the ERP (ErpSyncService listener; no-op when ERP off / defaults unset).
+    this.events.emit('erp.item.created', {
+      itemNumber: saved.itemNumber,
+      name: saved.name ?? saved.nameAr ?? saved.itemNumber,
+      priceFils: saved.price ?? 0,
+      costFils: saved.cost ?? 0,
+    });
+    return saved;
   }
 
   async update(id: string, dto: UpdateProductDto): Promise<ItemCart> {

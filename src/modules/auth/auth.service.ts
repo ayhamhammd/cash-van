@@ -23,6 +23,8 @@ export interface LoginResponse {
     permissions: Record<string, boolean>;
     /** Granular dashboard permission keys. */
     permKeys: string[];
+    /** True for a fresh salesman login — client must force a password change. */
+    mustChangePassword: boolean;
   };
 }
 
@@ -83,6 +85,7 @@ export class AuthService {
         repId,
         permissions,
         permKeys,
+        mustChangePassword: user.mustChangePassword ?? false,
       },
     };
   }

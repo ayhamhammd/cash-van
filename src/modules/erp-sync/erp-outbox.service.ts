@@ -5,6 +5,8 @@ import { LessThanOrEqual, Repository } from 'typeorm';
 
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
+import { Collection } from '../collections/entities/collection.entity';
+import { Customer } from '../customers/entities/customer.entity';
 import { SettingsService } from '../settings/settings.service';
 import { ErpHttpClient } from './erp-http.client';
 import { ErpIdMap } from './entities/erp-id-map.entity';
@@ -29,6 +31,8 @@ export class ErpOutboxService {
     @InjectRepository(ErpIdMap) private readonly idmap: Repository<ErpIdMap>,
     @InjectRepository(VoucherHeader) private readonly headers: Repository<VoucherHeader>,
     @InjectRepository(VoucherTransaction) private readonly lines: Repository<VoucherTransaction>,
+    @InjectRepository(Collection) private readonly collections: Repository<Collection>,
+    @InjectRepository(Customer) private readonly customers: Repository<Customer>,
   ) {}
 
   /** Queue a van document for push to the ERP (best-effort; never throws to the caller). */
@@ -85,25 +89,37 @@ export class ErpOutboxService {
 
   private async pushOne(row: ErpOutbox): Promise<void> {
     try {
-      const built = await this.buildPayload(row);
-      if (!built) {
+      const calls = await this.buildCalls(row);
+      if (!calls || calls.length === 0) {
         return this.fail(row, 'payload could not be built (source missing)');
       }
-      const res = await this.erp.post(built.path, built.body, row.ref);
-      if (res.ok) {
-        row.status = 'posted';
-        row.error = null;
-        row.resultRef = this.extractResultRef(res.data);
-        await this.outbox.save(row);
-        if (row.kind === 'SALE_INVOICE' && row.resultRef) {
-          await this.mapVoucher(row.ref, row.resultRef);
-        }
-        return;
+      // A document may need >1 ERP call (a TRANSFER = OUT + IN adjustments). Each
+      // call carries its own externalId, so a retry replays them idempotently.
+      let lastData: unknown = null;
+      for (const c of calls) {
+        const res = await this.erp.post(c.path, c.body, c.idem ?? row.ref);
+        if (!res.ok) return this.fail(row, res.error ?? 'ERP rejected the document');
+        lastData = res.data;
       }
-      await this.fail(row, res.error ?? 'ERP rejected the document');
+      row.status = 'posted';
+      row.error = null;
+      row.resultRef = this.extractResultRef(lastData);
+      await this.outbox.save(row);
+      if (row.kind === 'SALE_INVOICE' && row.resultRef) {
+        await this.mapVoucher(row.ref, row.resultRef);
+      }
     } catch (e) {
       await this.fail(row, e instanceof Error ? e.message : String(e));
     }
+  }
+
+  /** Resolve a queued document to the ERP call(s) needed to mirror it. */
+  private async buildCalls(
+    row: ErpOutbox,
+  ): Promise<Array<{ path: string; body: Record<string, unknown>; idem?: string }> | null> {
+    if (row.kind === 'STOCK_TRANSFER') return this.buildTransferCalls(row.ref);
+    const one = await this.buildPayload(row);
+    return one ? [one] : null;
   }
 
   private async fail(row: ErpOutbox, error: string): Promise<void> {
@@ -126,7 +142,67 @@ export class ErpOutboxService {
   ): Promise<{ path: string; body: Record<string, unknown> } | null> {
     if (row.kind === 'SALE_INVOICE') return this.buildSale(row.ref);
     if (row.kind === 'SALES_RETURN') return this.buildReturn(row.ref);
-    return null; // PAYMENT: next increment
+    if (row.kind === 'SALES_ORDER') return this.buildOrder(row.ref);
+    if (row.kind === 'STOCK_ADJUSTMENT') return this.buildAdjustment(row.ref);
+    if (row.kind === 'PAYMENT') return this.buildPayment(row.ref);
+    return null; // STOCK_TRANSFER handled by buildCalls
+  }
+
+  /**
+   * Build an ERP customer receipt from a confirmed cash-van collection. The
+   * collection IS the payment receipt: pushed at the customer level (on-account),
+   * allocated to an invoice only if a resolvable ERP invoice number is known.
+   */
+  private async buildPayment(
+    collectionId: string,
+  ): Promise<{ path: string; body: Record<string, unknown> } | null> {
+    const col = await this.collections.findOne({ where: { id: collectionId } });
+    if (!col) return null;
+    const customer = await this.customers.findOne({ where: { id: col.customerId } });
+    if (!customer?.customerNumber) return null; // can't receipt without a customer code
+    return {
+      path: 'receipts',
+      body: {
+        externalId: collectionId,
+        customerCode: customer.customerNumber,
+        amount: col.amount / 1000, // fils → JOD major (ERP expects decimal)
+        paymentMethod: col.method === 'cheque' ? 'CHECK' : 'CASH',
+        notes: col.note ?? undefined,
+      },
+    };
+  }
+
+  /**
+   * The van store for a voucher == the salesman code == the ERP warehouse code
+   * (one shared identity). Prefer a line's own store, fall back to the voucher's
+   * userCode (the salesman who created it).
+   */
+  private vanStoreOf(lines: VoucherTransaction[], userCode: string): string {
+    for (const l of lines) {
+      const s = l.storeNumber ?? l.fromStoreNumber ?? l.toStoreNumber;
+      if (s) return s;
+    }
+    return userCode;
+  }
+
+  /** Build an ERP sales-order from a cash-van ORDER voucher (resolves UUIDs via id-map). */
+  private async buildOrder(
+    voucherNumber: string,
+  ): Promise<{ path: string; body: Record<string, unknown> } | null> {
+    const header = await this.headers.findOne({ where: { voucherNumber } });
+    if (!header?.customerNumber) return null;
+    const cust = await this.idmap.findOne({
+      where: { entity: 'customer', localId: header.customerNumber },
+    });
+    if (!cust?.erpId) return null; // customer not mirrored to the ERP yet
+    const lines = await this.lines.find({ where: { voucherNumber } });
+    const orderLines: Array<{ skuId: string; quantity: number }> = [];
+    for (const l of lines) {
+      const sku = await this.idmap.findOne({ where: { entity: 'item', localId: l.itemNumber } });
+      if (!sku?.erpId) return null; // item not mirrored yet
+      orderLines.push({ skuId: sku.erpId, quantity: Math.round(Number(l.itemQty) || 0) });
+    }
+    return { path: 'sales-orders', body: { customerId: cust.erpId, lines: orderLines } };
   }
 
   private async buildSale(
@@ -141,6 +217,7 @@ export class ErpOutboxService {
         externalId: voucherNumber,
         deviceId: header.userCode,
         customerCode: header.customerNumber ?? undefined,
+        warehouseCode: this.vanStoreOf(lines, header.userCode), // attribute to the van
         invoiceDate: header.inDate,
         items: lines.map((l) => ({
           skuCode: l.itemNumber, // cash-van item_number == ERP sku (set on inbound sync)
@@ -170,6 +247,7 @@ export class ErpOutboxService {
         externalId: voucherNumber,
         deviceId: header.userCode,
         customerCode: header.customerNumber ?? undefined,
+        warehouseCode: this.vanStoreOf(lines, header.userCode), // physical return to the van
         originalInvoiceNumber,
         lines: lines.map((l) => ({
           skuCode: l.itemNumber,
@@ -177,6 +255,76 @@ export class ErpOutboxService {
         })),
       },
     };
+  }
+
+  /** Build an ERP stock-adjustment from a cash-van IN/OUT voucher. */
+  private async buildAdjustment(
+    voucherNumber: string,
+  ): Promise<{ path: string; body: Record<string, unknown> } | null> {
+    const header = await this.headers.findOne({ where: { voucherNumber } });
+    if (!header) return null;
+    const lines = await this.lines.find({ where: { voucherNumber } });
+    if (!lines.length) return null;
+    return {
+      path: 'stock-adjustments',
+      body: {
+        externalId: voucherNumber,
+        deviceId: header.userCode,
+        warehouseCode: this.vanStoreOf(lines, header.userCode),
+        type: header.transKind === 'IN' ? 'IN' : 'OUT',
+        items: lines.map((l) => ({
+          skuCode: l.itemNumber,
+          quantity: Math.round(Number(l.itemQty) || 0),
+        })),
+      },
+    };
+  }
+
+  /**
+   * A van-to-van TRANSFER → two immediate stock-adjustments (OUT of source van,
+   * IN to destination van). Unlike the ERP's `stock-transfers` document (which
+   * stays PENDING_DISPATCH until staff dispatch + receive), adjustments move
+   * stock on both vans right away — matching the dashboard's atomic transfer.
+   * Distinct externalIds per leg make retries idempotent.
+   */
+  private async buildTransferCalls(
+    voucherNumber: string,
+  ): Promise<Array<{ path: string; body: Record<string, unknown>; idem: string }> | null> {
+    const header = await this.headers.findOne({ where: { voucherNumber } });
+    if (!header) return null;
+    const lines = await this.lines.find({ where: { voucherNumber } });
+    if (!lines.length) return null;
+    const from = lines.find((l) => l.fromStoreNumber)?.fromStoreNumber;
+    const to = lines.find((l) => l.toStoreNumber)?.toStoreNumber;
+    if (!from || !to) return null; // a transfer needs both endpoints
+    const items = lines.map((l) => ({
+      skuCode: l.itemNumber,
+      quantity: Math.round(Number(l.itemQty) || 0),
+    }));
+    return [
+      {
+        path: 'stock-adjustments',
+        idem: `${voucherNumber}-OUT`,
+        body: {
+          externalId: `${voucherNumber}-OUT`,
+          deviceId: header.userCode,
+          warehouseCode: from,
+          type: 'OUT',
+          items,
+        },
+      },
+      {
+        path: 'stock-adjustments',
+        idem: `${voucherNumber}-IN`,
+        body: {
+          externalId: `${voucherNumber}-IN`,
+          deviceId: header.userCode,
+          warehouseCode: to,
+          type: 'IN',
+          items,
+        },
+      },
+    ];
   }
 
   private extractResultRef(data: unknown): string | null {

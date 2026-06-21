@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Brackets, Repository } from 'typeorm';
 import { parse } from 'csv-parse/sync';
 
@@ -53,6 +54,7 @@ export class CustomersService {
     private readonly attachments: Repository<CustomerAttachment>,
     private readonly jobs: JobsService,
     private readonly storage: StorageService,
+    private readonly events: EventEmitter2,
   ) {}
 
   async create(dto: CreateCustomerDto): Promise<Customer> {
@@ -68,7 +70,14 @@ export class CustomersService {
       nameAr: dto.nameAr ?? dto.customerName,
       phoneHash: hashPhone(dto.phone),
     });
-    return this.customers.save(entity);
+    const saved = await this.customers.save(entity);
+    // Mirror to the ERP (handled by ErpSyncService listener; no-op when ERP off).
+    this.events.emit('erp.customer.created', {
+      code: saved.customerNumber,
+      name: saved.customerName,
+      phone: saved.phone ?? null,
+    });
+    return saved;
   }
 
   /** Next serial customer number: CUST-000001. */

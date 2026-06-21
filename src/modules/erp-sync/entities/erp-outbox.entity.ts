@@ -7,7 +7,13 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
-export type ErpOutboxKind = 'SALE_INVOICE' | 'SALES_RETURN' | 'PAYMENT';
+export type ErpOutboxKind =
+  | 'SALE_INVOICE'
+  | 'SALES_RETURN'
+  | 'SALES_ORDER'
+  | 'STOCK_ADJUSTMENT'
+  | 'STOCK_TRANSFER'
+  | 'PAYMENT';
 export type ErpOutboxStatus = 'pending' | 'posted' | 'failed' | 'dead_letter';
 
 /** Outbound queue: van transactions to push to the ERP (idempotent by `ref`). */

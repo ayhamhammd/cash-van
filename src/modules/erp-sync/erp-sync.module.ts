@@ -2,9 +2,14 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { Warehouse } from '../warehouses/entities/warehouse.entity';
+import { Rep } from '../reps/entities/rep.entity';
+import { Customer } from '../customers/entities/customer.entity';
+import { Collection } from '../collections/entities/collection.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
 import { SettingsModule } from '../settings/settings.module';
+import { VouchersModule } from '../vouchers/vouchers.module';
 import { ErpHttpClient } from './erp-http.client';
 import { ErpSyncService } from './erp-sync.service';
 import { ErpOutboxService } from './erp-outbox.service';
@@ -18,6 +23,10 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
   imports: [
     TypeOrmModule.forFeature([
       ItemCart,
+      Warehouse,
+      Rep,
+      Customer,
+      Collection,
       ErpIdMap,
       ErpSyncCursor,
       ErpOutbox,
@@ -25,6 +34,7 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
       VoucherTransaction,
     ]),
     SettingsModule,
+    VouchersModule,
   ],
   controllers: [ErpSyncController],
   providers: [ErpHttpClient, ErpSyncService, ErpOutboxService],

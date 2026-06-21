@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 
 import { VoucherHeader } from './entities/voucher-header.entity';
@@ -89,6 +90,7 @@ export class VouchersService {
     @InjectRepository(PaymentCheque)
     private readonly chequesRepo: Repository<PaymentCheque>,
     private readonly userCtx: UserContextService,
+    private readonly events: EventEmitter2,
   ) {}
 
   async create(dto: CreateVoucherDto): Promise<VoucherHeader> {
@@ -96,7 +98,16 @@ export class VouchersService {
     // price overrides — otherwise the client must file an approval request
     // (the approving manager re-runs create() under their own role).
     await this.enforceSalesmanPolicy(dto);
-    return this.createUnchecked(dto);
+    const result = await this.createUnchecked(dto);
+    // Mirror posted vouchers to the ERP (ErpSync listener filters by kind + enqueues
+    // an outbox push; no-op when ERP off). Stock IN/OUT adjustments aren't mirrored.
+    if (result.isPosted) {
+      this.events.emit('erp.voucher.posted', {
+        voucherNumber: result.voucherNumber,
+        transKind: result.transKind,
+      });
+    }
+    return result;
   }
 
   private async createUnchecked(dto: CreateVoucherDto): Promise<VoucherHeader> {

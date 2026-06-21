@@ -47,6 +47,20 @@ export class ErpHttpClient {
     return { data, total };
   }
 
+  /** GET a single ERP resource → unwrap the `data` object (e.g. an invoice detail). */
+  async getOne<T>(path: string): Promise<T | null> {
+    const cfg = await this.settings.getErpConfig();
+    if (!cfg.baseUrl || !cfg.apiKey) throw new Error('ERP base URL or API key not configured');
+    const base = cfg.baseUrl.replace(/\/+$/, '');
+    const res = await fetch(`${base}/api/v1/${path}`, {
+      headers: { Authorization: `Bearer ${cfg.apiKey}` },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { data?: T } | null;
+    return body?.data ?? null;
+  }
+
   /**
    * POST to an ERP write endpoint with an Idempotency-Key. Treats a duplicate
    * (HTTP 409 DUPLICATE_EXTERNAL_ID or an idempotent replay) as success, since
@@ -81,6 +95,25 @@ export class ErpHttpClient {
       return { ok: false, duplicate: false, data: json, status: res.status, error: code ?? `HTTP ${res.status}` };
     }
     return { ok: true, duplicate: false, data: json, status: res.status };
+  }
+
+  /** PATCH an ERP resource (e.g. organization settings). Returns the parsed `data`. */
+  async patch<T>(path: string, body: unknown): Promise<T | null> {
+    const cfg = await this.settings.getErpConfig();
+    if (!cfg.baseUrl || !cfg.apiKey) throw new Error('ERP base URL or API key not configured');
+    const base = cfg.baseUrl.replace(/\/+$/, '');
+    const res = await fetch(`${base}/api/v1/${path}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) throw new Error(`ERP PATCH ${path} failed (HTTP ${res.status})`);
+    const json = (await res.json().catch(() => null)) as { data?: T } | null;
+    return json?.data ?? null;
   }
 
   private errorCode(json: unknown): string | null {

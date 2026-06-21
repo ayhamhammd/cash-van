@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Repository } from 'typeorm';
 
 import { AppSettings, TaxCalcMethod } from './entities/app-settings.entity';
@@ -35,6 +36,7 @@ export interface AppSettingsView {
     apiKeyLast4: string | null;
     isConfigured: boolean;
     lastSyncAt: Date | null;
+    vanStore: string | null;
   };
   updatedAt: Date;
   updatedBy: string | null;
@@ -55,6 +57,7 @@ export class SettingsService {
     @InjectRepository(AppSettings)
     private readonly repo: Repository<AppSettings>,
     private readonly userCtx: UserContextService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /** Internal: seller identity for JoFotara `accountingSupplierParty`. */
@@ -111,7 +114,30 @@ export class SettingsService {
     Object.assign(row, dto);
     row.updatedBy = this.userCtx.getUserId();
     await this.repo.save(row);
+    // Mirror company name + tax mode to the ERP (ErpSyncService listener; no-op when ERP off).
+    this.events.emit('erp.settings.updated', {
+      name: row.companyNameEn || row.companyNameAr,
+      salesTaxMode: row.taxCalcMethod,
+    });
     return this.toView(row);
+  }
+
+  /**
+   * Apply company name + tax mode pulled FROM the ERP. Writes the row directly
+   * (no 'erp.settings.updated' event) so an inbound pull never echoes back out.
+   * The Arabic name is only set when currently empty (don't clobber a curated one).
+   */
+  async applyErpOrg(name: string | null, salesTaxMode: string | null): Promise<void> {
+    const row = await this.requireRow();
+    let changed = false;
+    if (name) {
+      if (row.companyNameEn !== name) { row.companyNameEn = name; changed = true; }
+      if (!row.companyNameAr) { row.companyNameAr = name; changed = true; }
+    }
+    if (salesTaxMode === 'EXCLUSIVE' || salesTaxMode === 'INCLUSIVE') {
+      if (row.taxCalcMethod !== salesTaxMode) { row.taxCalcMethod = salesTaxMode; changed = true; }
+    }
+    if (changed) await this.repo.save(row);
   }
 
   /**
@@ -177,6 +203,7 @@ export class SettingsService {
         apiKeyLast4: row.erpApiKeyLast4 ?? null,
         isConfigured: !!row.erpBaseUrl && !!row.erpApiKeyLast4,
         lastSyncAt: row.erpLastSyncAt ?? null,
+        vanStore: row.erpVanStore ?? null,
       },
       updatedAt: row.updatedAt,
       updatedBy: row.updatedBy ?? null,
@@ -188,12 +215,23 @@ export class SettingsService {
     const row = await this.requireRow();
     row.erpSyncEnabled = dto.enabled;
     if (dto.baseUrl !== undefined) {
-      row.erpBaseUrl = dto.baseUrl.replace(/\/+$/, '') || null;
+      // Store the ORIGIN only — the HTTP client appends `/api/v1/...` itself, so
+      // strip a pasted `/api/v1` (or `/api`) suffix and any trailing slash.
+      row.erpBaseUrl =
+        dto.baseUrl
+          .trim()
+          .replace(/\/+$/, '')
+          .replace(/\/api(\/v\d+)?$/i, '') || null;
     }
     if (dto.apiKey) {
       row.erpApiKeyEncrypted = encryptSecret(dto.apiKey);
       row.erpApiKeyLast4 = maskSecret(dto.apiKey).slice(-4);
     }
+    if (dto.vanStore !== undefined) row.erpVanStore = dto.vanStore.trim() || null;
+    if (dto.defaultCategoryId !== undefined)
+      row.erpDefaultCategoryId = dto.defaultCategoryId.trim() || null;
+    if (dto.defaultTaxRateId !== undefined)
+      row.erpDefaultTaxRateId = dto.defaultTaxRateId.trim() || null;
     row.updatedBy = this.userCtx.getUserId();
     await this.repo.save(row);
     return {
@@ -202,11 +240,19 @@ export class SettingsService {
       apiKeyLast4: row.erpApiKeyLast4 ?? null,
       isConfigured: !!row.erpBaseUrl && !!row.erpApiKeyLast4,
       lastSyncAt: row.erpLastSyncAt ?? null,
+      vanStore: row.erpVanStore ?? null,
     };
   }
 
   /** Internal: decrypted ERP connection for the sync engine. */
-  async getErpConfig(): Promise<{ enabled: boolean; baseUrl: string | null; apiKey: string | null }> {
+  async getErpConfig(): Promise<{
+    enabled: boolean;
+    baseUrl: string | null;
+    apiKey: string | null;
+    vanStore: string | null;
+    defaultCategoryId: string | null;
+    defaultTaxRateId: string | null;
+  }> {
     const row = await this.repo
       .createQueryBuilder('s')
       .addSelect('s.erpApiKeyEncrypted')
@@ -217,6 +263,9 @@ export class SettingsService {
       enabled: row.erpSyncEnabled,
       baseUrl: row.erpBaseUrl ?? null,
       apiKey: row.erpApiKeyEncrypted ? decryptSecret(row.erpApiKeyEncrypted) : null,
+      vanStore: row.erpVanStore ?? null,
+      defaultCategoryId: row.erpDefaultCategoryId ?? null,
+      defaultTaxRateId: row.erpDefaultTaxRateId ?? null,
     };
   }
 

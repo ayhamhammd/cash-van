@@ -85,6 +85,17 @@ export class AppSettings {
   @Column({ name: 'erp_last_sync_at', type: 'timestamptz', nullable: true })
   erpLastSyncAt?: Date | null;
 
+  /** The cash-van store that the ERP's van warehouse maps to (for stock sync). */
+  @Column({ name: 'erp_van_store', type: 'text', nullable: true })
+  erpVanStore?: string | null;
+
+  /** ERP category + tax-rate ids used when mirroring a new cash-van item to the ERP. */
+  @Column({ name: 'erp_default_category_id', type: 'text', nullable: true })
+  erpDefaultCategoryId?: string | null;
+
+  @Column({ name: 'erp_default_tax_rate_id', type: 'text', nullable: true })
+  erpDefaultTaxRateId?: string | null;
+
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 

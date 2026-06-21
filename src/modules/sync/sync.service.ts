@@ -182,7 +182,7 @@ export class SyncService {
       }));
       const created = await this.vouchers.create(dto);
       await this.markPosted(row.id, created.voucherNumber);
-      await this.queueErpPush(created.transKind, created.voucherNumber);
+      // ERP push is enqueued via the 'erp.voucher.posted' event from vouchers.create.
     } catch (e) {
       await this.markFailed(row.id, e);
     }

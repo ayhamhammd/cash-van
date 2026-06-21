@@ -1,10 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsInt,
   IsNumberString,
   IsOptional,
   IsString,
   IsUrl,
   Length,
+  Min,
 } from 'class-validator';
 
 export class CreateItemDto {
@@ -22,6 +24,18 @@ export class CreateItemDto {
   @IsString()
   @Length(1, 64)
   barcode!: string;
+
+  @ApiPropertyOptional({ default: 0, description: 'Sale price in fils (minor units; 1 JOD = 1000 fils)' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  price?: number;
+
+  @ApiPropertyOptional({ default: 0, description: 'Unit cost in fils (minor units; 1 JOD = 1000 fils)' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  cost?: number;
 
   @ApiPropertyOptional({ default: '0', description: '0..100' })
   @IsOptional()

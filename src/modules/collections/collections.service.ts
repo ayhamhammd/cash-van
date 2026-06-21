@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Between, In, LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
 
 import { Collection } from './entities/collection.entity';
@@ -12,6 +13,7 @@ import { Cheque } from './entities/cheque.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { CreateCollectionDto } from './dto/create-collection.dto';
+import { UpdateCollectionDto } from './dto/update-collection.dto';
 import { ListCollectionsQuery } from './dto/query.dto';
 import { BatchDepositDto } from './dto/collection-actions.dto';
 
@@ -37,6 +39,7 @@ export class CollectionsService {
     @InjectRepository(Cheque) private readonly cheques: Repository<Cheque>,
     @InjectRepository(Rep) private readonly reps: Repository<Rep>,
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
+    private readonly events: EventEmitter2,
   ) {}
 
   async list(q: ListCollectionsQuery): Promise<{ items: Collection[]; total: number }> {
@@ -137,7 +140,60 @@ export class CollectionsService {
     collection.status = 'confirmed';
     collection.confirmedAt = new Date();
     await this.collections.save(collection);
+    // Mirror the confirmed receipt to the ERP (best-effort; no-op when ERP off).
+    this.events.emit('erp.collection.confirmed', { collectionId: id });
     return this.findOne(id);
+  }
+
+  /**
+   * Edit a collection — allowed only while it is still `pending` (not yet
+   * confirmed/pushed to the ERP, whose receipts are immutable). Updates the
+   * collection fields and, for cheques, the linked cheque record.
+   */
+  async update(id: string, dto: UpdateCollectionDto): Promise<Collection> {
+    const collection = await this.findOne(id);
+    if (collection.status !== 'pending') {
+      throw new ConflictException(
+        `Only a pending collection can be edited (status '${collection.status}')`,
+      );
+    }
+    if (dto.customerId && !(await this.customers.exist({ where: { id: dto.customerId } }))) {
+      throw new BadRequestException(`Customer ${dto.customerId} not found`);
+    }
+    const method = dto.method ?? collection.method;
+    if (method === 'cheque' && !collection.cheque && !dto.cheque) {
+      throw new BadRequestException('cheque details are required when method=cheque');
+    }
+
+    return this.collections.manager.transaction(async (em) => {
+      if (dto.customerId !== undefined) collection.customerId = dto.customerId;
+      if (dto.invoiceId !== undefined) collection.invoiceId = dto.invoiceId ?? null;
+      if (dto.amount !== undefined) collection.amount = dto.amount;
+      if (dto.method !== undefined) collection.method = dto.method;
+      if (dto.collectedAt !== undefined) collection.collectedAt = new Date(dto.collectedAt);
+      if (dto.note !== undefined) collection.note = dto.note ?? null;
+      await em.getRepository(Collection).save(collection);
+
+      if (dto.cheque) {
+        const repo = em.getRepository(Cheque);
+        const existing = await repo.findOne({ where: { collectionId: id } });
+        const c = dto.cheque;
+        const row = existing ?? repo.create({ collectionId: id, status: 'pending' });
+        if (c.bankName !== undefined) row.bankName = c.bankName ?? null;
+        if (c.chequeNumber !== undefined) row.chequeNumber = c.chequeNumber ?? null;
+        if (c.payee !== undefined) row.payee = c.payee ?? null;
+        if (c.amountWords !== undefined) row.amountWords = c.amountWords ?? null;
+        if (c.dueDate !== undefined) row.dueDate = c.dueDate ?? null;
+        if (c.wordsMatch !== undefined) row.wordsMatch = c.wordsMatch;
+        row.amount = dto.amount ?? collection.amount;
+        await repo.save(row);
+      }
+
+      return em.getRepository(Collection).findOneOrFail({
+        where: { id },
+        relations: { cheque: true },
+      });
+    });
   }
 
   async batchDeposit(dto: BatchDepositDto): Promise<{ deposited: number; skipped: string[] }> {
