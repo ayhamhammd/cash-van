@@ -107,6 +107,35 @@ export class OffersService {
     return this.toView(await this.findOneOrThrow(id));
   }
 
+  /**
+   * Currently-active offers for a sale device to cache/sync. Returns a plain
+   * array (no pagination) of offers whose schedule is live now. Eligibility and
+   * limits are NOT fully applied here — the device previews with this list and
+   * the server stays authoritative at /offers/evaluate. The only narrowing done
+   * is the optional store scope (so a van doesn't cache offers for other stores).
+   */
+  async findActive(
+    customerNumber?: string,
+    storeNumber?: string,
+  ): Promise<OfferView[]> {
+    const now = new Date();
+    const qb = this.offersRepo.createQueryBuilder('o');
+    this.applyStatusFilter(qb, 'active', now);
+    const offers = await qb
+      .orderBy('o.priority', 'DESC')
+      .addOrderBy('o.created_at', 'ASC')
+      .getMany();
+
+    const scoped = storeNumber
+      ? offers.filter((o) => {
+          const stores = o.eligibility?.storeNumbers;
+          return !stores || stores.length === 0 || stores.includes(storeNumber);
+        })
+      : offers;
+
+    return scoped.map((o) => this.toView(o, now));
+  }
+
   async update(id: string, dto: UpdateOfferDto): Promise<OfferView> {
     const offer = await this.findOneOrThrow(id);
 

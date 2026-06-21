@@ -78,6 +78,22 @@ export class OffersController {
     });
   }
 
+  @Get('active')
+  @ApiOperation({
+    summary: 'List currently-active offers (client cache/sync)',
+    description:
+      'Plain array of offers whose schedule is live now, for the sale device to ' +
+      'cache. Optional storeNumber narrows to offers scoped to that store. ' +
+      'Eligibility/limits remain authoritative at /offers/evaluate.',
+  })
+  @ApiOkResponse({ description: 'Active offers' })
+  activeOffers(
+    @Query('customerNumber') customerNumber?: string,
+    @Query('storeNumber') storeNumber?: string,
+  ) {
+    return this.offers.findActive(customerNumber, storeNumber);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get one offer' })
   @ApiParam({ name: 'id', format: 'uuid' })
