@@ -81,12 +81,19 @@ curl -s "${auth[@]}" -X PATCH "$BASE/offers/$ID" -d '{"priority":50}' | jq '.dat
 curl -s -o /dev/null -w "%{http_code}\n" "${auth[@]}" -X DELETE "$BASE/offers/$ID"  # → 204
 ```
 
-## 4. Redemptions report (after posting a SALE that applied offers)
-Post a SALE voucher whose `appliedOfferIds` includes a seeded offer id (see the vouchers API), then:
+## 4. End-to-end at sale time (server-authoritative)
+Offers apply automatically when a **SALE** is created — you do **not** send `appliedOfferIds`; the server re-evaluates the cart and bakes in discounts + free lines + redemptions. Create a SALE with a trigger cart (e.g. 6× COLA-330 to fire the BUY_X_GET_Y_FREE offer) via the vouchers API, then inspect the result:
+```bash
+# the created voucher should carry the offer effects:
+curl -s "${auth[@]}" "$BASE/vouchers/$VOUCHER_ID" | jq '{appliedOfferIds, transactions: [.data.transactions[] | {itemNumber, discountPercentage, discountValue}]}'
+```
+Expect: `appliedOfferIds` is non-empty; a **WATER-330 free line** is present with `discountPercentage = 100` (net 0); and any line/invoice discounts are baked in — matching what `/offers/evaluate` previewed for the same cart.
+
+Then the redemption ledger:
 ```bash
 curl -s "${auth[@]}" "$BASE/offers/$OFFER_ID/redemptions" | jq '{items: .data.items, totals: .data.totals}'
 ```
-Expect: one row per applied offer with `discountFils` and `freeItems`, and a `totals` summary.
+Expect: one row per applied offer with `discountFils` and `freeItems`, plus a `totals` summary. Re-creating the same `voucherNumber` is rejected (409), so redemptions never double-count.
 
 ## 5. Active-offers cache (mobile)
 ```bash

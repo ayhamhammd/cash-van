@@ -135,8 +135,13 @@ data = Offer[]
 
 ---
 
-## Voucher integration (authoritative re-apply)
-Offers are recomputed inside `VouchersService.create` for **SALE** vouchers. The client sends `appliedOfferIds: string[]` on the create DTO; the server recomputes discounts/free amounts from the cart, writes one `offer_redemptions` row per applied offer (keyed by `voucher_number`), increments `redemptionCount`, and persists `applied_offer_ids` on the voucher header. Client-sent discounts are never trusted.
+## Voucher integration (server-authoritative)
+Offers are applied **inside `VouchersService.create` for SALE vouchers** — the server is the single source of truth. On create it:
+1. Re-evaluates active offers against the cart (same engine as `/offers/evaluate`).
+2. **Applies** the result to the voucher: per-line discounts → `discountValue`, the invoice discount → header discount, and each free line is **appended as its own transaction** at the item's real price with `discountPercentage = 100` (net 0, stock still moves).
+3. Writes one `offer_redemptions` row per applied offer (keyed by `voucher_number`), increments `redemptionCount`, and stamps `applied_offer_ids` on the header.
+
+Clients (mobile/dashboard) therefore **do not need to send `appliedOfferIds`** — any client-sent value is ignored and overwritten by the server's own evaluation, so the posted voucher always matches what `/offers/evaluate` previews. Offer discounts are system-granted and bypass the salesman manual-discount approval gate. The whole step is best-effort: if evaluation fails the sale still posts (just without offers). Non-SALE vouchers (RETURN/ORDER/…) are never offer-adjusted.
 
 ## Data model
 - `offers` (jsonb `trigger`/`reward`/`eligibility`; schedule, limits, `priority`, `stackable`, `is_active`, `redemption_count`).
