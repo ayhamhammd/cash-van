@@ -6,7 +6,7 @@ How to exercise the offers API end-to-end. Works against local (`http://127.0.0.
 - Run migrations + seed (Render does this automatically on boot via `start:deploy`; locally: `npm run migration:run && npm run seed`). The seed creates **4 demo offers** plus the drinks catalog:
   - **Cash · 5% off each line** — `paymentCondition: CASH`, `minOrderTotal: 10000` (10 JOD), static 5%.
   - **Credit · dynamic** — `paymentCondition: CREDIT`, `minItemCount: 6`, base 10% × 0.5 per 6 items, cap 25%.
-  - **Buy COLA → gift** — `ITEM_QTY_REWARD`, items `[COLA-330]`, GIFT pool `[WATER-330, MANGO-250]`, tiers `10→1, 20→2`.
+  - **Buy COLA → gift** — `ITEM_QTY_REWARD`, items `[COLA-330]`, GIFT pool `[WATER-330, MANGO-250]`, **1 free gift per 10** bought (`itemsPerGift: 10`).
   - **Buy 12 PEPSI → 10% off** — `ITEM_QTY_REWARD`, items `[PEPSI-330]`, `ITEM_PERCENT_DISCOUNT` minQty 12, static 10%.
 - Get a token: `POST /api/v1/auth/login` with the admin (`userNumber: admin`, `password: admin1234`). Use it as `Authorization: Bearer <token>` on every call below.
 
@@ -49,13 +49,13 @@ Expect: `405` — 6 items → floor(6/6)=1 step → 15% × (6×450=2 700) = 405.
 
 ### ITEM_QTY_REWARD — gift
 
-**Gift entitlement (no picks yet):** `10× COLA-330` → tier 10 → 1 gift to choose:
+**Gift entitlement (no picks yet):** `10× COLA-330` → floor(10/10) = 1 gift to choose:
 ```bash
 curl -s "${auth[@]}" -X POST "$BASE/offers/evaluate" \
   -d '{"lines":[{"itemNumber":"COLA-330","qty":10}]}' \
   | jq '.data.appliedOffers[] | select(.freeItemChoice) | .freeItemChoice'
 ```
-Expect: `{ "choices": ["WATER-330","MANGO-250"], "qty": 1 }`. At `qty:20` → `qty: 2`. At `qty:9` → no gift offer.
+Expect: `{ "choices": ["WATER-330","MANGO-250"], "qty": 1 }`. At `qty:20` → `qty: 2`; `qty:1000` → 100 (or the cap). At `qty:9` → no gift offer.
 
 **Gift resolved (rep picked):** pass `chosenFreeItems` → free line(s) come back:
 ```bash

@@ -269,14 +269,14 @@ export class OffersEngineService {
       const reward = offer.reward;
 
       if (reward?.kind === 'GIFT') {
-        const tier = this.bestGiftTier(reward, qty);
-        if (tier && tier.freeQty > 0) {
+        const freeQty = this.giftFreeQty(reward, qty);
+        if (freeQty > 0) {
           triggerSatisfied = true;
-          freeItemChoice = { choices: reward.giftItems, qty: tier.freeQty };
+          freeItemChoice = { choices: reward.giftItems, qty: freeQty };
           // Resolve the rep's picks (∩ pool, up to freeQty) into free lines.
           const picks = (chosenFreeItems ?? [])
             .filter((i) => reward.giftItems.includes(i))
-            .slice(0, tier.freeQty);
+            .slice(0, freeQty);
           for (const itemNumber of picks) {
             freeItems.push({ itemNumber, qty: 1 });
           }
@@ -316,18 +316,11 @@ export class OffersEngineService {
     };
   }
 
-  /** Highest gift tier whose minQty is met by the combined selected-item qty. */
-  private bestGiftTier(
-    reward: GiftReward,
-    qty: number,
-  ): { minQty: number; freeQty: number } | null {
-    let best: { minQty: number; freeQty: number } | null = null;
-    for (const tier of reward.tiers ?? []) {
-      if (qty >= tier.minQty && (!best || tier.minQty > best.minQty)) {
-        best = tier;
-      }
-    }
-    return best;
+  /** Free-gift count: one per `itemsPerGift` bought, capped at `maxFreeQty`. */
+  private giftFreeQty(reward: GiftReward, qty: number): number {
+    if (!reward.itemsPerGift || reward.itemsPerGift < 1) return 0;
+    const n = Math.floor(qty / reward.itemsPerGift);
+    return reward.maxFreeQty != null ? Math.min(n, reward.maxFreeQty) : n;
   }
 
   /**
@@ -495,12 +488,8 @@ export class OffersEngineService {
       const r = offer.reward;
       const on = items.join('/');
       if (r?.kind === 'GIFT') {
-        const tiers = (r.tiers ?? [])
-          .slice()
-          .sort((a, b) => a.minQty - b.minQty)
-          .map((t) => `${t.minQty}→${t.freeQty}`)
-          .join(', ');
-        return `Buy ${on} → gift (${tiers}) from ${r.giftItems.length} items`;
+        const cap = r.maxFreeQty != null ? ` (max ${r.maxFreeQty})` : '';
+        return `Buy ${on}: 1 gift / ${r.itemsPerGift} bought${cap}, from ${r.giftItems.length} items`;
       }
       if (r?.kind === 'ITEM_PERCENT_DISCOUNT') {
         const base =

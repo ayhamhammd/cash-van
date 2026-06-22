@@ -354,16 +354,13 @@ async function seed(): Promise<void> {
       },
       {
         name: 'اشترِ كولا — هدية بالاختيار',
-        description: 'اشترِ 10 كولا = هدية، 20 = هديتان (تختار من مياه/مانجو)',
+        description: 'هدية واحدة لكل 10 كولا (تختار من مياه/مانجو)',
         type: 'ITEM_QTY_REWARD',
         trigger: { itemNumbers: ['COLA-330'] },
         reward: {
           kind: 'GIFT',
           giftItems: ['WATER-330', 'MANGO-250'],
-          tiers: [
-            { minQty: 10, freeQty: 1 },
-            { minQty: 20, freeQty: 2 },
-          ],
+          itemsPerGift: 10,
         },
         eligibility: { customerScope: 'ALL' },
         priority: 8,

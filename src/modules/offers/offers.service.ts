@@ -373,14 +373,11 @@ export class OffersService {
   private assertItemReward(reward: OfferRewardDto): void {
     if (reward?.kind === 'GIFT') {
       this.req(reward.giftItems?.length, 'GIFT reward requires giftItems[]');
-      this.req(reward.tiers?.length, 'GIFT reward requires tiers[]');
-      for (const tier of reward.tiers ?? []) {
-        if (tier.minQty == null || tier.minQty < 1) {
-          throw new BadRequestException('GIFT tier.minQty must be ≥ 1');
-        }
-        if (tier.freeQty == null || tier.freeQty < 1) {
-          throw new BadRequestException('GIFT tier.freeQty must be ≥ 1');
-        }
+      if (reward.itemsPerGift == null || reward.itemsPerGift < 1) {
+        throw new BadRequestException('GIFT reward requires itemsPerGift ≥ 1');
+      }
+      if (reward.maxFreeQty != null && reward.maxFreeQty < 1) {
+        throw new BadRequestException('GIFT maxFreeQty must be ≥ 1');
       }
     } else if (reward?.kind === 'ITEM_PERCENT_DISCOUNT') {
       this.req(reward.minQty, 'ITEM_PERCENT_DISCOUNT requires reward.minQty');

@@ -90,23 +90,21 @@ export interface LinePercentDiscountReward {
   maxPercent?: number;
 }
 
-/** A gift tier: reaching `minQty` (combined selected-item qty) grants `freeQty`
- *  free items, which the rep picks from `giftItems`. Highest reached tier wins. */
-export interface GiftTier {
-  minQty: number;
-  freeQty: number;
-}
-
 /**
- * ITEM_QTY_REWARD gift: the rep picks `freeQty` items (per the matched tier)
- * from the `giftItems` pool at sale; each is added as a free line (net 0).
+ * ITEM_QTY_REWARD gift: the system computes the number of free gifts from the
+ * combined selected-item qty — one free gift per `itemsPerGift` bought
+ * (`freeQty = floor(qty / itemsPerGift)`), capped at `maxFreeQty`. The rep picks
+ * that many items from the `giftItems` pool at sale; each is added at 100% off
+ * (net 0). E.g. itemsPerGift = 10 → buy 10 → 1, buy 20 → 2, buy 1000 → 100.
  */
 export interface GiftReward {
   kind: 'GIFT';
   /** Pool of item numbers the rep may choose the free gift(s) from. */
   giftItems: string[];
-  /** Static tiers, {minQty → freeQty}. */
-  tiers: GiftTier[];
+  /** Buy this many of the selected items to earn one free gift. */
+  itemsPerGift: number;
+  /** Optional cap on the number of free gifts. */
+  maxFreeQty?: number;
 }
 
 /**
