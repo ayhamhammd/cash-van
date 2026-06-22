@@ -26,7 +26,7 @@ import {
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export class CreateOfferDto {
-  @ApiProperty({ example: 'Summer ice-tea 6+1' })
+  @ApiProperty({ example: 'Cash payment — 5% off each line' })
   @IsString()
   @Length(1, 160)
   name!: string;
@@ -41,7 +41,7 @@ export class CreateOfferDto {
   @IsIn(OFFER_TYPES)
   type!: OfferType;
 
-  @ApiProperty({ type: OfferTriggerDto, description: 'Type-specific trigger. Empty {} for LOYALTY_FIRST_PURCHASE.' })
+  @ApiProperty({ type: OfferTriggerDto, description: 'Type-specific trigger (payment condition + optional minimums).' })
   @IsObject()
   @ValidateNested()
   @Type(() => OfferTriggerDto)

@@ -11,13 +11,15 @@ import { OfferRedemption } from './entities/offer-redemption.entity';
 import type {
   AppliedOffer,
   CartLineInput,
-  DiscountReward,
   EvaluatedLine,
   EvaluationContext,
   EvaluationResult,
   FreeItemSpec,
   FreeLine,
+  LinePercentDiscountReward,
   OfferEligibility,
+  PaymentMethodTrigger,
+  PaymentType,
 } from './offers.types';
 
 interface ItemInfo {
@@ -36,16 +38,9 @@ interface RewardOutcome {
   discountFils: number;
 }
 
-export interface RecordedReward {
-  offerId: string;
-  discountFils: number;
-  freeItems: FreeItemSpec[];
-}
-
 /**
  * The discount engine. Stateless w.r.t. the cart: given lines + context it loads
- * the active offers and computes per-line discounts, free lines and invoice
- * discounts. All money is integer fils.
+ * the active offers and computes per-line discounts. All money is integer fils.
  *
  * Stacking rule: offers are considered in priority order (desc, then oldest
  * first). Stackable offers combine; the first NON-stackable offer that applies
@@ -73,13 +68,14 @@ export class OffersEngineService {
   ): Promise<EvaluationResult> {
     const at = ctx.at ?? new Date();
     const cart = this.toCartMap(lines);
+    const itemCount = [...cart.values()].reduce((s, q) => s + q, 0);
 
     const offers = await this.offersRepo.find({
       where: { isActive: true },
       order: { priority: 'DESC', createdAt: 'ASC' },
     });
 
-    const itemMap = await this.loadItems(cart, offers);
+    const itemMap = await this.loadItems(cart);
     const customer = ctx.customerNumber
       ? await this.customersRepo.findOne({
           where: { customerNumber: ctx.customerNumber },
@@ -87,9 +83,7 @@ export class OffersEngineService {
       : null;
 
     const needsNew = offers.some(
-      (o) =>
-        o.type === 'LOYALTY_FIRST_PURCHASE' ||
-        o.eligibility?.customerScope === 'NEW_ONLY',
+      (o) => o.eligibility?.customerScope === 'NEW_ONLY',
     );
     const isNew =
       needsNew && ctx.customerNumber
@@ -125,7 +119,6 @@ export class OffersEngineService {
     for (const offer of offers) {
       if (locked) break;
       if (!this.isWithinSchedule(offer, at)) continue;
-      if (offer.type === 'LOYALTY_FIRST_PURCHASE' && (!customer || !isNew)) continue;
       if (!this.isEligible(offer.eligibility, customer, ctx, isNew)) continue;
       if (
         offer.totalRedemptionLimit != null &&
@@ -137,7 +130,14 @@ export class OffersEngineService {
         if (used >= offer.perCustomerLimit) continue;
       }
 
-      const outcome = this.computeReward(offer, cart, itemMap, subtotalFils);
+      const outcome = this.computeReward(
+        offer,
+        cart,
+        itemMap,
+        subtotalFils,
+        itemCount,
+        ctx.paymentMethod ?? null,
+      );
       if (!outcome.triggerSatisfied) continue;
 
       for (const [itemNumber, fils] of outcome.lineDiscounts) {
@@ -157,7 +157,7 @@ export class OffersEngineService {
         offerId: offer.id,
         name: offer.name,
         type: offer.type,
-        summary: this.summarize(offer, itemMap),
+        summary: this.summarize(offer),
         discountFils: outcome.discountFils,
         freeItems: outcome.freeItems,
         freeItemChoice: outcome.freeItemChoice,
@@ -190,7 +190,8 @@ export class OffersEngineService {
       invoiceDiscountFils,
       netBeforeInvoiceDiscount,
     );
-    const grandTotalFils = netBeforeInvoiceDiscount + taxFils - clampedInvoiceDiscount;
+    const grandTotalFils =
+      netBeforeInvoiceDiscount + taxFils - clampedInvoiceDiscount;
 
     return {
       lines: resultLines,
@@ -208,38 +209,6 @@ export class OffersEngineService {
     };
   }
 
-  /**
-   * Compute the reward each of the named offers grants against a cart, WITHOUT
-   * eligibility/schedule gating (the sale already asserted these applied). Used
-   * by the redemption-recording hook. Offers whose trigger isn't satisfied are
-   * dropped.
-   */
-  async computeForOffers(
-    offerIds: string[],
-    lines: CartLineInput[],
-  ): Promise<RecordedReward[]> {
-    if (!offerIds.length) return [];
-    const cart = this.toCartMap(lines);
-    const offers = await this.offersRepo.find({ where: { id: In(offerIds) } });
-    if (!offers.length) return [];
-    const itemMap = await this.loadItems(cart, offers);
-    const subtotalFils = [...cart].reduce(
-      (s, [n, q]) => s + roundFils(q * (itemMap.get(n)?.priceFils ?? 0)),
-      0,
-    );
-    const out: RecordedReward[] = [];
-    for (const offer of offers) {
-      const outcome = this.computeReward(offer, cart, itemMap, subtotalFils);
-      if (!outcome.triggerSatisfied) continue;
-      out.push({
-        offerId: offer.id,
-        discountFils: outcome.discountFils,
-        freeItems: outcome.freeItems,
-      });
-    }
-    return out;
-  }
-
   // ---- reward computation (pure) ----
 
   private computeReward(
@@ -247,125 +216,73 @@ export class OffersEngineService {
     cart: Map<string, number>,
     itemMap: Map<string, ItemInfo>,
     subtotalFils: number,
+    itemCount: number,
+    paymentMethod: PaymentType | null,
   ): RewardOutcome {
-    const t = offer.trigger as Record<string, unknown>;
-    const reward = offer.reward;
     const lineDiscounts = new Map<string, number>();
-    let invoiceDiscountFils = 0;
-    const freeItems: FreeItemSpec[] = [];
-    let freeItemChoice: { choices: string[]; qty: number } | undefined;
     let triggerSatisfied = false;
-
-    const qtyOf = (n: string): number => cart.get(n) ?? 0;
     const priceOf = (n: string): number => itemMap.get(n)?.priceFils ?? 0;
 
-    const grantInvoiceOrFree = (): void => {
-      if (reward.kind === 'DISCOUNT' && reward.appliesTo === 'INVOICE') {
-        invoiceDiscountFils += this.discountAmount(reward, subtotalFils);
-      } else if (reward.kind === 'FREE_ITEM') {
-        for (const it of reward.items ?? []) {
-          freeItems.push({ itemNumber: it.itemNumber, qty: it.qty });
-        }
-      } else if (reward.kind === 'FREE_ITEM_CHOICE') {
-        freeItemChoice = { choices: reward.choices ?? [], qty: reward.qty ?? 1 };
-      }
-    };
+    if (offer.type === 'PAYMENT_METHOD_DISCOUNT') {
+      const t = offer.trigger as PaymentMethodTrigger;
+      const reward = offer.reward as LinePercentDiscountReward;
+      const isCredit = paymentMethod === 'CREDIT';
+      const paymentOk =
+        t.paymentCondition === 'CREDIT' ? isCredit : !isCredit;
+      const totalOk =
+        t.minOrderTotal == null || subtotalFils >= t.minOrderTotal;
+      const countOk = t.minItemCount == null || itemCount >= t.minItemCount;
 
-    switch (offer.type) {
-      case 'ITEM_QTY_DISCOUNT': {
-        const item = String(t.itemNumber ?? '');
-        const minQty = Number(t.minQty ?? 0);
-        if (item && qtyOf(item) >= minQty) {
-          triggerSatisfied = true;
-          if (reward.kind === 'DISCOUNT') {
-            const gross = roundFils(qtyOf(item) * priceOf(item));
-            this.addLineDiscount(
-              lineDiscounts,
-              item,
-              this.discountAmount(reward, gross),
-            );
-          }
-        }
-        break;
-      }
-      case 'BUY_X_GET_Y_FREE': {
-        const item = String(t.itemNumber ?? '');
-        const buyQty = Number(t.qty ?? 0);
-        const times = buyQty > 0 ? Math.floor(qtyOf(item) / buyQty) : 0;
-        if (item && times >= 1 && reward.kind === 'FREE_ITEM') {
-          triggerSatisfied = true;
-          for (const it of reward.items ?? []) {
-            freeItems.push({ itemNumber: it.itemNumber, qty: it.qty * times });
-          }
-        }
-        break;
-      }
-      case 'BASKET_THRESHOLD': {
-        const set = (t.itemNumbers as string[]) ?? [];
-        const count = set.reduce((s, n) => s + qtyOf(n), 0);
-        if (count >= Number(t.minItemCount ?? 0)) {
-          triggerSatisfied = true;
-          grantInvoiceOrFree();
-        }
-        break;
-      }
-      case 'ITEM_SET_THRESHOLD': {
-        const set = (t.itemNumbers as string[]) ?? [];
-        const total = set.reduce((s, n) => s + qtyOf(n), 0);
-        const presentCount = set.filter((n) => qtyOf(n) > 0).length;
-        const minTotal = Number(t.minTotalQty ?? 0);
-        const ok =
-          t.match === 'ALL'
-            ? presentCount === set.length && total >= minTotal
-            : presentCount > 0 && total >= minTotal;
-        if (ok) {
-          triggerSatisfied = true;
-          if (reward.kind === 'DISCOUNT' && reward.appliesTo === 'SET') {
-            for (const n of set) {
-              const gross = roundFils(qtyOf(n) * priceOf(n));
-              if (gross > 0) {
-                this.addLineDiscount(
-                  lineDiscounts,
-                  n,
-                  this.discountAmount(reward, gross),
-                );
-              }
-            }
-          } else {
-            grantInvoiceOrFree();
-          }
-        }
-        break;
-      }
-      case 'LOYALTY_FIRST_PURCHASE': {
-        // Eligibility (new customer) is gated by the caller.
+      if (
+        paymentOk &&
+        totalOk &&
+        countOk &&
+        reward?.kind === 'LINE_PERCENT_DISCOUNT'
+      ) {
         triggerSatisfied = true;
-        grantInvoiceOrFree();
-        break;
+        const pct = this.effectivePercent(reward, itemCount);
+        if (pct > 0) {
+          for (const [n, q] of cart) {
+            const gross = roundFils(q * priceOf(n));
+            if (gross > 0) {
+              this.addLineDiscount(
+                lineDiscounts,
+                n,
+                roundFils((gross * pct) / 100),
+              );
+            }
+          }
+        }
       }
     }
 
     const lineDiscTotal = [...lineDiscounts.values()].reduce((s, n) => s + n, 0);
-    const freeValue = freeItems.reduce(
-      (s, f) => s + roundFils(f.qty * priceOf(f.itemNumber)),
-      0,
-    );
     return {
       triggerSatisfied,
       lineDiscounts,
-      invoiceDiscountFils,
-      freeItems,
-      freeItemChoice,
-      discountFils: lineDiscTotal + invoiceDiscountFils + freeValue,
+      invoiceDiscountFils: 0,
+      freeItems: [],
+      freeItemChoice: undefined,
+      discountFils: lineDiscTotal,
     };
   }
 
-  private discountAmount(reward: DiscountReward, baseFils: number): number {
-    if (reward.discountType === 'PERCENT') {
-      return roundFils((baseFils * (reward.value ?? 0)) / 100);
-    }
-    // VALUE is already in fils; never exceed the base it applies to.
-    return Math.min(roundFils(reward.value ?? 0), baseFils);
+  /**
+   * The effective percent for a per-line reward given the order's item count:
+   *   base × (1 + multiplier × floor(itemCount / itemsPerStep))
+   * STATIC ignores the multiplier. Capped at maxPercent and never above 100.
+   */
+  private effectivePercent(
+    reward: LinePercentDiscountReward,
+    itemCount: number,
+  ): number {
+    const steps =
+      reward.mode === 'DYNAMIC' && reward.itemsPerStep
+        ? Math.floor(itemCount / reward.itemsPerStep)
+        : 0;
+    const pct = reward.basePercent * (1 + (reward.multiplier ?? 0) * steps);
+    const cap = Math.min(reward.maxPercent ?? 100, 100);
+    return Math.max(0, Math.min(pct, cap));
   }
 
   private addLineDiscount(
@@ -435,7 +352,7 @@ export class OffersEngineService {
     return true;
   }
 
-  /** True when the customer has no prior posted-or-draft SALE voucher. */
+  /** True when the customer has no prior SALE voucher. */
   async isNewCustomer(
     customerNumber: string,
     excludeVoucherNumber?: string,
@@ -462,17 +379,11 @@ export class OffersEngineService {
 
   private async loadItems(
     cart: Map<string, number>,
-    offers: Offer[],
   ): Promise<Map<string, ItemInfo>> {
-    const numbers = new Set<string>(cart.keys());
-    for (const o of offers) {
-      if (o.reward?.kind === 'FREE_ITEM') {
-        for (const it of o.reward.items ?? []) numbers.add(it.itemNumber);
-      }
-    }
-    if (!numbers.size) return new Map();
+    const numbers = [...cart.keys()];
+    if (!numbers.length) return new Map();
     const items = await this.itemsRepo.find({
-      where: { itemNumber: In([...numbers]) },
+      where: { itemNumber: In(numbers) },
     });
     return new Map(
       items.map((i) => [
@@ -505,36 +416,20 @@ export class OffersEngineService {
     return counts;
   }
 
-  private summarize(offer: Offer, itemMap: Map<string, ItemInfo>): string {
-    const name = (n: string): string => itemMap.get(n)?.name ?? n;
-    const t = offer.trigger as Record<string, unknown>;
-    const r = offer.reward;
-    const discountText = (): string => {
-      if (r.kind !== 'DISCOUNT') return '';
-      return r.discountType === 'PERCENT'
-        ? `${r.value}% off`
-        : `${(r.value ?? 0) / 1000} JOD off`;
-    };
-    const freeText = (): string =>
-      r.kind === 'FREE_ITEM'
-        ? (r.items ?? []).map((i) => `${i.qty}× ${name(i.itemNumber)} free`).join(' + ')
-        : r.kind === 'FREE_ITEM_CHOICE'
-          ? `${r.qty}× free (choice of ${(r.choices ?? []).length})`
-          : '';
-
-    switch (offer.type) {
-      case 'ITEM_QTY_DISCOUNT':
-        return `Buy ${t.minQty}× ${name(String(t.itemNumber))} → ${discountText()}`;
-      case 'BUY_X_GET_Y_FREE':
-        return `Buy ${t.qty}× ${name(String(t.itemNumber))} → ${freeText()}`;
-      case 'BASKET_THRESHOLD':
-        return `${t.minItemCount}+ items from set → ${r.kind === 'DISCOUNT' ? discountText() + ' invoice' : freeText()}`;
-      case 'ITEM_SET_THRESHOLD':
-        return `${t.minTotalQty}+ qty across set (${t.match}) → ${r.kind === 'DISCOUNT' ? discountText() : freeText()}`;
-      case 'LOYALTY_FIRST_PURCHASE':
-        return `New customer first purchase → ${r.kind === 'DISCOUNT' ? discountText() + ' invoice' : freeText()}`;
-      default:
-        return offer.name;
+  private summarize(offer: Offer): string {
+    const t = offer.trigger as PaymentMethodTrigger;
+    const r = offer.reward as LinePercentDiscountReward;
+    const cond = t.paymentCondition === 'CREDIT' ? 'Credit' : 'Cash';
+    const mins: string[] = [];
+    if (t.minOrderTotal) mins.push(`≥ ${(t.minOrderTotal / 1000).toFixed(3)} JOD`);
+    if (t.minItemCount) mins.push(`≥ ${t.minItemCount} items`);
+    const suffix = mins.length ? ` (${mins.join(', ')})` : '';
+    if (r?.mode === 'DYNAMIC') {
+      const cap = r.maxPercent != null ? ` up to ${r.maxPercent}%` : '';
+      return `${cond} · ${r.basePercent}% per line, ×${r.multiplier ?? 0} per ${
+        r.itemsPerStep ?? '?'
+      } items${cap}${suffix}`;
     }
+    return `${cond} · ${r?.basePercent ?? 0}% off each line${suffix}`;
   }
 }

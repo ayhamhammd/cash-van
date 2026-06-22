@@ -3,7 +3,8 @@ import type { Offer } from './entities/offer.entity';
 
 /**
  * Pure-ish unit tests for the discount engine. Repositories are mocked so the
- * tests exercise the math/stacking, not the DB.
+ * tests exercise the payment-method + static/dynamic math, not the DB.
+ * Items: A = 1000 fils, B = 500 fils, both tax-free.
  */
 describe('OffersEngineService', () => {
   const items = [
@@ -22,7 +23,7 @@ describe('OffersEngineService', () => {
       id: o.id ?? `off-${i}`,
       name: o.name ?? `offer ${i}`,
       description: null,
-      type: o.type,
+      type: o.type ?? 'PAYMENT_METHOD_DISCOUNT',
       trigger: o.trigger ?? {},
       reward: o.reward,
       eligibility: o.eligibility ?? { customerScope: 'ALL' },
@@ -55,72 +56,110 @@ describe('OffersEngineService', () => {
     );
   }
 
-  it('ITEM_QTY_DISCOUNT applies a percent discount to the trigger line', async () => {
-    const engine = makeEngine([
-      {
-        type: 'ITEM_QTY_DISCOUNT',
-        trigger: { itemNumber: 'A', minQty: 3 },
-        reward: { kind: 'DISCOUNT', discountType: 'PERCENT', value: 10, appliesTo: 'TRIGGER_ITEM' },
-      },
-    ]);
+  const cashStatic5: Partial<Offer> = {
+    type: 'PAYMENT_METHOD_DISCOUNT',
+    trigger: { paymentCondition: 'CASH' },
+    reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 5, mode: 'STATIC' },
+  };
 
-    const res = await engine.evaluate([{ itemNumber: 'A', qty: 5 }]);
-
-    expect(res.totals.subtotalFils).toBe(5000);
-    expect(res.lines[0].lineDiscountFils).toBe(500);
-    expect(res.totals.grandTotalFils).toBe(4500);
+  it('applies a static % to EVERY line for a matching CASH payment', async () => {
+    const engine = makeEngine([cashStatic5]);
+    const res = await engine.evaluate(
+      [
+        { itemNumber: 'A', qty: 4 },
+        { itemNumber: 'B', qty: 2 },
+      ],
+      { paymentMethod: 'CASH' },
+    );
+    const a = res.lines.find((l) => l.itemNumber === 'A')!;
+    const b = res.lines.find((l) => l.itemNumber === 'B')!;
+    expect(a.lineDiscountFils).toBe(200); // 4000 × 5%
+    expect(b.lineDiscountFils).toBe(50); // 1000 × 5%
+    expect(res.totals.lineDiscountFils).toBe(250);
     expect(res.appliedOffers).toHaveLength(1);
   });
 
-  it('does not apply ITEM_QTY_DISCOUNT below the min qty', async () => {
-    const engine = makeEngine([
-      {
-        type: 'ITEM_QTY_DISCOUNT',
-        trigger: { itemNumber: 'A', minQty: 6 },
-        reward: { kind: 'DISCOUNT', discountType: 'PERCENT', value: 10, appliesTo: 'TRIGGER_ITEM' },
-      },
-    ]);
+  it('treats any non-CREDIT payment as cash, but not CREDIT', async () => {
+    const engine = makeEngine([cashStatic5]);
+    const cheque = await engine.evaluate([{ itemNumber: 'A', qty: 4 }], {
+      paymentMethod: 'CHEQUE',
+    });
+    expect(cheque.appliedOffers).toHaveLength(1); // CHEQUE = cash
 
-    const res = await engine.evaluate([{ itemNumber: 'A', qty: 5 }]);
-
-    expect(res.appliedOffers).toHaveLength(0);
-    expect(res.totals.grandTotalFils).toBe(5000);
+    const credit = await engine.evaluate([{ itemNumber: 'A', qty: 4 }], {
+      paymentMethod: 'CREDIT',
+    });
+    expect(credit.appliedOffers).toHaveLength(0); // CREDIT excluded
   });
 
-  it('BUY_X_GET_Y_FREE grants free lines in multiples', async () => {
+  it('a CREDIT offer applies only on a CREDIT payment', async () => {
     const engine = makeEngine([
       {
-        type: 'BUY_X_GET_Y_FREE',
-        trigger: { itemNumber: 'A', qty: 6 },
-        reward: { kind: 'FREE_ITEM', items: [{ itemNumber: 'B', qty: 1 }] },
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CREDIT' },
+        reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 10, mode: 'STATIC' },
       },
     ]);
-
-    const res = await engine.evaluate([{ itemNumber: 'A', qty: 12 }]);
-
-    expect(res.freeLines).toHaveLength(1);
-    expect(res.freeLines[0]).toMatchObject({ itemNumber: 'B', qty: 2, unitPriceFils: 500 });
-    // Free lines don't change the cart grand total (they net to zero on the invoice).
-    expect(res.totals.grandTotalFils).toBe(12000);
+    expect(
+      (await engine.evaluate([{ itemNumber: 'A', qty: 1 }], { paymentMethod: 'CASH' }))
+        .appliedOffers,
+    ).toHaveLength(0);
+    expect(
+      (await engine.evaluate([{ itemNumber: 'A', qty: 1 }], { paymentMethod: 'CREDIT' }))
+        .appliedOffers,
+    ).toHaveLength(1);
   });
 
-  it('BASKET_THRESHOLD applies a fixed invoice discount', async () => {
+  it('respects minOrderTotal and minItemCount thresholds', async () => {
     const engine = makeEngine([
       {
-        type: 'BASKET_THRESHOLD',
-        trigger: { itemNumbers: ['A', 'B'], minItemCount: 5 },
-        reward: { kind: 'DISCOUNT', discountType: 'VALUE', value: 1000, appliesTo: 'INVOICE' },
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH', minOrderTotal: 6000, minItemCount: 5 },
+        reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 5, mode: 'STATIC' },
       },
     ]);
+    // 4×A = 4000 fils / 4 items → below both thresholds.
+    expect(
+      (await engine.evaluate([{ itemNumber: 'A', qty: 4 }], { paymentMethod: 'CASH' }))
+        .appliedOffers,
+    ).toHaveLength(0);
+    // 6×A = 6000 fils / 6 items → meets both.
+    expect(
+      (await engine.evaluate([{ itemNumber: 'A', qty: 6 }], { paymentMethod: 'CASH' }))
+        .appliedOffers,
+    ).toHaveLength(1);
+  });
 
-    const res = await engine.evaluate([
-      { itemNumber: 'A', qty: 3 },
-      { itemNumber: 'B', qty: 3 },
+  it('DYNAMIC discount steps up with item count and caps at maxPercent', async () => {
+    const engine = makeEngine([
+      {
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH' },
+        reward: {
+          kind: 'LINE_PERCENT_DISCOUNT',
+          basePercent: 10,
+          mode: 'DYNAMIC',
+          multiplier: 0.5,
+          itemsPerStep: 6,
+          maxPercent: 25,
+        },
+      },
     ]);
-
-    expect(res.invoiceDiscountFils).toBe(1000);
-    expect(res.totals.subtotalFils).toBe(4500);
-    expect(res.totals.grandTotalFils).toBe(3500);
+    // 5 items → floor(5/6)=0 steps → 10%
+    const at5 = await engine.evaluate([{ itemNumber: 'A', qty: 5 }], {
+      paymentMethod: 'CASH',
+    });
+    expect(at5.lines[0].lineDiscountFils).toBe(500); // 5000 × 10%
+    // 6 items → 1 step → 10%×1.5 = 15%
+    const at6 = await engine.evaluate([{ itemNumber: 'A', qty: 6 }], {
+      paymentMethod: 'CASH',
+    });
+    expect(at6.lines[0].lineDiscountFils).toBe(900); // 6000 × 15%
+    // 30 items → 5 steps → 35% but capped at 25%
+    const at30 = await engine.evaluate([{ itemNumber: 'A', qty: 30 }], {
+      paymentMethod: 'CASH',
+    });
+    expect(at30.lines[0].lineDiscountFils).toBe(7500); // 30000 × 25% (capped)
   });
 
   it('a non-stackable offer ends the chain (higher priority wins alone)', async () => {
@@ -129,24 +168,24 @@ describe('OffersEngineService', () => {
         id: 'big',
         priority: 10,
         stackable: false,
-        type: 'ITEM_QTY_DISCOUNT',
-        trigger: { itemNumber: 'A', minQty: 1 },
-        reward: { kind: 'DISCOUNT', discountType: 'PERCENT', value: 20, appliesTo: 'TRIGGER_ITEM' },
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH' },
+        reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 20, mode: 'STATIC' },
       },
       {
         id: 'small',
         priority: 5,
         stackable: true,
-        type: 'ITEM_QTY_DISCOUNT',
-        trigger: { itemNumber: 'A', minQty: 1 },
-        reward: { kind: 'DISCOUNT', discountType: 'PERCENT', value: 5, appliesTo: 'TRIGGER_ITEM' },
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH' },
+        reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 5, mode: 'STATIC' },
       },
     ]);
-
-    const res = await engine.evaluate([{ itemNumber: 'A', qty: 10 }]);
-
+    const res = await engine.evaluate([{ itemNumber: 'A', qty: 10 }], {
+      paymentMethod: 'CASH',
+    });
     expect(res.appliedOffers).toHaveLength(1);
     expect(res.appliedOffers[0].offerId).toBe('big');
-    expect(res.totals.lineDiscountFils).toBe(2000); // 20% of 10000, small offer skipped
+    expect(res.totals.lineDiscountFils).toBe(2000); // 20% of 10000
   });
 });
