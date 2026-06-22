@@ -48,6 +48,15 @@ export class EvaluateOffersDto {
   @IsIn(PAYMENT_TYPES)
   paymentMethod?: PaymentType;
 
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Gift items the rep chose (ITEM_QTY_REWARD gifts) — resolved to free lines.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  chosenFreeItems?: string[];
+
   @ApiPropertyOptional({ description: 'ISO datetime to evaluate at; defaults to now (schedule/day/time checks).' })
   @IsOptional()
   @IsDateString()

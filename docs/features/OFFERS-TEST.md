@@ -3,9 +3,11 @@
 How to exercise the offers API end-to-end. Works against local (`http://127.0.0.1:3000`) or the Render deployment (`https://cashvan-api-9qrt.onrender.com`). All paths are under `/api/v1`. Money is **fils** (1 JOD = 1000 fils).
 
 ## 0. Prerequisites
-- Run migrations + seed (Render does this automatically on boot via `start:deploy`; locally: `npm run migration:run && npm run seed`). The seed creates **2 demo payment-method offers** plus the drinks catalog:
+- Run migrations + seed (Render does this automatically on boot via `start:deploy`; locally: `npm run migration:run && npm run seed`). The seed creates **4 demo offers** plus the drinks catalog:
   - **Cash · 5% off each line** — `paymentCondition: CASH`, `minOrderTotal: 10000` (10 JOD), static 5%.
   - **Credit · dynamic** — `paymentCondition: CREDIT`, `minItemCount: 6`, base 10% × 0.5 per 6 items, cap 25%.
+  - **Buy COLA → gift** — `ITEM_QTY_REWARD`, items `[COLA-330]`, GIFT pool `[WATER-330, MANGO-250]`, tiers `10→1, 20→2`.
+  - **Buy 12 PEPSI → 10% off** — `ITEM_QTY_REWARD`, items `[PEPSI-330]`, `ITEM_PERCENT_DISCOUNT` minQty 12, static 10%.
 - Get a token: `POST /api/v1/auth/login` with the admin (`userNumber: admin`, `password: admin1234`). Use it as `Authorization: Bearer <token>` on every call below.
 
 ```bash
@@ -44,6 +46,33 @@ curl -s "${auth[@]}" -X POST "$BASE/offers/evaluate" \
 Expect: `405` — 6 items → floor(6/6)=1 step → 15% × (6×450=2 700) = 405.
 - `qty:12` → 2 steps → 20%. `qty:30` → would be 35% but **capped at 25%**.
 - `qty:5` (< minItemCount 6) → no offer. `"paymentMethod":"CASH"` → Credit offer does not apply.
+
+### ITEM_QTY_REWARD — gift
+
+**Gift entitlement (no picks yet):** `10× COLA-330` → tier 10 → 1 gift to choose:
+```bash
+curl -s "${auth[@]}" -X POST "$BASE/offers/evaluate" \
+  -d '{"lines":[{"itemNumber":"COLA-330","qty":10}]}' \
+  | jq '.data.appliedOffers[] | select(.freeItemChoice) | .freeItemChoice'
+```
+Expect: `{ "choices": ["WATER-330","MANGO-250"], "qty": 1 }`. At `qty:20` → `qty: 2`. At `qty:9` → no gift offer.
+
+**Gift resolved (rep picked):** pass `chosenFreeItems` → free line(s) come back:
+```bash
+curl -s "${auth[@]}" -X POST "$BASE/offers/evaluate" \
+  -d '{"lines":[{"itemNumber":"COLA-330","qty":20}],"chosenFreeItems":["WATER-330","MANGO-250"]}' \
+  | jq '.data.freeLines'
+```
+Expect: two free lines (WATER-330, MANGO-250) at their real price (the sale will net them to 0).
+
+### ITEM_QTY_REWARD — per-item discount
+`12× PEPSI-330` → 10% off the PEPSI line only:
+```bash
+curl -s "${auth[@]}" -X POST "$BASE/offers/evaluate" \
+  -d '{"lines":[{"itemNumber":"PEPSI-330","qty":12},{"itemNumber":"COLA-330","qty":3}]}' \
+  | jq '.data.lines'
+```
+Expect: PEPSI line `lineDiscountFils = 540` (12×450 × 10%); COLA line `0`. At `11× PEPSI` → no offer.
 
 ## 3. CRUD + validation
 ```bash
@@ -101,5 +130,6 @@ With `SWAGGER_ENABLED=true`, browse **`/docs`** → tag **offers**.
 ### Pass criteria
 - Cash offers apply on any non-CREDIT payment and only above the minimums; Credit offers apply only on CREDIT.
 - Static % is applied to every line; dynamic % steps up with item count and never exceeds `maxPercent`.
-- Illegal configs (missing `paymentCondition`, dynamic without `multiplier`/`itemsPerStep`, `basePercent` out of 0–100) are rejected with `400`.
-- A posted SALE carries the per-line discount in `discountValue`, stamps `appliedOfferIds`, and writes one redemption per applied offer.
+- ITEM_QTY_REWARD: gift surfaces a choice at the right tier and resolves to free lines once picked; per-item discount lands only on the selected items above `minQty`; combined qty counts across selected items.
+- Illegal configs (missing `paymentCondition`/`itemNumbers`, gift without tiers, dynamic without `multiplier`/`itemsPerStep`, `basePercent` out of 0–100) are rejected with `400`.
+- A posted SALE bakes per-line discounts into `discountValue`, appends gift free lines from `chosenFreeItems`, stamps `appliedOfferIds`, and writes one redemption per applied offer.

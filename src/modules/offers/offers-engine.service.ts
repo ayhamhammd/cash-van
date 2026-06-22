@@ -16,6 +16,9 @@ import type {
   EvaluationResult,
   FreeItemSpec,
   FreeLine,
+  GiftReward,
+  ItemPercentDiscountReward,
+  ItemSetTrigger,
   LinePercentDiscountReward,
   OfferEligibility,
   PaymentMethodTrigger,
@@ -75,7 +78,7 @@ export class OffersEngineService {
       order: { priority: 'DESC', createdAt: 'ASC' },
     });
 
-    const itemMap = await this.loadItems(cart);
+    const itemMap = await this.loadItems(cart, offers);
     const customer = ctx.customerNumber
       ? await this.customersRepo.findOne({
           where: { customerNumber: ctx.customerNumber },
@@ -137,6 +140,7 @@ export class OffersEngineService {
         subtotalFils,
         itemCount,
         ctx.paymentMethod ?? null,
+        ctx.chosenFreeItems ?? null,
       );
       if (!outcome.triggerSatisfied) continue;
 
@@ -218,8 +222,11 @@ export class OffersEngineService {
     subtotalFils: number,
     itemCount: number,
     paymentMethod: PaymentType | null,
+    chosenFreeItems: string[] | null,
   ): RewardOutcome {
     const lineDiscounts = new Map<string, number>();
+    const freeItems: FreeItemSpec[] = [];
+    let freeItemChoice: { choices: string[]; qty: number } | undefined;
     let triggerSatisfied = false;
     const priceOf = (n: string): number => itemMap.get(n)?.priceFils ?? 0;
 
@@ -254,26 +261,85 @@ export class OffersEngineService {
           }
         }
       }
+    } else if (offer.type === 'ITEM_QTY_REWARD') {
+      const t = offer.trigger as ItemSetTrigger;
+      const items = t.itemNumbers ?? [];
+      // Combined qty of the selected items in the cart.
+      const qty = items.reduce((s, n) => s + (cart.get(n) ?? 0), 0);
+      const reward = offer.reward;
+
+      if (reward?.kind === 'GIFT') {
+        const tier = this.bestGiftTier(reward, qty);
+        if (tier && tier.freeQty > 0) {
+          triggerSatisfied = true;
+          freeItemChoice = { choices: reward.giftItems, qty: tier.freeQty };
+          // Resolve the rep's picks (∩ pool, up to freeQty) into free lines.
+          const picks = (chosenFreeItems ?? [])
+            .filter((i) => reward.giftItems.includes(i))
+            .slice(0, tier.freeQty);
+          for (const itemNumber of picks) {
+            freeItems.push({ itemNumber, qty: 1 });
+          }
+        }
+      } else if (reward?.kind === 'ITEM_PERCENT_DISCOUNT') {
+        if (qty >= reward.minQty) {
+          triggerSatisfied = true;
+          const pct = this.effectivePercent(reward, qty);
+          if (pct > 0) {
+            for (const n of items) {
+              const gross = roundFils((cart.get(n) ?? 0) * priceOf(n));
+              if (gross > 0) {
+                this.addLineDiscount(
+                  lineDiscounts,
+                  n,
+                  roundFils((gross * pct) / 100),
+                );
+              }
+            }
+          }
+        }
+      }
     }
 
     const lineDiscTotal = [...lineDiscounts.values()].reduce((s, n) => s + n, 0);
+    const freeValue = freeItems.reduce(
+      (s, f) => s + roundFils(f.qty * priceOf(f.itemNumber)),
+      0,
+    );
     return {
       triggerSatisfied,
       lineDiscounts,
       invoiceDiscountFils: 0,
-      freeItems: [],
-      freeItemChoice: undefined,
-      discountFils: lineDiscTotal,
+      freeItems,
+      freeItemChoice,
+      discountFils: lineDiscTotal + freeValue,
     };
   }
 
+  /** Highest gift tier whose minQty is met by the combined selected-item qty. */
+  private bestGiftTier(
+    reward: GiftReward,
+    qty: number,
+  ): { minQty: number; freeQty: number } | null {
+    let best: { minQty: number; freeQty: number } | null = null;
+    for (const tier of reward.tiers ?? []) {
+      if (qty >= tier.minQty && (!best || tier.minQty > best.minQty)) {
+        best = tier;
+      }
+    }
+    return best;
+  }
+
   /**
-   * The effective percent for a per-line reward given the order's item count:
-   *   base × (1 + multiplier × floor(itemCount / itemsPerStep))
+   * The effective percent for a percentage reward given a quantity:
+   *   base × (1 + multiplier × floor(qty / itemsPerStep))
    * STATIC ignores the multiplier. Capped at maxPercent and never above 100.
    */
   private effectivePercent(
-    reward: LinePercentDiscountReward,
+    reward: Pick<
+      LinePercentDiscountReward,
+      'basePercent' | 'mode' | 'multiplier' | 'itemsPerStep' | 'maxPercent'
+    >,
     itemCount: number,
   ): number {
     const steps =
@@ -379,11 +445,18 @@ export class OffersEngineService {
 
   private async loadItems(
     cart: Map<string, number>,
+    offers: Offer[],
   ): Promise<Map<string, ItemInfo>> {
-    const numbers = [...cart.keys()];
-    if (!numbers.length) return new Map();
+    const numbers = new Set<string>(cart.keys());
+    // Gift pools need prices too (the free line is the item at its real price).
+    for (const o of offers) {
+      if (o.reward?.kind === 'GIFT') {
+        for (const g of (o.reward as GiftReward).giftItems ?? []) numbers.add(g);
+      }
+    }
+    if (!numbers.size) return new Map();
     const items = await this.itemsRepo.find({
-      where: { itemNumber: In(numbers) },
+      where: { itemNumber: In([...numbers]) },
     });
     return new Map(
       items.map((i) => [
@@ -417,6 +490,27 @@ export class OffersEngineService {
   }
 
   private summarize(offer: Offer): string {
+    if (offer.type === 'ITEM_QTY_REWARD') {
+      const items = (offer.trigger as ItemSetTrigger).itemNumbers ?? [];
+      const r = offer.reward;
+      const on = items.join('/');
+      if (r?.kind === 'GIFT') {
+        const tiers = (r.tiers ?? [])
+          .slice()
+          .sort((a, b) => a.minQty - b.minQty)
+          .map((t) => `${t.minQty}→${t.freeQty}`)
+          .join(', ');
+        return `Buy ${on} → gift (${tiers}) from ${r.giftItems.length} items`;
+      }
+      if (r?.kind === 'ITEM_PERCENT_DISCOUNT') {
+        const base =
+          r.mode === 'DYNAMIC'
+            ? `${r.basePercent}%→${r.maxPercent ?? r.basePercent}% dynamic`
+            : `${r.basePercent}%`;
+        return `Buy ${r.minQty}× ${on} → ${base} off those items`;
+      }
+      return offer.name;
+    }
     const t = offer.trigger as PaymentMethodTrigger;
     const r = offer.reward as LinePercentDiscountReward;
     const cond = t.paymentCondition === 'CREDIT' ? 'Credit' : 'Cash';

@@ -352,6 +352,40 @@ async function seed(): Promise<void> {
         stackable: false,
         isActive: true,
       },
+      {
+        name: 'اشترِ كولا — هدية بالاختيار',
+        description: 'اشترِ 10 كولا = هدية، 20 = هديتان (تختار من مياه/مانجو)',
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['COLA-330'] },
+        reward: {
+          kind: 'GIFT',
+          giftItems: ['WATER-330', 'MANGO-250'],
+          tiers: [
+            { minQty: 10, freeQty: 1 },
+            { minQty: 20, freeQty: 2 },
+          ],
+        },
+        eligibility: { customerScope: 'ALL' },
+        priority: 8,
+        stackable: false,
+        isActive: true,
+      },
+      {
+        name: 'خصم كمية بيبسي — 10%',
+        description: 'اشترِ 12 بيبسي أو أكثر = خصم 10% على البيبسي',
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['PEPSI-330'] },
+        reward: {
+          kind: 'ITEM_PERCENT_DISCOUNT',
+          minQty: 12,
+          basePercent: 10,
+          mode: 'STATIC',
+        },
+        eligibility: { customerScope: 'ALL' },
+        priority: 7,
+        stackable: false,
+        isActive: true,
+      },
     ];
     for (const o of offerDefs) {
       await upsert(offerRepo, { name: o.name }, o);

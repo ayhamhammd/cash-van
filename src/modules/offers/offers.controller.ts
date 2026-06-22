@@ -75,6 +75,7 @@ export class OffersController {
       repId: dto.repId,
       storeNumber: dto.storeNumber,
       paymentMethod: dto.paymentMethod,
+      chosenFreeItems: dto.chosenFreeItems,
       at: dto.at ? new Date(dto.at) : undefined,
     });
   }

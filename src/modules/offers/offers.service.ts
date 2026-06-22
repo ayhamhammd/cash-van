@@ -349,6 +349,13 @@ export class OffersService {
         }
         this.assertLinePercent(reward);
         break;
+      case 'ITEM_QTY_REWARD':
+        this.req(
+          t.itemNumbers?.length,
+          'ITEM_QTY_REWARD requires trigger.itemNumbers',
+        );
+        this.assertItemReward(reward);
+        break;
       default:
         throw new BadRequestException(`Unknown offer type ${type}`);
     }
@@ -360,6 +367,33 @@ export class OffersService {
         'This offer type requires a LINE_PERCENT_DISCOUNT reward',
       );
     }
+    this.assertPercentFields(reward);
+  }
+
+  private assertItemReward(reward: OfferRewardDto): void {
+    if (reward?.kind === 'GIFT') {
+      this.req(reward.giftItems?.length, 'GIFT reward requires giftItems[]');
+      this.req(reward.tiers?.length, 'GIFT reward requires tiers[]');
+      for (const tier of reward.tiers ?? []) {
+        if (tier.minQty == null || tier.minQty < 1) {
+          throw new BadRequestException('GIFT tier.minQty must be ≥ 1');
+        }
+        if (tier.freeQty == null || tier.freeQty < 1) {
+          throw new BadRequestException('GIFT tier.freeQty must be ≥ 1');
+        }
+      }
+    } else if (reward?.kind === 'ITEM_PERCENT_DISCOUNT') {
+      this.req(reward.minQty, 'ITEM_PERCENT_DISCOUNT requires reward.minQty');
+      this.assertPercentFields(reward);
+    } else {
+      throw new BadRequestException(
+        'ITEM_QTY_REWARD requires a GIFT or ITEM_PERCENT_DISCOUNT reward',
+      );
+    }
+  }
+
+  /** Shared validation for the percentage fields (base/mode/dynamic). */
+  private assertPercentFields(reward: OfferRewardDto): void {
     if (
       reward.basePercent == null ||
       reward.basePercent < 0 ||

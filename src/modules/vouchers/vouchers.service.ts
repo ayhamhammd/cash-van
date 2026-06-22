@@ -139,6 +139,8 @@ export class VouchersService {
         // Payment method drives PAYMENT_METHOD_DISCOUNT. A sale carries one
         // payment line; default to CASH when none was sent.
         paymentMethod: dto.payments?.[0]?.paymentType ?? 'CASH',
+        // Rep's gift picks for ITEM_QTY_REWARD → resolved to free lines.
+        chosenFreeItems: dto.chosenFreeItems ?? null,
         at: dto.inDate ? new Date(dto.inDate) : undefined,
       });
       if (!result.appliedOffers.length) return null;
