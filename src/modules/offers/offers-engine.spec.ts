@@ -168,16 +168,9 @@ describe('OffersEngineService', () => {
     const offer: Partial<Offer> = {
       type: 'ITEM_QTY_REWARD',
       trigger: { itemNumbers: ['A'] },
-      reward: {
-        kind: 'GIFT',
-        giftItems: ['B'],
-        tiers: [
-          { minQty: 10, freeQty: 1 },
-          { minQty: 20, freeQty: 2 },
-        ],
-      },
+      reward: { kind: 'GIFT', giftItems: ['B'], itemsPerGift: 10 },
     };
-    // 22× A → tier 20 → 2 gifts; no picks yet → only a choice is surfaced.
+    // 22× A → floor(22/10) = 2 gifts; no picks yet → only a choice is surfaced.
     const choiceOnly = await makeEngine([offer]).evaluate([
       { itemNumber: 'A', qty: 22 },
     ]);
@@ -198,20 +191,22 @@ describe('OffersEngineService', () => {
     ]);
   });
 
-  it('ITEM_QTY_REWARD gift picks the highest reached tier; below the first grants nothing', async () => {
+  it('ITEM_QTY_REWARD gift = 1 per itemsPerGift bought, capped, none below the first', async () => {
     const offer: Partial<Offer> = {
       type: 'ITEM_QTY_REWARD',
       trigger: { itemNumbers: ['A'] },
-      reward: { kind: 'GIFT', giftItems: ['B'], tiers: [{ minQty: 10, freeQty: 1 }, { minQty: 20, freeQty: 2 }] },
+      reward: { kind: 'GIFT', giftItems: ['B'], itemsPerGift: 10, maxFreeQty: 5 },
     };
-    expect(
-      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 14 }]))
-        .appliedOffers[0]?.freeItemChoice?.qty,
-    ).toBe(1);
+    const free = async (q: number) =>
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: q }]))
+        .appliedOffers[0]?.freeItemChoice?.qty;
+    expect(await free(14)).toBe(1); // floor(14/10)
+    expect(await free(20)).toBe(2);
+    expect(await free(1000)).toBe(5); // floor(1000/10)=100 capped at 5
     expect(
       (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 9 }]))
         .appliedOffers,
-    ).toHaveLength(0);
+    ).toHaveLength(0); // below itemsPerGift → nothing
   });
 
   it('ITEM_QTY_REWARD discount applies % to the selected items only, above minQty', async () => {

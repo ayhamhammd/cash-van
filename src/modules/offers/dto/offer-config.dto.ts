@@ -1,5 +1,4 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
 import {
   ArrayNotEmpty,
   IsArray,
@@ -10,7 +9,6 @@ import {
   IsString,
   Max,
   Min,
-  ValidateNested,
 } from 'class-validator';
 import {
   DISCOUNT_MODES,
@@ -64,18 +62,6 @@ export class OfferTriggerDto {
   @ArrayNotEmpty()
   @IsString({ each: true })
   itemNumbers?: string[];
-}
-
-export class GiftTierDto {
-  @ApiProperty({ description: 'Combined selected-item qty that unlocks this tier.' })
-  @IsInt()
-  @Min(1)
-  minQty!: number;
-
-  @ApiProperty({ description: 'Number of free gift items granted at this tier.' })
-  @IsInt()
-  @Min(1)
-  freeQty!: number;
 }
 
 /**
@@ -134,13 +120,17 @@ export class OfferRewardDto {
   @IsString({ each: true })
   giftItems?: string[];
 
-  @ApiPropertyOptional({ type: [GiftTierDto], description: 'GIFT: static tiers {minQty → freeQty}.' })
+  @ApiPropertyOptional({ description: 'GIFT: buy this many of the selected items to earn one free gift.' })
   @IsOptional()
-  @IsArray()
-  @ArrayNotEmpty()
-  @ValidateNested({ each: true })
-  @Type(() => GiftTierDto)
-  tiers?: GiftTierDto[];
+  @IsInt()
+  @Min(1)
+  itemsPerGift?: number;
+
+  @ApiPropertyOptional({ description: 'GIFT: optional cap on the number of free gifts.' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  maxFreeQty?: number;
 }
 
 export class OfferEligibilityDto {
