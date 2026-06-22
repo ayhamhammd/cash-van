@@ -15,8 +15,6 @@ import { UpdateOfferDto } from './dto/update-offer.dto';
 import { ListOffersQueryDto } from './dto/list-offers.dto';
 import type { OfferRewardDto, OfferTriggerDto } from './dto/offer-config.dto';
 import type {
-  AppliesTo,
-  CartLineInput,
   FreeItemSpec,
   OfferEligibility,
   OfferRewardConfig,
@@ -225,37 +223,6 @@ export class OffersService {
   }
 
   /**
-   * Record one redemption per offer the sale asserts it applied. Best-effort:
-   * the caller wraps this so a failure never blocks the voucher. Discount/free
-   * amounts are recomputed from the cart so the report reflects reality.
-   */
-  async recordRedemptions(params: {
-    voucherNumber?: string | null;
-    customerNumber?: string | null;
-    offerIds: string[];
-    lines: CartLineInput[];
-  }): Promise<void> {
-    const rewards = await this.engine.computeForOffers(
-      params.offerIds,
-      params.lines,
-    );
-    if (!rewards.length) return;
-    const rows = rewards.map((r) =>
-      this.redemptionsRepo.create({
-        offerId: r.offerId,
-        voucherNumber: params.voucherNumber ?? null,
-        customerNumber: params.customerNumber ?? null,
-        discountFils: r.discountFils,
-        freeItems: r.freeItems,
-      }),
-    );
-    await this.redemptionsRepo.save(rows);
-    for (const r of rewards) {
-      await this.offersRepo.increment({ id: r.offerId }, 'redemptionCount', 1);
-    }
-  }
-
-  /**
    * Record redemptions from an already-computed evaluation (server-authoritative
    * path: VouchersService applies offers itself, so the discount/free amounts are
    * known and need no recompute). One ledger row per applied offer.
@@ -362,98 +329,66 @@ export class OffersService {
   ): void {
     const t = trigger ?? ({} as OfferTriggerDto);
     switch (type) {
-      case 'ITEM_QTY_DISCOUNT':
-        this.req(t.itemNumber, 'ITEM_QTY_DISCOUNT requires trigger.itemNumber');
-        this.req(t.minQty, 'ITEM_QTY_DISCOUNT requires trigger.minQty');
-        this.assertDiscount(reward, ['TRIGGER_ITEM']);
-        break;
-      case 'BUY_X_GET_Y_FREE':
-        this.req(t.itemNumber, 'BUY_X_GET_Y_FREE requires trigger.itemNumber');
-        this.req(t.qty, 'BUY_X_GET_Y_FREE requires trigger.qty');
-        this.assertFree(reward);
-        break;
-      case 'BASKET_THRESHOLD':
+      case 'PAYMENT_METHOD_DISCOUNT':
         this.req(
-          t.itemNumbers?.length,
-          'BASKET_THRESHOLD requires trigger.itemNumbers',
+          t.paymentCondition,
+          'PAYMENT_METHOD_DISCOUNT requires trigger.paymentCondition (CASH|CREDIT)',
         );
-        this.req(
-          t.minItemCount,
-          'BASKET_THRESHOLD requires trigger.minItemCount',
-        );
-        this.assertDiscountOrFree(reward, ['INVOICE']);
-        break;
-      case 'ITEM_SET_THRESHOLD':
-        this.req(
-          t.itemNumbers?.length,
-          'ITEM_SET_THRESHOLD requires trigger.itemNumbers',
-        );
-        this.req(
-          t.minTotalQty,
-          'ITEM_SET_THRESHOLD requires trigger.minTotalQty',
-        );
-        this.req(t.match, 'ITEM_SET_THRESHOLD requires trigger.match (ANY|ALL)');
-        this.assertDiscountOrFree(reward, ['SET', 'INVOICE']);
-        break;
-      case 'LOYALTY_FIRST_PURCHASE':
-        this.assertDiscountOrFree(reward, ['INVOICE']);
+        if (t.paymentCondition !== 'CASH' && t.paymentCondition !== 'CREDIT') {
+          throw new BadRequestException(
+            'trigger.paymentCondition must be CASH or CREDIT',
+          );
+        }
+        if (t.minOrderTotal != null && t.minOrderTotal < 0) {
+          throw new BadRequestException(
+            'trigger.minOrderTotal must be ≥ 0 (fils)',
+          );
+        }
+        if (t.minItemCount != null && t.minItemCount < 1) {
+          throw new BadRequestException('trigger.minItemCount must be ≥ 1');
+        }
+        this.assertLinePercent(reward);
         break;
       default:
         throw new BadRequestException(`Unknown offer type ${type}`);
     }
   }
 
-  private assertDiscountOrFree(
-    reward: OfferRewardDto,
-    allowedAppliesTo: AppliesTo[],
-  ): void {
-    if (reward?.kind === 'DISCOUNT') this.assertDiscount(reward, allowedAppliesTo);
-    else this.assertFree(reward);
-  }
-
-  private assertDiscount(
-    reward: OfferRewardDto,
-    allowedAppliesTo: AppliesTo[],
-  ): void {
-    if (reward?.kind !== 'DISCOUNT') {
-      throw new BadRequestException('This offer type requires a DISCOUNT reward');
-    }
-    if (reward.discountType !== 'PERCENT' && reward.discountType !== 'VALUE') {
-      throw new BadRequestException('reward.discountType must be PERCENT or VALUE');
-    }
-    if (reward.value == null) {
-      throw new BadRequestException('reward.value is required for a DISCOUNT');
+  private assertLinePercent(reward: OfferRewardDto): void {
+    if (reward?.kind !== 'LINE_PERCENT_DISCOUNT') {
+      throw new BadRequestException(
+        'This offer type requires a LINE_PERCENT_DISCOUNT reward',
+      );
     }
     if (
-      reward.discountType === 'PERCENT' &&
-      (reward.value < 0 || reward.value > 100)
+      reward.basePercent == null ||
+      reward.basePercent < 0 ||
+      reward.basePercent > 100
     ) {
-      throw new BadRequestException('PERCENT reward.value must be 0–100');
+      throw new BadRequestException('reward.basePercent must be 0–100');
     }
-    // Default appliesTo to the first allowed option; otherwise it must be legal.
-    if (!reward.appliesTo) reward.appliesTo = allowedAppliesTo[0];
-    if (!allowedAppliesTo.includes(reward.appliesTo)) {
-      throw new BadRequestException(
-        `reward.appliesTo must be one of ${allowedAppliesTo.join(', ')} for this offer type`,
-      );
+    if (reward.mode !== 'STATIC' && reward.mode !== 'DYNAMIC') {
+      throw new BadRequestException('reward.mode must be STATIC or DYNAMIC');
     }
-    if (reward.appliesTo === 'SET' && reward.discountType === 'VALUE') {
-      throw new BadRequestException(
-        'SET discounts must be PERCENT (a fixed VALUE across a set is not supported)',
-      );
-    }
-  }
-
-  private assertFree(reward: OfferRewardDto): void {
-    if (reward?.kind === 'FREE_ITEM') {
-      this.req(reward.items?.length, 'FREE_ITEM reward requires items[]');
-    } else if (reward?.kind === 'FREE_ITEM_CHOICE') {
-      this.req(reward.choices?.length, 'FREE_ITEM_CHOICE requires choices[]');
-      this.req(reward.qty, 'FREE_ITEM_CHOICE requires qty');
-    } else {
-      throw new BadRequestException(
-        'This offer type requires a FREE_ITEM or FREE_ITEM_CHOICE reward',
-      );
+    if (reward.mode === 'DYNAMIC') {
+      if (reward.multiplier == null || reward.multiplier <= 0) {
+        throw new BadRequestException(
+          'DYNAMIC reward requires reward.multiplier > 0',
+        );
+      }
+      if (reward.itemsPerStep == null || reward.itemsPerStep < 1) {
+        throw new BadRequestException(
+          'DYNAMIC reward requires reward.itemsPerStep ≥ 1',
+        );
+      }
+      if (
+        reward.maxPercent != null &&
+        (reward.maxPercent < reward.basePercent || reward.maxPercent > 100)
+      ) {
+        throw new BadRequestException(
+          'reward.maxPercent must be between basePercent and 100',
+        );
+      }
     }
   }
 
