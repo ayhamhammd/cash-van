@@ -202,6 +202,17 @@ export class CreateVoucherDto {
   @IsString({ each: true })
   appliedOfferIds?: string[];
 
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'SALE only. Gift items the rep chose for ITEM_QTY_REWARD offers; the ' +
+      'server validates them against the offer pool and adds them as free lines.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  chosenFreeItems?: string[];
+
   @ApiProperty({ type: [VoucherLineDto] })
   @IsArray()
   @ArrayMinSize(1)

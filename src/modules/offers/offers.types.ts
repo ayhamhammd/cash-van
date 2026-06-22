@@ -11,9 +11,12 @@
  * this iteration are PERCENT only (0–100); amount-off rewards are out of scope.
  */
 
-export type OfferType = 'PAYMENT_METHOD_DISCOUNT';
+export type OfferType = 'PAYMENT_METHOD_DISCOUNT' | 'ITEM_QTY_REWARD';
 
-export const OFFER_TYPES: OfferType[] = ['PAYMENT_METHOD_DISCOUNT'];
+export const OFFER_TYPES: OfferType[] = [
+  'PAYMENT_METHOD_DISCOUNT',
+  'ITEM_QTY_REWARD',
+];
 
 /** Payment types as they arrive on a voucher (payments[].paymentType). */
 export type PaymentType = 'CASH' | 'CHEQUE' | 'TRANSFER' | 'CARD' | 'CREDIT';
@@ -32,7 +35,10 @@ export const PAYMENT_CONDITIONS: PaymentCondition[] = ['CASH', 'CREDIT'];
 export type DiscountMode = 'STATIC' | 'DYNAMIC';
 export const DISCOUNT_MODES: DiscountMode[] = ['STATIC', 'DYNAMIC'];
 
-export type RewardKind = 'LINE_PERCENT_DISCOUNT';
+export type RewardKind =
+  | 'LINE_PERCENT_DISCOUNT'
+  | 'GIFT'
+  | 'ITEM_PERCENT_DISCOUNT';
 export type CustomerScope = 'ALL' | 'SEGMENT' | 'SPECIFIC' | 'NEW_ONLY';
 
 // ---- trigger configs ----
@@ -46,7 +52,16 @@ export interface PaymentMethodTrigger {
   minItemCount?: number;
 }
 
-export type OfferTriggerConfig = PaymentMethodTrigger | Record<string, never>;
+/** ITEM_QTY_REWARD: the offer's selected items. The trigger quantity is the
+ *  COMBINED qty of these items in the cart. */
+export interface ItemSetTrigger {
+  itemNumbers: string[];
+}
+
+export type OfferTriggerConfig =
+  | PaymentMethodTrigger
+  | ItemSetTrigger
+  | Record<string, never>;
 
 // ---- reward configs ----
 
@@ -75,7 +90,45 @@ export interface LinePercentDiscountReward {
   maxPercent?: number;
 }
 
-export type OfferRewardConfig = LinePercentDiscountReward;
+/** A gift tier: reaching `minQty` (combined selected-item qty) grants `freeQty`
+ *  free items, which the rep picks from `giftItems`. Highest reached tier wins. */
+export interface GiftTier {
+  minQty: number;
+  freeQty: number;
+}
+
+/**
+ * ITEM_QTY_REWARD gift: the rep picks `freeQty` items (per the matched tier)
+ * from the `giftItems` pool at sale; each is added as a free line (net 0).
+ */
+export interface GiftReward {
+  kind: 'GIFT';
+  /** Pool of item numbers the rep may choose the free gift(s) from. */
+  giftItems: string[];
+  /** Static tiers, {minQty → freeQty}. */
+  tiers: GiftTier[];
+}
+
+/**
+ * ITEM_QTY_REWARD discount: once the combined selected-item qty reaches `minQty`,
+ * a percentage comes off each SELECTED item's line. STATIC = flat basePercent;
+ * DYNAMIC = basePercent × (1 + multiplier × floor(qty / itemsPerStep)) capped.
+ */
+export interface ItemPercentDiscountReward {
+  kind: 'ITEM_PERCENT_DISCOUNT';
+  /** Threshold on the combined selected-item qty. */
+  minQty: number;
+  basePercent: number;
+  mode: DiscountMode;
+  multiplier?: number;
+  itemsPerStep?: number;
+  maxPercent?: number;
+}
+
+export type OfferRewardConfig =
+  | LinePercentDiscountReward
+  | GiftReward
+  | ItemPercentDiscountReward;
 
 // ---- eligibility / targeting ----
 
@@ -103,6 +156,8 @@ export interface EvaluationContext {
   storeNumber?: string | null;
   /** The order's payment method — drives PAYMENT_METHOD_DISCOUNT matching. */
   paymentMethod?: PaymentType | null;
+  /** Gift items the rep chose (ITEM_QTY_REWARD gifts) — resolved to free lines. */
+  chosenFreeItems?: string[] | null;
   /** Evaluation instant; defaults to now. */
   at?: Date;
 }

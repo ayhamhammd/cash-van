@@ -162,6 +162,92 @@ describe('OffersEngineService', () => {
     expect(at30.lines[0].lineDiscountFils).toBe(7500); // 30000 × 25% (capped)
   });
 
+  /* ----------------------- ITEM_QTY_REWARD ------------------------------ */
+
+  it('ITEM_QTY_REWARD gift surfaces a choice and resolves the rep picks to free lines', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: {
+        kind: 'GIFT',
+        giftItems: ['B'],
+        tiers: [
+          { minQty: 10, freeQty: 1 },
+          { minQty: 20, freeQty: 2 },
+        ],
+      },
+    };
+    // 22× A → tier 20 → 2 gifts; no picks yet → only a choice is surfaced.
+    const choiceOnly = await makeEngine([offer]).evaluate([
+      { itemNumber: 'A', qty: 22 },
+    ]);
+    expect(choiceOnly.appliedOffers[0]?.freeItemChoice).toEqual({
+      choices: ['B'],
+      qty: 2,
+    });
+    expect(choiceOnly.freeLines).toHaveLength(0);
+
+    // With the rep's pick, B is resolved as a free line (capped at freeQty=2).
+    const picked = await makeEngine([offer]).evaluate(
+      [{ itemNumber: 'A', qty: 22 }],
+      { chosenFreeItems: ['B', 'B', 'B'] },
+    );
+    expect(picked.freeLines).toEqual([
+      { itemNumber: 'B', qty: 1, unitPriceFils: 500, offerId: picked.appliedOffers[0]!.offerId },
+      { itemNumber: 'B', qty: 1, unitPriceFils: 500, offerId: picked.appliedOffers[0]!.offerId },
+    ]);
+  });
+
+  it('ITEM_QTY_REWARD gift picks the highest reached tier; below the first grants nothing', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: { kind: 'GIFT', giftItems: ['B'], tiers: [{ minQty: 10, freeQty: 1 }, { minQty: 20, freeQty: 2 }] },
+    };
+    expect(
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 14 }]))
+        .appliedOffers[0]?.freeItemChoice?.qty,
+    ).toBe(1);
+    expect(
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 9 }]))
+        .appliedOffers,
+    ).toHaveLength(0);
+  });
+
+  it('ITEM_QTY_REWARD discount applies % to the selected items only, above minQty', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: { kind: 'ITEM_PERCENT_DISCOUNT', minQty: 12, basePercent: 10, mode: 'STATIC' },
+    };
+    // 12× A (12000) + 5× B (untouched). A line gets 10% = 1200; B gets 0.
+    const res = await makeEngine([offer]).evaluate([
+      { itemNumber: 'A', qty: 12 },
+      { itemNumber: 'B', qty: 5 },
+    ]);
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(1200);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(0);
+    // 11× A → below minQty → nothing.
+    expect(
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 11 }])).appliedOffers,
+    ).toHaveLength(0);
+  });
+
+  it('ITEM_QTY_REWARD counts the COMBINED qty of selected items', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A', 'B'] },
+      reward: { kind: 'ITEM_PERCENT_DISCOUNT', minQty: 10, basePercent: 10, mode: 'STATIC' },
+    };
+    // 6× A + 5× B = 11 ≥ 10 → both A and B lines discounted 10%.
+    const res = await makeEngine([offer]).evaluate([
+      { itemNumber: 'A', qty: 6 },
+      { itemNumber: 'B', qty: 5 },
+    ]);
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(600);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(250);
+  });
+
   it('a non-stackable offer ends the chain (higher priority wins alone)', async () => {
     const engine = makeEngine([
       {
