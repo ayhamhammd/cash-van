@@ -33,8 +33,8 @@ Offer = {
   timeTo?: string | null;       // 'HH:mm'
   totalRedemptionLimit?: number | null;
   perCustomerLimit?: number | null;
-  priority: number;             // higher evaluated first
-  stackable: boolean;
+  priority: number;             // DEPRECATED — ignored by the conflict model below
+  stackable: boolean;           // DEPRECATED — ignored by the conflict model below
   isActive: boolean;
   redemptionCount: number;
   createdAt: string; updatedAt: string;
@@ -155,6 +155,16 @@ data = Offer[]
 For `PAYMENT_METHOD_DISCOUNT` the discount is applied **per line** — read it from `lines[].lineDiscountFils` (`lineNetFils` is the post-discount, pre-tax net). `freeLines`/`invoiceDiscountFils`/`freeItemChoice` belong to future types and are empty here.
 
 ---
+
+## Conflict resolution (how multiple offers combine)
+Discounts are computed **per cart line** by category:
+- **Within a category, the highest discount wins** (only one applies):
+  - Multiple **payment-method** discounts (e.g. two CASH offers) → the single highest %.
+  - Multiple **item** discounts targeting the same item → the single highest %.
+- **Across categories, discounts ADD** on the line: a line covered by a payment-method discount (10%) **and** an item discount (5%) gets **15%** (clamped so a line never goes below 0).
+- **Gifts** are independent of the % math — each qualifying gift offer grants its free items.
+
+`priority` and `stackable` are no longer used (the model above is deterministic). The redemption ledger records each contributing offer's share of the discount.
 
 ## Voucher integration (server-authoritative)
 Offers are applied **inside `VouchersService.create` for SALE vouchers** — the server is the single source of truth. On create it:
