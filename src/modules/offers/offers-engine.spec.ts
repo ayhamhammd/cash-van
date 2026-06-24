@@ -243,20 +243,18 @@ describe('OffersEngineService', () => {
     expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(250);
   });
 
-  it('a non-stackable offer ends the chain (higher priority wins alone)', async () => {
+  /* ---------------- conflict resolution (max within, sum across) ---------- */
+
+  it('two payment-method offers conflict → only the HIGHEST % applies', async () => {
     const engine = makeEngine([
       {
         id: 'big',
-        priority: 10,
-        stackable: false,
         type: 'PAYMENT_METHOD_DISCOUNT',
         trigger: { paymentCondition: 'CASH' },
         reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 20, mode: 'STATIC' },
       },
       {
         id: 'small',
-        priority: 5,
-        stackable: true,
         type: 'PAYMENT_METHOD_DISCOUNT',
         trigger: { paymentCondition: 'CASH' },
         reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 5, mode: 'STATIC' },
@@ -267,6 +265,54 @@ describe('OffersEngineService', () => {
     });
     expect(res.appliedOffers).toHaveLength(1);
     expect(res.appliedOffers[0].offerId).toBe('big');
-    expect(res.totals.lineDiscountFils).toBe(2000); // 20% of 10000
+    expect(res.totals.lineDiscountFils).toBe(2000); // 20% of 10000, the 5% is dropped
+  });
+
+  it('two item offers on the same item → only the HIGHEST % applies', async () => {
+    const engine = makeEngine([
+      {
+        id: 'i8',
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['A'] },
+        reward: { kind: 'ITEM_PERCENT_DISCOUNT', minQty: 1, basePercent: 8, mode: 'STATIC' },
+      },
+      {
+        id: 'i3',
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['A'] },
+        reward: { kind: 'ITEM_PERCENT_DISCOUNT', minQty: 1, basePercent: 3, mode: 'STATIC' },
+      },
+    ]);
+    const res = await engine.evaluate([{ itemNumber: 'A', qty: 10 }]);
+    expect(res.lines[0].lineDiscountFils).toBe(800); // 8% of 10000, not 11%
+    expect(res.appliedOffers.map((o) => o.offerId)).toEqual(['i8']);
+  });
+
+  it('payment-method + item discount on the same line ADD together', async () => {
+    const engine = makeEngine([
+      {
+        id: 'pay10',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH' },
+        reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 10, mode: 'STATIC' },
+      },
+      {
+        id: 'item5',
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['A'] },
+        reward: { kind: 'ITEM_PERCENT_DISCOUNT', minQty: 1, basePercent: 5, mode: 'STATIC' },
+      },
+    ]);
+    // A is covered by both (10% + 5% = 15%); B only by payment (10%).
+    const res = await engine.evaluate(
+      [
+        { itemNumber: 'A', qty: 10 },
+        { itemNumber: 'B', qty: 10 },
+      ],
+      { paymentMethod: 'CASH' },
+    );
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(1500); // 15% of 10000
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(500); // 10% of 5000
+    expect(res.appliedOffers.map((o) => o.offerId).sort()).toEqual(['item5', 'pay10']);
   });
 });
