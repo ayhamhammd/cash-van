@@ -61,7 +61,8 @@ A **per-line percentage** discount applied to every invoice line, gated by the o
   "itemsPerStep": 6,             // DYNAMIC only
   "maxPercent": 25 }             // DYNAMIC only, cap 0–100
 ```
-Dynamic rate: `effectivePct = basePercent × (1 + multiplier × floor(itemCount ÷ itemsPerStep))`, capped at `maxPercent` (and 100). Amount-off (VALUE) rewards are **out of scope** in this iteration.
+Dynamic rate: the base applies **at the threshold** and each full `itemsPerStep` *above* it adds one step —
+`steps = floor(max(0, itemCount − minItemCount) ÷ itemsPerStep)`, `effectivePct = basePercent × (1 + multiplier × steps)`, capped at `maxPercent` (and 100). So with `minItemCount = 10`, `basePercent = 3`, `itemsPerStep = 10`, `multiplier = 1`: 10 items → 3%, 20 → 6%, 30 → 9% (exactly at the threshold you get the base rate, not base×2). When `minItemCount` is unset the anchor is 0. Amount-off (VALUE) rewards are **out of scope** in this iteration.
 
 **Legality** (enforced in `OffersService.validateConfig`): `paymentCondition ∈ {CASH,CREDIT}`; `basePercent` 0–100; `mode` STATIC/DYNAMIC; DYNAMIC requires `multiplier > 0` and `itemsPerStep ≥ 1`, and `maxPercent` (if set) between `basePercent` and 100.
 
@@ -86,7 +87,7 @@ Buy a quantity of selected item(s) → a **gift** or a **per-item discount**. Th
   "minQty": 12, "basePercent": 10,
   "mode": "STATIC" | "DYNAMIC", "multiplier": 0.5, "itemsPerStep": 6, "maxPercent": 25 }
 ```
-Dynamic rate (same formula as above; `qty` = combined selected-item qty). For a GIFT offer, evaluate surfaces `appliedOffers[].freeItemChoice = { choices: giftItems, qty: freeQty }`; the rep's picks come back as `freeLines` once `chosenFreeItems` is sent (see evaluate).
+Dynamic rate (same anchored formula as above; here `qty` = combined selected-item qty and the anchor is `minQty`, so at exactly `minQty` you get the base rate). For a GIFT offer, evaluate surfaces `appliedOffers[].freeItemChoice = { choices: giftItems, qty: freeQty }`; the rep's picks come back as `freeLines` once `chosenFreeItems` is sent (see evaluate).
 
 **Legality**: `itemNumbers` non-empty; GIFT requires `giftItems` non-empty + `itemsPerGift` ≥ 1 (`maxFreeQty` optional, ≥ 1); ITEM_PERCENT_DISCOUNT requires `minQty` ≥ 1 + the percentage fields above.
 

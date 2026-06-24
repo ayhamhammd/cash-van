@@ -150,7 +150,8 @@ export class OffersEngineService {
         const totalOk = t.minOrderTotal == null || subtotalFils >= t.minOrderTotal;
         const countOk = t.minItemCount == null || itemCount >= t.minItemCount;
         if (payOk && totalOk && countOk && reward?.kind === 'LINE_PERCENT_DISCOUNT') {
-          const pct = this.effectivePercent(reward, itemCount);
+          // Base applies at minItemCount; steps accrue per itemsPerStep above it.
+          const pct = this.effectivePercent(reward, itemCount, t.minItemCount ?? 0);
           if (pct > 0) payOffers.push({ offer, pct, items: null });
         }
       } else if (offer.type === 'ITEM_QTY_REWARD') {
@@ -163,7 +164,8 @@ export class OffersEngineService {
           if (freeQty > 0) gifts.push({ offer, reward, freeQty });
         } else if (reward?.kind === 'ITEM_PERCENT_DISCOUNT') {
           if (qty >= reward.minQty) {
-            const pct = this.effectivePercent(reward, qty);
+            // Base applies at minQty; steps accrue per itemsPerStep above it.
+            const pct = this.effectivePercent(reward, qty, reward.minQty ?? 0);
             if (pct > 0) itemOffers.push({ offer, pct, items: new Set(items) });
           }
         }
@@ -305,20 +307,26 @@ export class OffersEngineService {
   }
 
   /**
-   * The effective percent for a percentage reward given a quantity:
-   *   base × (1 + multiplier × floor(qty / itemsPerStep))
-   * STATIC ignores the multiplier. Capped at maxPercent and never above 100.
+   * The effective percent for a percentage reward given a quantity. The base
+   * percent applies at the offer's threshold (`anchor` — minItemCount for a
+   * payment offer, minQty for an item offer); each full `itemsPerStep` ABOVE the
+   * anchor adds one multiplier step:
+   *   steps = floor(max(0, count − anchor) / itemsPerStep)
+   *   pct   = base × (1 + multiplier × steps)
+   * So at exactly the threshold you get the base rate (not base × 2). STATIC
+   * ignores the multiplier. Capped at maxPercent and never above 100.
    */
   private effectivePercent(
     reward: Pick<
       LinePercentDiscountReward,
       'basePercent' | 'mode' | 'multiplier' | 'itemsPerStep' | 'maxPercent'
     >,
-    itemCount: number,
+    count: number,
+    anchor = 0,
   ): number {
     const steps =
       reward.mode === 'DYNAMIC' && reward.itemsPerStep
-        ? Math.floor(itemCount / reward.itemsPerStep)
+        ? Math.floor(Math.max(0, count - anchor) / reward.itemsPerStep)
         : 0;
     const pct = reward.basePercent * (1 + (reward.multiplier ?? 0) * steps);
     const cap = Math.min(reward.maxPercent ?? 100, 100);
