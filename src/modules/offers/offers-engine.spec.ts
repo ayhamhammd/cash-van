@@ -162,6 +162,29 @@ describe('OffersEngineService', () => {
     expect(at30.lines[0].lineDiscountFils).toBe(7500); // 30000 × 25% (capped)
   });
 
+  it('DYNAMIC anchors the base at minItemCount — base rate at the threshold, +step above', async () => {
+    const engine = makeEngine([
+      {
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH', minItemCount: 10 },
+        reward: {
+          kind: 'LINE_PERCENT_DISCOUNT',
+          basePercent: 3,
+          mode: 'DYNAMIC',
+          multiplier: 1,
+          itemsPerStep: 10,
+        },
+      },
+    ]);
+    const pct = async (q: number) =>
+      (await engine.evaluate([{ itemNumber: 'A', qty: q }], { paymentMethod: 'CASH' }))
+        .lines[0]?.lineDiscountFils ?? 0;
+    expect(await pct(10)).toBe(300); // 10 items = threshold → base 3% (NOT 6%)
+    expect(await pct(19)).toBe(570); // still in the first block → 3%
+    expect(await pct(20)).toBe(1200); // 1 step above → 6%
+    expect(await pct(30)).toBe(2700); // 2 steps above → 9%
+  });
+
   /* ----------------------- ITEM_QTY_REWARD ------------------------------ */
 
   it('ITEM_QTY_REWARD gift surfaces a choice and resolves the rep picks to free lines', async () => {
