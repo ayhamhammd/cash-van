@@ -314,5 +314,14 @@ describe('OffersEngineService', () => {
     expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(1500); // 15% of 10000
     expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(500); // 10% of 5000
     expect(res.appliedOffers.map((o) => o.offerId).sort()).toEqual(['item5', 'pay10']);
+    // Per-line attribution: A carries both contributing offers; B only the payment one.
+    const aLine = res.lines.find((l) => l.itemNumber === 'A')!;
+    expect(aLine.offers.map((o) => ({ offerId: o.offerId, pct: o.pct, discountFils: o.discountFils })).sort((x, y) => x.offerId.localeCompare(y.offerId))).toEqual([
+      { offerId: 'item5', pct: 5, discountFils: 500 },
+      { offerId: 'pay10', pct: 10, discountFils: 1000 },
+    ]);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.offers).toEqual([
+      { offerId: 'pay10', name: expect.any(String), pct: 10, discountFils: 500 },
+    ]);
   });
 });

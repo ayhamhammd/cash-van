@@ -160,6 +160,16 @@ export interface EvaluationContext {
   at?: Date;
 }
 
+/** One offer's contribution to a single line — drives the per-line offer label. */
+export interface LineOfferRef {
+  offerId: string;
+  name: string;
+  /** The percentage this offer applied to the line (0–100). */
+  pct: number;
+  /** Discount this offer contributed to the line (fils). */
+  discountFils: number;
+}
+
 export interface EvaluatedLine {
   itemNumber: string;
   qty: number;
@@ -168,6 +178,8 @@ export interface EvaluatedLine {
   lineDiscountFils: number;
   /** qty·unitPrice − lineDiscount (pre-tax, fils). */
   lineNetFils: number;
+  /** The offer(s) that discounted this line, each with its % and fils share. */
+  offers: LineOfferRef[];
 }
 
 export interface FreeLine {

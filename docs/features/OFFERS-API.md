@@ -144,7 +144,8 @@ data = Offer[]
 
 // response (data)
 {
-  "lines": [ { "itemNumber", "qty", "unitPriceFils", "lineDiscountFils", "lineNetFils" } ],
+  "lines": [ { "itemNumber", "qty", "unitPriceFils", "lineDiscountFils", "lineNetFils",
+               "offers": [ { "offerId", "name", "pct", "discountFils" } ] } ],
   "freeLines": [],                 // empty for current types
   "invoiceDiscountFils": 0,        // 0 for current types (discounts are per-line)
   "appliedOffers": [ { "offerId", "name", "type", "summary", "discountFils", "freeItems": [] } ],
@@ -152,7 +153,7 @@ data = Offer[]
               "totalDiscountFils", "taxFils", "grandTotalFils" }
 }
 ```
-For `PAYMENT_METHOD_DISCOUNT` the discount is applied **per line** — read it from `lines[].lineDiscountFils` (`lineNetFils` is the post-discount, pre-tax net). `freeLines`/`invoiceDiscountFils`/`freeItemChoice` belong to future types and are empty here.
+For `PAYMENT_METHOD_DISCOUNT` the discount is applied **per line** — read it from `lines[].lineDiscountFils` (`lineNetFils` is the post-discount, pre-tax net). Each line also carries `lines[].offers` — the offer(s) that discounted *that* line, each with its `name`, the `pct` it applied, and the `discountFils` it contributed (a line touched by both a payment and an item offer lists both; the sum equals `lineDiscountFils`). Use it to label the discount on the line. `freeLines`/`invoiceDiscountFils`/`freeItemChoice` belong to future types and are empty here.
 
 ---
 

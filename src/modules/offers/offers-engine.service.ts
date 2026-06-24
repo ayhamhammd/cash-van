@@ -19,6 +19,7 @@ import type {
   GiftReward,
   ItemPercentDiscountReward,
   ItemSetTrigger,
+  LineOfferRef,
   LinePercentDiscountReward,
   OfferEligibility,
   PaymentMethodTrigger,
@@ -88,7 +89,13 @@ export class OffersEngineService {
     // Working state.
     const work = new Map<
       string,
-      { qty: number; unitPriceFils: number; taxPct: number; discountFils: number }
+      {
+        qty: number;
+        unitPriceFils: number;
+        taxPct: number;
+        discountFils: number;
+        offers: LineOfferRef[];
+      }
     >();
     for (const [itemNumber, qty] of cart) {
       const info = itemMap.get(itemNumber);
@@ -97,6 +104,7 @@ export class OffersEngineService {
         unitPriceFils: info?.priceFils ?? 0,
         taxPct: info?.taxPct ?? 0,
         discountFils: 0,
+        offers: [],
       });
     }
     const subtotalFils = [...work.values()].reduce(
@@ -187,9 +195,21 @@ export class OffersEngineService {
       l.discountFils = payFils + itemFils;
       if (bestPay && payFils > 0) {
         contrib.set(bestPay.offer.id, (contrib.get(bestPay.offer.id) ?? 0) + payFils);
+        l.offers.push({
+          offerId: bestPay.offer.id,
+          name: bestPay.offer.name,
+          pct: bestPay.pct,
+          discountFils: payFils,
+        });
       }
       if (bestItem && itemFils > 0) {
         contrib.set(bestItem.offer.id, (contrib.get(bestItem.offer.id) ?? 0) + itemFils);
+        l.offers.push({
+          offerId: bestItem.offer.id,
+          name: bestItem.offer.name,
+          pct: bestItem.pct,
+          discountFils: itemFils,
+        });
       }
     }
 
@@ -249,6 +269,7 @@ export class OffersEngineService {
         unitPriceFils: l.unitPriceFils,
         lineDiscountFils: discount,
         lineNetFils: net,
+        offers: l.offers,
       });
     }
 
