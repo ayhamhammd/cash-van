@@ -1,10 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsInt,
   IsNumberString,
   IsOptional,
   IsString,
   IsUrl,
   Length,
+  MaxLength,
+  Min,
 } from 'class-validator';
 
 export class CreateItemDto {
@@ -23,6 +26,18 @@ export class CreateItemDto {
   @Length(1, 64)
   barcode!: string;
 
+  @ApiPropertyOptional({ default: 0, description: 'Sale price in fils (minor units; 1 JOD = 1000 fils)' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  price?: number;
+
+  @ApiPropertyOptional({ default: 0, description: 'Unit cost in fils (minor units; 1 JOD = 1000 fils)' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  cost?: number;
+
   @ApiPropertyOptional({ default: '0', description: '0..100' })
   @IsOptional()
   @IsNumberString()
@@ -32,4 +47,13 @@ export class CreateItemDto {
   @IsOptional()
   @IsUrl()
   photoUrl?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Product image URL (absolute, or a relative ERP upload path). Shown in the app + dashboard.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  imageUrl?: string;
 }

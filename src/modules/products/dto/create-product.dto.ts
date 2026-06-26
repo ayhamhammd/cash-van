@@ -78,6 +78,16 @@ export class CreateProductDto {
   @Min(0)
   cost?: number;
 
+  @ApiPropertyOptional({ description: 'ERP category id (mirrored to the ERP on push)' })
+  @IsOptional()
+  @IsString()
+  erpCategoryId?: string;
+
+  @ApiPropertyOptional({ description: 'ERP tax-rate id (mirrored to the ERP on push)' })
+  @IsOptional()
+  @IsString()
+  erpTaxRateId?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()

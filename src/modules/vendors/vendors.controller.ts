@@ -10,6 +10,7 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -25,9 +26,11 @@ import { VendorsService } from './vendors.service';
 import { CreateVendorDto } from './dto/create-vendor.dto';
 import { UpdateVendorDto } from './dto/update-vendor.dto';
 import { PaginationDto } from '../../common/dto/pagination.dto';
+import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 
 @ApiTags('vendors')
 @ApiBearerAuth()
+@UseGuards(ErpReadOnlyGuard)
 @Controller({ path: 'vendors', version: '1' })
 export class VendorsController {
   constructor(private readonly vendorsService: VendorsService) {}

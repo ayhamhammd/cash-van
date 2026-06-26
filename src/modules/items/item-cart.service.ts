@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ILike, Repository } from 'typeorm';
 
 import { ItemCart } from './entities/item-cart.entity';
@@ -19,6 +20,7 @@ export class ItemCartService {
   constructor(
     @InjectRepository(ItemCart)
     private readonly itemsRepo: Repository<ItemCart>,
+    private readonly events: EventEmitter2,
   ) {}
 
   async create(dto: CreateItemDto): Promise<ItemCart> {
@@ -33,7 +35,21 @@ export class ItemCartService {
         `Item with itemNumber/barcode already exists`,
       );
     }
-    return this.itemsRepo.save(this.itemsRepo.create(dto));
+    const saved = await this.itemsRepo.save(
+      this.itemsRepo.create({
+        ...dto,
+        nameAr: dto.name, // entity requires nameAr; default from the display name
+        sku: dto.itemNumber, // entity requires sku; default to the item number
+      }),
+    );
+    // Mirror to the ERP (ErpSyncService listener; no-op when ERP off / defaults unset).
+    this.events.emit('erp.item.created', {
+      itemNumber: saved.itemNumber,
+      name: saved.name ?? saved.nameAr ?? saved.itemNumber,
+      priceFils: saved.price ?? 0,
+      costFils: saved.cost ?? 0,
+    });
+    return saved;
   }
 
   async update(id: string, dto: UpdateItemDto): Promise<ItemCart> {

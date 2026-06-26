@@ -29,10 +29,11 @@ import {
 } from './dto/item-unit.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 
 @ApiTags('item-units')
 @ApiBearerAuth()
-@UseGuards(RolesGuard)
+@UseGuards(RolesGuard, ErpReadOnlyGuard)
 @Controller({ version: '1' })
 export class ItemUnitsController {
   constructor(private readonly units: UnitsService) {}

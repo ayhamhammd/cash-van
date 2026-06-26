@@ -28,6 +28,7 @@ import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 import {
   CurrentUser,
   AuthenticatedUser,
@@ -92,20 +93,26 @@ export class RepsController {
 
   @Post()
   @Roles('admin', 'manager')
+  @UseGuards(ErpReadOnlyGuard)
   @ApiOperation({
     summary: 'Create rep',
-    description: 'Create a new sales rep. Admin/manager only.',
+    description:
+      'Create a new sales rep. Admin/manager only. Blocked when ERP mode is on (salesmen/vans are created in the ERP).',
   })
   @ApiCreatedResponse({ description: 'Rep created' })
   create(@Body() dto: CreateRepDto) {
     return this.reps.create(dto);
   }
 
+  // NOTE: intentionally NOT @UseGuards(ErpReadOnlyGuard) — salesmen stay EDITABLE
+  // when ERP mode is on (set/change password, phone, region, quota, active…). The
+  // ERP-managed identity (name + code/userNumber) is protected in the service.
   @Patch(':id')
   @Roles('admin', 'manager')
   @ApiOperation({
     summary: 'Update rep',
-    description: 'Update rep fields. Admin/manager only.',
+    description:
+      'Update rep fields (incl. login password). Allowed even when ERP mode is on — except name and code (userNumber), which stay ERP-managed. Admin/manager only.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiOkResponse({ description: 'Updated rep' })
@@ -115,6 +122,7 @@ export class RepsController {
 
   @Delete(':id')
   @Roles('admin')
+  @UseGuards(ErpReadOnlyGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete rep', description: 'Soft-delete a rep. Admin only.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })

@@ -25,6 +25,10 @@ export class Collection {
   @Column({ name: 'customer_id', type: 'uuid' })
   customerId!: string;
 
+  /** Per-warehouse payment number (C series), e.g. C-VAN-01-000001. */
+  @Column({ name: 'collection_number', type: 'text', nullable: true })
+  collectionNumber?: string | null;
+
   @Column({ name: 'invoice_id', type: 'uuid', nullable: true })
   invoiceId?: string | null;
 

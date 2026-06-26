@@ -40,6 +40,7 @@ import { ReassignCustomerDto } from './dto/reassign-customer.dto';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 
 @ApiTags('customers')
 @ApiBearerAuth()
@@ -79,6 +80,7 @@ export class CustomersController {
   }
 
   @Post()
+  @UseGuards(ErpReadOnlyGuard)
   @RequirePermissions('canAddCustomer')
   @ApiOperation({
     summary: 'Create customer',
@@ -89,11 +91,16 @@ export class CustomersController {
     return this.customers.create(dto);
   }
 
+  // NOTE: intentionally NOT @UseGuards(ErpReadOnlyGuard) — unlike other ERP-
+  // managed base data, customers stay EDITABLE on VanFlow even when ERP mode is
+  // on. The edit saves locally AND pushes to the ERP (erp.customer.updated →
+  // PATCH by id-map erpId), so both sides stay in sync.
   @Patch(':id')
   @RequirePermissions('canEditCustomerCredit')
   @ApiOperation({
     summary: 'Update customer',
-    description: 'Update a customer. Requires the canEditCustomerCredit permission.',
+    description:
+      'Update a customer. Allowed even when ERP mode is on — the change is mirrored to the ERP. Requires the canEditCustomerCredit permission.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
   @ApiOkResponse({ description: 'Updated customer' })
@@ -252,6 +259,7 @@ export class CustomersController {
   }
 
   @Delete(':id')
+  @UseGuards(ErpReadOnlyGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Delete customer', description: 'Soft-delete a customer.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })

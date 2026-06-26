@@ -56,6 +56,18 @@ export class UsersController {
     return { ...result, items: result.items.map(UserResponseDto.fromEntity) };
   }
 
+  @Get('permissions')
+  @ApiOperation({
+    summary: 'All users with permissions',
+    description:
+      'Flat (unpaginated) list of every user with their role + permission flags. Lets the app mirror dashboard accounts/permissions.',
+  })
+  @ApiOkResponse({ description: 'All users with permissions' })
+  async permissions(): Promise<UserResponseDto[]> {
+    const users = await this.usersService.listAll();
+    return users.map(UserResponseDto.fromEntity);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get user', description: 'Fetch a single user by id.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'User id' })

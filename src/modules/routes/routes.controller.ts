@@ -71,6 +71,24 @@ export class RoutesController {
     return this.routes.overdueOutlets(repId);
   }
 
+  @Get('rep-visits')
+  @ApiOperation({
+    summary: 'Rep visits in a date range',
+    description:
+      "A rep's customer check-ins between two dates (inclusive). Used by the weekly route to flag off-route visits (visited on an unplanned weekday, or an outlet not in the rep's plan).",
+  })
+  @ApiQuery({ name: 'repId', required: true, description: 'Rep id (uuid)' })
+  @ApiQuery({ name: 'from', required: true, description: 'From date (YYYY-MM-DD)' })
+  @ApiQuery({ name: 'to', required: true, description: 'To date (YYYY-MM-DD)' })
+  @ApiOkResponse({ description: 'Visits (customerId, visitedAt, hadSale, visitNote)' })
+  repVisits(
+    @Query('repId', ParseUUIDPipe) repId: string,
+    @Query('from') from: string,
+    @Query('to') to: string,
+  ) {
+    return this.routes.repVisits(repId, from, to);
+  }
+
   @Get(':id')
   @ApiOperation({
     summary: 'Get route plan',
