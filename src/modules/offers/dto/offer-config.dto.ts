@@ -1,5 +1,4 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
 import {
   ArrayNotEmpty,
   IsArray,
@@ -8,124 +7,130 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Max,
   Min,
-  ValidateNested,
 } from 'class-validator';
-import type {
-  AppliesTo,
-  CustomerScope,
-  DiscountKind,
-  RewardKind,
-  SetMatch,
+import {
+  DISCOUNT_MODES,
+  PAYMENT_CONDITIONS,
+  type CustomerScope,
+  type DiscountMode,
+  type PaymentCondition,
+  type RewardKind,
 } from '../offers.types';
 
-const DISCOUNT_KINDS: DiscountKind[] = ['PERCENT', 'VALUE'];
-const APPLIES_TO: AppliesTo[] = ['TRIGGER_ITEM', 'SET', 'INVOICE'];
-const SET_MATCHES: SetMatch[] = ['ANY', 'ALL'];
-const REWARD_KINDS: RewardKind[] = ['DISCOUNT', 'FREE_ITEM', 'FREE_ITEM_CHOICE'];
+const REWARD_KINDS: RewardKind[] = [
+  'LINE_PERCENT_DISCOUNT',
+  'GIFT',
+  'ITEM_PERCENT_DISCOUNT',
+];
 const CUSTOMER_SCOPES: CustomerScope[] = ['ALL', 'SEGMENT', 'SPECIFIC', 'NEW_ONLY'];
 
 /**
- * The trigger/reward/eligibility DTOs declare every field used by any of the 5
- * offer types (all optional). Per-type legality — which fields are required and
- * which reward is allowed — is enforced in OffersService.validateConfig(),
- * which throws BadRequestException with a precise message.
+ * Union of all trigger fields across offer types (all optional). Per-type
+ * legality (which fields are required) is enforced in OffersService.validateConfig.
  */
 export class OfferTriggerDto {
-  @ApiPropertyOptional({ description: 'Trigger item (ITEM_QTY_DISCOUNT, BUY_X_GET_Y_FREE).' })
+  // ---- PAYMENT_METHOD_DISCOUNT ----
+  @ApiPropertyOptional({
+    enum: PAYMENT_CONDITIONS,
+    description: 'PAYMENT_METHOD_DISCOUNT: CASH matches any non-CREDIT; CREDIT only CREDIT.',
+  })
   @IsOptional()
-  @IsString()
-  itemNumber?: string;
+  @IsIn(PAYMENT_CONDITIONS)
+  paymentCondition?: PaymentCondition;
 
-  @ApiPropertyOptional({ description: 'Min qty of the trigger item (ITEM_QTY_DISCOUNT).' })
-  @IsOptional()
-  @IsInt()
-  @Min(1)
-  minQty?: number;
-
-  @ApiPropertyOptional({ description: 'Buy-qty that earns the free item (BUY_X_GET_Y_FREE).' })
+  @ApiPropertyOptional({ description: 'PAYMENT_METHOD_DISCOUNT: min order subtotal (fils).' })
   @IsOptional()
   @IsInt()
-  @Min(1)
-  qty?: number;
+  @Min(0)
+  minOrderTotal?: number;
 
-  @ApiPropertyOptional({ type: [String], description: 'Item set (BASKET_THRESHOLD, ITEM_SET_THRESHOLD).' })
-  @IsOptional()
-  @IsArray()
-  @ArrayNotEmpty()
-  @IsString({ each: true })
-  itemNumbers?: string[];
-
-  @ApiPropertyOptional({ description: 'Min count of set items in cart (BASKET_THRESHOLD).' })
+  @ApiPropertyOptional({ description: 'PAYMENT_METHOD_DISCOUNT: min total item count (Σ qty).' })
   @IsOptional()
   @IsInt()
   @Min(1)
   minItemCount?: number;
 
-  @ApiPropertyOptional({ description: 'Min total qty across set items (ITEM_SET_THRESHOLD).' })
+  // ---- ITEM_QTY_REWARD ----
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'ITEM_QTY_REWARD: the selected items. Threshold = their combined qty.',
+  })
   @IsOptional()
-  @IsInt()
-  @Min(1)
-  minTotalQty?: number;
-
-  @ApiPropertyOptional({ enum: SET_MATCHES, description: 'ANY = any set item; ALL = every set item present (ITEM_SET_THRESHOLD).' })
-  @IsOptional()
-  @IsIn(SET_MATCHES)
-  match?: SetMatch;
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsString({ each: true })
+  itemNumbers?: string[];
 }
 
-export class FreeItemDto {
-  @ApiProperty()
-  @IsString()
-  itemNumber!: string;
-
-  @ApiProperty({ minimum: 1 })
-  @IsInt()
-  @Min(1)
-  qty!: number;
-}
-
+/**
+ * Union of all reward fields across offer types (most optional). Per-type
+ * legality is enforced in OffersService.validateConfig.
+ */
 export class OfferRewardDto {
   @ApiProperty({ enum: REWARD_KINDS })
   @IsIn(REWARD_KINDS)
   kind!: RewardKind;
 
-  @ApiPropertyOptional({ enum: DISCOUNT_KINDS, description: 'DISCOUNT only.' })
-  @IsOptional()
-  @IsIn(DISCOUNT_KINDS)
-  discountType?: DiscountKind;
-
-  @ApiPropertyOptional({ description: 'DISCOUNT only. PERCENT → 0–100; VALUE → fils.' })
+  // ---- percentage rewards (LINE_PERCENT_DISCOUNT, ITEM_PERCENT_DISCOUNT) ----
+  @ApiPropertyOptional({ description: 'Base percentage, 0–100.' })
   @IsOptional()
   @IsNumber()
   @Min(0)
-  value?: number;
+  @Max(100)
+  basePercent?: number;
 
-  @ApiPropertyOptional({ enum: APPLIES_TO, description: 'DISCOUNT only: where the discount lands.' })
+  @ApiPropertyOptional({ enum: DISCOUNT_MODES })
   @IsOptional()
-  @IsIn(APPLIES_TO)
-  appliesTo?: AppliesTo;
+  @IsIn(DISCOUNT_MODES)
+  mode?: DiscountMode;
 
-  @ApiPropertyOptional({ type: [FreeItemDto], description: 'FREE_ITEM only.' })
+  @ApiPropertyOptional({ description: 'DYNAMIC only: fraction of base added per step, e.g. 0.5.' })
   @IsOptional()
-  @IsArray()
-  @ArrayNotEmpty()
-  @ValidateNested({ each: true })
-  @Type(() => FreeItemDto)
-  items?: FreeItemDto[];
+  @IsNumber()
+  @Min(0)
+  multiplier?: number;
 
-  @ApiPropertyOptional({ type: [String], description: 'FREE_ITEM_CHOICE only: items the rep may pick from.' })
+  @ApiPropertyOptional({ description: 'DYNAMIC only: items per multiplication step, e.g. 6.' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  itemsPerStep?: number;
+
+  @ApiPropertyOptional({ description: 'DYNAMIC only: cap on effective percent, 0–100.' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  maxPercent?: number;
+
+  // ---- ITEM_PERCENT_DISCOUNT ----
+  @ApiPropertyOptional({ description: 'ITEM_PERCENT_DISCOUNT: threshold on combined selected-item qty.' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  minQty?: number;
+
+  // ---- GIFT ----
+  @ApiPropertyOptional({ type: [String], description: 'GIFT: pool the rep picks free items from.' })
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
   @IsString({ each: true })
-  choices?: string[];
+  giftItems?: string[];
 
-  @ApiPropertyOptional({ description: 'FREE_ITEM_CHOICE only: how many free items to grant.' })
+  @ApiPropertyOptional({ description: 'GIFT: buy this many of the selected items to earn one free gift.' })
   @IsOptional()
   @IsInt()
   @Min(1)
-  qty?: number;
+  itemsPerGift?: number;
+
+  @ApiPropertyOptional({ description: 'GIFT: optional cap on the number of free gifts.' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  maxFreeQty?: number;
 }
 
 export class OfferEligibilityDto {

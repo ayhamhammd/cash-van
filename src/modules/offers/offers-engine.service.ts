@@ -11,13 +11,19 @@ import { OfferRedemption } from './entities/offer-redemption.entity';
 import type {
   AppliedOffer,
   CartLineInput,
-  DiscountReward,
   EvaluatedLine,
   EvaluationContext,
   EvaluationResult,
   FreeItemSpec,
   FreeLine,
+  GiftReward,
+  ItemPercentDiscountReward,
+  ItemSetTrigger,
+  LineOfferRef,
+  LinePercentDiscountReward,
   OfferEligibility,
+  PaymentMethodTrigger,
+  PaymentType,
 } from './offers.types';
 
 interface ItemInfo {
@@ -26,26 +32,9 @@ interface ItemInfo {
   name: string;
 }
 
-/** Reward outcome for one offer against a cart, before stacking/clamping. */
-interface RewardOutcome {
-  triggerSatisfied: boolean;
-  lineDiscounts: Map<string, number>;
-  invoiceDiscountFils: number;
-  freeItems: FreeItemSpec[];
-  freeItemChoice?: { choices: string[]; qty: number };
-  discountFils: number;
-}
-
-export interface RecordedReward {
-  offerId: string;
-  discountFils: number;
-  freeItems: FreeItemSpec[];
-}
-
 /**
  * The discount engine. Stateless w.r.t. the cart: given lines + context it loads
- * the active offers and computes per-line discounts, free lines and invoice
- * discounts. All money is integer fils.
+ * the active offers and computes per-line discounts. All money is integer fils.
  *
  * Stacking rule: offers are considered in priority order (desc, then oldest
  * first). Stackable offers combine; the first NON-stackable offer that applies
@@ -73,6 +62,7 @@ export class OffersEngineService {
   ): Promise<EvaluationResult> {
     const at = ctx.at ?? new Date();
     const cart = this.toCartMap(lines);
+    const itemCount = [...cart.values()].reduce((s, q) => s + q, 0);
 
     const offers = await this.offersRepo.find({
       where: { isActive: true },
@@ -87,9 +77,7 @@ export class OffersEngineService {
       : null;
 
     const needsNew = offers.some(
-      (o) =>
-        o.type === 'LOYALTY_FIRST_PURCHASE' ||
-        o.eligibility?.customerScope === 'NEW_ONLY',
+      (o) => o.eligibility?.customerScope === 'NEW_ONLY',
     );
     const isNew =
       needsNew && ctx.customerNumber
@@ -101,7 +89,13 @@ export class OffersEngineService {
     // Working state.
     const work = new Map<
       string,
-      { qty: number; unitPriceFils: number; taxPct: number; discountFils: number }
+      {
+        qty: number;
+        unitPriceFils: number;
+        taxPct: number;
+        discountFils: number;
+        offers: LineOfferRef[];
+      }
     >();
     for (const [itemNumber, qty] of cart) {
       const info = itemMap.get(itemNumber);
@@ -110,6 +104,7 @@ export class OffersEngineService {
         unitPriceFils: info?.priceFils ?? 0,
         taxPct: info?.taxPct ?? 0,
         discountFils: 0,
+        offers: [],
       });
     }
     const subtotalFils = [...work.values()].reduce(
@@ -119,51 +114,145 @@ export class OffersEngineService {
 
     const freeLines: FreeLine[] = [];
     const appliedOffers: AppliedOffer[] = [];
-    let invoiceDiscountFils = 0;
-    let locked = false;
+    const invoiceDiscountFils = 0; // no invoice-level offers in the current model
+
+    // ── Classify eligible, trigger-satisfied offers by category ────────────────
+    // Conflict rule: within a category (payment-method vs item) the HIGHEST
+    // discount wins per line; across categories the discounts ADD on the line.
+    const isCredit = (ctx.paymentMethod ?? null) === 'CREDIT';
+    interface Disc {
+      offer: Offer;
+      pct: number;
+      items: Set<string> | null; // null = applies to every line (payment-method)
+    }
+    const payOffers: Disc[] = [];
+    const itemOffers: Disc[] = [];
+    const gifts: { offer: Offer; reward: GiftReward; freeQty: number }[] = [];
 
     for (const offer of offers) {
-      if (locked) break;
       if (!this.isWithinSchedule(offer, at)) continue;
-      if (offer.type === 'LOYALTY_FIRST_PURCHASE' && (!customer || !isNew)) continue;
       if (!this.isEligible(offer.eligibility, customer, ctx, isNew)) continue;
       if (
         offer.totalRedemptionLimit != null &&
         offer.redemptionCount >= offer.totalRedemptionLimit
       )
         continue;
-      if (offer.perCustomerLimit != null) {
-        const used = perCustomerCounts.get(offer.id) ?? 0;
-        if (used >= offer.perCustomerLimit) continue;
-      }
+      if (
+        offer.perCustomerLimit != null &&
+        (perCustomerCounts.get(offer.id) ?? 0) >= offer.perCustomerLimit
+      )
+        continue;
 
-      const outcome = this.computeReward(offer, cart, itemMap, subtotalFils);
-      if (!outcome.triggerSatisfied) continue;
-
-      for (const [itemNumber, fils] of outcome.lineDiscounts) {
-        const line = work.get(itemNumber);
-        if (line) line.discountFils += fils;
+      if (offer.type === 'PAYMENT_METHOD_DISCOUNT') {
+        const t = offer.trigger as PaymentMethodTrigger;
+        const reward = offer.reward as LinePercentDiscountReward;
+        const payOk = t.paymentCondition === 'CREDIT' ? isCredit : !isCredit;
+        const totalOk = t.minOrderTotal == null || subtotalFils >= t.minOrderTotal;
+        const countOk = t.minItemCount == null || itemCount >= t.minItemCount;
+        if (payOk && totalOk && countOk && reward?.kind === 'LINE_PERCENT_DISCOUNT') {
+          // Base applies at minItemCount; steps accrue per itemsPerStep above it.
+          const pct = this.effectivePercent(reward, itemCount, t.minItemCount ?? 0);
+          if (pct > 0) payOffers.push({ offer, pct, items: null });
+        }
+      } else if (offer.type === 'ITEM_QTY_REWARD') {
+        const t = offer.trigger as ItemSetTrigger;
+        const items = t.itemNumbers ?? [];
+        const qty = items.reduce((s, n) => s + (cart.get(n) ?? 0), 0);
+        const reward = offer.reward;
+        if (reward?.kind === 'GIFT') {
+          const freeQty = this.giftFreeQty(reward, qty);
+          if (freeQty > 0) gifts.push({ offer, reward, freeQty });
+        } else if (reward?.kind === 'ITEM_PERCENT_DISCOUNT') {
+          if (qty >= reward.minQty) {
+            // Base applies at minQty; steps accrue per itemsPerStep above it.
+            const pct = this.effectivePercent(reward, qty, reward.minQty ?? 0);
+            if (pct > 0) itemOffers.push({ offer, pct, items: new Set(items) });
+          }
+        }
       }
-      invoiceDiscountFils += outcome.invoiceDiscountFils;
-      for (const free of outcome.freeItems) {
-        freeLines.push({
-          itemNumber: free.itemNumber,
-          qty: free.qty,
-          unitPriceFils: itemMap.get(free.itemNumber)?.priceFils ?? 0,
-          offerId: offer.id,
+    }
+
+    // Highest payment-method offer — its % is the same on every line, so a single
+    // global winner serves all lines.
+    const bestPay = payOffers.reduce<Disc | null>(
+      (b, c) => (!b || c.pct > b.pct ? c : b),
+      null,
+    );
+
+    // ── Per line: (best payment % + best item % for that line), clamped ────────
+    const contrib = new Map<string, number>(); // offerId → discount fils contributed
+    for (const [itemNumber, l] of work) {
+      const gross = roundFils(l.qty * l.unitPriceFils);
+      if (gross <= 0) continue;
+      let bestItem: Disc | null = null;
+      for (const c of itemOffers) {
+        if (c.items!.has(itemNumber) && (!bestItem || c.pct > bestItem.pct)) {
+          bestItem = c;
+        }
+      }
+      let payFils = bestPay ? roundFils((gross * bestPay.pct) / 100) : 0;
+      let itemFils = bestItem ? roundFils((gross * bestItem.pct) / 100) : 0;
+      if (payFils > gross) payFils = gross;
+      if (payFils + itemFils > gross) itemFils = gross - payFils; // never below 0
+      l.discountFils = payFils + itemFils;
+      if (bestPay && payFils > 0) {
+        contrib.set(bestPay.offer.id, (contrib.get(bestPay.offer.id) ?? 0) + payFils);
+        l.offers.push({
+          offerId: bestPay.offer.id,
+          name: bestPay.offer.name,
+          pct: bestPay.pct,
+          discountFils: payFils,
         });
       }
+      if (bestItem && itemFils > 0) {
+        contrib.set(bestItem.offer.id, (contrib.get(bestItem.offer.id) ?? 0) + itemFils);
+        l.offers.push({
+          offerId: bestItem.offer.id,
+          name: bestItem.offer.name,
+          pct: bestItem.pct,
+          discountFils: itemFils,
+        });
+      }
+    }
+
+    // ── Gifts → free lines (rep picks resolved from chosenFreeItems) ───────────
+    const giftValue = new Map<string, number>();
+    for (const g of gifts) {
+      const picks = (ctx.chosenFreeItems ?? [])
+        .filter((i) => g.reward.giftItems.includes(i))
+        .slice(0, g.freeQty);
+      for (const itemNumber of picks) {
+        const priceFils = itemMap.get(itemNumber)?.priceFils ?? 0;
+        freeLines.push({ itemNumber, qty: 1, unitPriceFils: priceFils, offerId: g.offer.id });
+        giftValue.set(g.offer.id, (giftValue.get(g.offer.id) ?? 0) + priceFils);
+      }
+    }
+
+    // ── Applied-offers summary (discount contributors + gift offers) ───────────
+    const appliedIds = new Set<string>([
+      ...contrib.keys(),
+      ...gifts.map((g) => g.offer.id),
+    ]);
+    for (const offer of offers) {
+      if (!appliedIds.has(offer.id)) continue;
+      const gift = gifts.find((g) => g.offer.id === offer.id);
+      const picked = gift
+        ? (ctx.chosenFreeItems ?? [])
+            .filter((i) => gift.reward.giftItems.includes(i))
+            .slice(0, gift.freeQty)
+            .map((itemNumber) => ({ itemNumber, qty: 1 }))
+        : [];
       appliedOffers.push({
         offerId: offer.id,
         name: offer.name,
         type: offer.type,
-        summary: this.summarize(offer, itemMap),
-        discountFils: outcome.discountFils,
-        freeItems: outcome.freeItems,
-        freeItemChoice: outcome.freeItemChoice,
+        summary: this.summarize(offer),
+        discountFils: (contrib.get(offer.id) ?? 0) + (giftValue.get(offer.id) ?? 0),
+        freeItems: picked,
+        freeItemChoice: gift
+          ? { choices: gift.reward.giftItems, qty: gift.freeQty }
+          : undefined,
       });
-
-      if (!offer.stackable) locked = true;
     }
 
     // Clamp per-line discount to the line gross, then build the response.
@@ -182,6 +271,7 @@ export class OffersEngineService {
         unitPriceFils: l.unitPriceFils,
         lineDiscountFils: discount,
         lineNetFils: net,
+        offers: l.offers,
       });
     }
 
@@ -190,7 +280,8 @@ export class OffersEngineService {
       invoiceDiscountFils,
       netBeforeInvoiceDiscount,
     );
-    const grandTotalFils = netBeforeInvoiceDiscount + taxFils - clampedInvoiceDiscount;
+    const grandTotalFils =
+      netBeforeInvoiceDiscount + taxFils - clampedInvoiceDiscount;
 
     return {
       lines: resultLines,
@@ -208,172 +299,38 @@ export class OffersEngineService {
     };
   }
 
+  /** Free-gift count: one per `itemsPerGift` bought, capped at `maxFreeQty`. */
+  private giftFreeQty(reward: GiftReward, qty: number): number {
+    if (!reward.itemsPerGift || reward.itemsPerGift < 1) return 0;
+    const n = Math.floor(qty / reward.itemsPerGift);
+    return reward.maxFreeQty != null ? Math.min(n, reward.maxFreeQty) : n;
+  }
+
   /**
-   * Compute the reward each of the named offers grants against a cart, WITHOUT
-   * eligibility/schedule gating (the sale already asserted these applied). Used
-   * by the redemption-recording hook. Offers whose trigger isn't satisfied are
-   * dropped.
+   * The effective percent for a percentage reward given a quantity. The base
+   * percent applies at the offer's threshold (`anchor` — minItemCount for a
+   * payment offer, minQty for an item offer); each full `itemsPerStep` ABOVE the
+   * anchor adds one multiplier step:
+   *   steps = floor(max(0, count − anchor) / itemsPerStep)
+   *   pct   = base × (1 + multiplier × steps)
+   * So at exactly the threshold you get the base rate (not base × 2). STATIC
+   * ignores the multiplier. Capped at maxPercent and never above 100.
    */
-  async computeForOffers(
-    offerIds: string[],
-    lines: CartLineInput[],
-  ): Promise<RecordedReward[]> {
-    if (!offerIds.length) return [];
-    const cart = this.toCartMap(lines);
-    const offers = await this.offersRepo.find({ where: { id: In(offerIds) } });
-    if (!offers.length) return [];
-    const itemMap = await this.loadItems(cart, offers);
-    const subtotalFils = [...cart].reduce(
-      (s, [n, q]) => s + roundFils(q * (itemMap.get(n)?.priceFils ?? 0)),
-      0,
-    );
-    const out: RecordedReward[] = [];
-    for (const offer of offers) {
-      const outcome = this.computeReward(offer, cart, itemMap, subtotalFils);
-      if (!outcome.triggerSatisfied) continue;
-      out.push({
-        offerId: offer.id,
-        discountFils: outcome.discountFils,
-        freeItems: outcome.freeItems,
-      });
-    }
-    return out;
-  }
-
-  // ---- reward computation (pure) ----
-
-  private computeReward(
-    offer: Offer,
-    cart: Map<string, number>,
-    itemMap: Map<string, ItemInfo>,
-    subtotalFils: number,
-  ): RewardOutcome {
-    const t = offer.trigger as Record<string, unknown>;
-    const reward = offer.reward;
-    const lineDiscounts = new Map<string, number>();
-    let invoiceDiscountFils = 0;
-    const freeItems: FreeItemSpec[] = [];
-    let freeItemChoice: { choices: string[]; qty: number } | undefined;
-    let triggerSatisfied = false;
-
-    const qtyOf = (n: string): number => cart.get(n) ?? 0;
-    const priceOf = (n: string): number => itemMap.get(n)?.priceFils ?? 0;
-
-    const grantInvoiceOrFree = (): void => {
-      if (reward.kind === 'DISCOUNT' && reward.appliesTo === 'INVOICE') {
-        invoiceDiscountFils += this.discountAmount(reward, subtotalFils);
-      } else if (reward.kind === 'FREE_ITEM') {
-        for (const it of reward.items ?? []) {
-          freeItems.push({ itemNumber: it.itemNumber, qty: it.qty });
-        }
-      } else if (reward.kind === 'FREE_ITEM_CHOICE') {
-        freeItemChoice = { choices: reward.choices ?? [], qty: reward.qty ?? 1 };
-      }
-    };
-
-    switch (offer.type) {
-      case 'ITEM_QTY_DISCOUNT': {
-        const item = String(t.itemNumber ?? '');
-        const minQty = Number(t.minQty ?? 0);
-        if (item && qtyOf(item) >= minQty) {
-          triggerSatisfied = true;
-          if (reward.kind === 'DISCOUNT') {
-            const gross = roundFils(qtyOf(item) * priceOf(item));
-            this.addLineDiscount(
-              lineDiscounts,
-              item,
-              this.discountAmount(reward, gross),
-            );
-          }
-        }
-        break;
-      }
-      case 'BUY_X_GET_Y_FREE': {
-        const item = String(t.itemNumber ?? '');
-        const buyQty = Number(t.qty ?? 0);
-        const times = buyQty > 0 ? Math.floor(qtyOf(item) / buyQty) : 0;
-        if (item && times >= 1 && reward.kind === 'FREE_ITEM') {
-          triggerSatisfied = true;
-          for (const it of reward.items ?? []) {
-            freeItems.push({ itemNumber: it.itemNumber, qty: it.qty * times });
-          }
-        }
-        break;
-      }
-      case 'BASKET_THRESHOLD': {
-        const set = (t.itemNumbers as string[]) ?? [];
-        const count = set.reduce((s, n) => s + qtyOf(n), 0);
-        if (count >= Number(t.minItemCount ?? 0)) {
-          triggerSatisfied = true;
-          grantInvoiceOrFree();
-        }
-        break;
-      }
-      case 'ITEM_SET_THRESHOLD': {
-        const set = (t.itemNumbers as string[]) ?? [];
-        const total = set.reduce((s, n) => s + qtyOf(n), 0);
-        const presentCount = set.filter((n) => qtyOf(n) > 0).length;
-        const minTotal = Number(t.minTotalQty ?? 0);
-        const ok =
-          t.match === 'ALL'
-            ? presentCount === set.length && total >= minTotal
-            : presentCount > 0 && total >= minTotal;
-        if (ok) {
-          triggerSatisfied = true;
-          if (reward.kind === 'DISCOUNT' && reward.appliesTo === 'SET') {
-            for (const n of set) {
-              const gross = roundFils(qtyOf(n) * priceOf(n));
-              if (gross > 0) {
-                this.addLineDiscount(
-                  lineDiscounts,
-                  n,
-                  this.discountAmount(reward, gross),
-                );
-              }
-            }
-          } else {
-            grantInvoiceOrFree();
-          }
-        }
-        break;
-      }
-      case 'LOYALTY_FIRST_PURCHASE': {
-        // Eligibility (new customer) is gated by the caller.
-        triggerSatisfied = true;
-        grantInvoiceOrFree();
-        break;
-      }
-    }
-
-    const lineDiscTotal = [...lineDiscounts.values()].reduce((s, n) => s + n, 0);
-    const freeValue = freeItems.reduce(
-      (s, f) => s + roundFils(f.qty * priceOf(f.itemNumber)),
-      0,
-    );
-    return {
-      triggerSatisfied,
-      lineDiscounts,
-      invoiceDiscountFils,
-      freeItems,
-      freeItemChoice,
-      discountFils: lineDiscTotal + invoiceDiscountFils + freeValue,
-    };
-  }
-
-  private discountAmount(reward: DiscountReward, baseFils: number): number {
-    if (reward.discountType === 'PERCENT') {
-      return roundFils((baseFils * (reward.value ?? 0)) / 100);
-    }
-    // VALUE is already in fils; never exceed the base it applies to.
-    return Math.min(roundFils(reward.value ?? 0), baseFils);
-  }
-
-  private addLineDiscount(
-    map: Map<string, number>,
-    itemNumber: string,
-    fils: number,
-  ): void {
-    map.set(itemNumber, (map.get(itemNumber) ?? 0) + fils);
+  private effectivePercent(
+    reward: Pick<
+      LinePercentDiscountReward,
+      'basePercent' | 'mode' | 'multiplier' | 'itemsPerStep' | 'maxPercent'
+    >,
+    count: number,
+    anchor = 0,
+  ): number {
+    const steps =
+      reward.mode === 'DYNAMIC' && reward.itemsPerStep
+        ? Math.floor(Math.max(0, count - anchor) / reward.itemsPerStep)
+        : 0;
+    const pct = reward.basePercent * (1 + (reward.multiplier ?? 0) * steps);
+    const cap = Math.min(reward.maxPercent ?? 100, 100);
+    return Math.max(0, Math.min(pct, cap));
   }
 
   // ---- gating ----
@@ -435,7 +392,7 @@ export class OffersEngineService {
     return true;
   }
 
-  /** True when the customer has no prior posted-or-draft SALE voucher. */
+  /** True when the customer has no prior SALE voucher. */
   async isNewCustomer(
     customerNumber: string,
     excludeVoucherNumber?: string,
@@ -465,9 +422,10 @@ export class OffersEngineService {
     offers: Offer[],
   ): Promise<Map<string, ItemInfo>> {
     const numbers = new Set<string>(cart.keys());
+    // Gift pools need prices too (the free line is the item at its real price).
     for (const o of offers) {
-      if (o.reward?.kind === 'FREE_ITEM') {
-        for (const it of o.reward.items ?? []) numbers.add(it.itemNumber);
+      if (o.reward?.kind === 'GIFT') {
+        for (const g of (o.reward as GiftReward).giftItems ?? []) numbers.add(g);
       }
     }
     if (!numbers.size) return new Map();
@@ -505,36 +463,37 @@ export class OffersEngineService {
     return counts;
   }
 
-  private summarize(offer: Offer, itemMap: Map<string, ItemInfo>): string {
-    const name = (n: string): string => itemMap.get(n)?.name ?? n;
-    const t = offer.trigger as Record<string, unknown>;
-    const r = offer.reward;
-    const discountText = (): string => {
-      if (r.kind !== 'DISCOUNT') return '';
-      return r.discountType === 'PERCENT'
-        ? `${r.value}% off`
-        : `${(r.value ?? 0) / 1000} JOD off`;
-    };
-    const freeText = (): string =>
-      r.kind === 'FREE_ITEM'
-        ? (r.items ?? []).map((i) => `${i.qty}× ${name(i.itemNumber)} free`).join(' + ')
-        : r.kind === 'FREE_ITEM_CHOICE'
-          ? `${r.qty}× free (choice of ${(r.choices ?? []).length})`
-          : '';
-
-    switch (offer.type) {
-      case 'ITEM_QTY_DISCOUNT':
-        return `Buy ${t.minQty}× ${name(String(t.itemNumber))} → ${discountText()}`;
-      case 'BUY_X_GET_Y_FREE':
-        return `Buy ${t.qty}× ${name(String(t.itemNumber))} → ${freeText()}`;
-      case 'BASKET_THRESHOLD':
-        return `${t.minItemCount}+ items from set → ${r.kind === 'DISCOUNT' ? discountText() + ' invoice' : freeText()}`;
-      case 'ITEM_SET_THRESHOLD':
-        return `${t.minTotalQty}+ qty across set (${t.match}) → ${r.kind === 'DISCOUNT' ? discountText() : freeText()}`;
-      case 'LOYALTY_FIRST_PURCHASE':
-        return `New customer first purchase → ${r.kind === 'DISCOUNT' ? discountText() + ' invoice' : freeText()}`;
-      default:
-        return offer.name;
+  private summarize(offer: Offer): string {
+    if (offer.type === 'ITEM_QTY_REWARD') {
+      const items = (offer.trigger as ItemSetTrigger).itemNumbers ?? [];
+      const r = offer.reward;
+      const on = items.join('/');
+      if (r?.kind === 'GIFT') {
+        const cap = r.maxFreeQty != null ? ` (max ${r.maxFreeQty})` : '';
+        return `Buy ${on}: 1 gift / ${r.itemsPerGift} bought${cap}, from ${r.giftItems.length} items`;
+      }
+      if (r?.kind === 'ITEM_PERCENT_DISCOUNT') {
+        const base =
+          r.mode === 'DYNAMIC'
+            ? `${r.basePercent}%→${r.maxPercent ?? r.basePercent}% dynamic`
+            : `${r.basePercent}%`;
+        return `Buy ${r.minQty}× ${on} → ${base} off those items`;
+      }
+      return offer.name;
     }
+    const t = offer.trigger as PaymentMethodTrigger;
+    const r = offer.reward as LinePercentDiscountReward;
+    const cond = t.paymentCondition === 'CREDIT' ? 'Credit' : 'Cash';
+    const mins: string[] = [];
+    if (t.minOrderTotal) mins.push(`≥ ${(t.minOrderTotal / 1000).toFixed(3)} JOD`);
+    if (t.minItemCount) mins.push(`≥ ${t.minItemCount} items`);
+    const suffix = mins.length ? ` (${mins.join(', ')})` : '';
+    if (r?.mode === 'DYNAMIC') {
+      const cap = r.maxPercent != null ? ` up to ${r.maxPercent}%` : '';
+      return `${cond} · ${r.basePercent}% per line, ×${r.multiplier ?? 0} per ${
+        r.itemsPerStep ?? '?'
+      } items${cap}${suffix}`;
+    }
+    return `${cond} · ${r?.basePercent ?? 0}% off each line${suffix}`;
   }
 }

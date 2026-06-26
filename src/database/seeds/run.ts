@@ -318,64 +318,69 @@ async function seed(): Promise<void> {
       }
     }
 
-    // ── demo offers (one per type, for QA) ───────────────────────────────
-    // Money is fils. PERCENT discounts are 0–100. Legality per type is enforced
-    // by OffersService.validateConfig (mirrored here). Upserted by name.
+    // ── demo offers (payment-method, percentage per line) ─────────────────
+    // Money is fils. basePercent/maxPercent are 0–100. Legality is enforced by
+    // OffersService.validateConfig (mirrored here). Upserted by name.
     const offerRepo = m.getRepository(Offer);
     const offerDefs: Array<Partial<Offer>> = [
       {
-        name: 'شاي مثلج 10× — خصم 10%',
-        description: 'اشترِ 10 شاي مثلج واحصل على خصم 10% على الصنف',
-        type: 'ITEM_QTY_DISCOUNT',
-        trigger: { itemNumber: 'ICETEA-330', minQty: 10 },
-        reward: { kind: 'DISCOUNT', discountType: 'PERCENT', value: 10, appliesTo: 'TRIGGER_ITEM' },
+        name: 'دفع نقدي — خصم 5%',
+        description: 'خصم 5% على كل صنف عند الدفع نقداً لفواتير 10 دنانير فأكثر',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH', minOrderTotal: 10000 },
+        reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 5, mode: 'STATIC' },
         eligibility: { customerScope: 'ALL' },
         priority: 10,
         stackable: false,
         isActive: true,
       },
       {
-        name: 'كولا 6 + مياه هدية',
-        description: 'اشترِ 6 كوكا كولا واحصل على مياه 330 هدية',
-        type: 'BUY_X_GET_Y_FREE',
-        trigger: { itemNumber: 'COLA-330', qty: 6 },
-        reward: { kind: 'FREE_ITEM', items: [{ itemNumber: 'WATER-330', qty: 1 }] },
+        name: 'دفع آجل — خصم متصاعد',
+        description: 'خصم 10% يتصاعد مع الكمية عند الدفع الآجل (×0.5 لكل 6 أصناف، حتى 25%)',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CREDIT', minItemCount: 6 },
+        reward: {
+          kind: 'LINE_PERCENT_DISCOUNT',
+          basePercent: 10,
+          mode: 'DYNAMIC',
+          multiplier: 0.5,
+          itemsPerStep: 6,
+          maxPercent: 25,
+        },
         eligibility: { customerScope: 'ALL' },
         priority: 9,
         stackable: false,
         isActive: true,
       },
       {
-        name: 'سلة الغازية — هدية بالاختيار',
-        description: '12 صنفاً من الغازية = هدية تختارها (مياه أو مانجو)',
-        type: 'BASKET_THRESHOLD',
-        trigger: { itemNumbers: ['COLA-330', 'PEPSI-330', 'SPRITE-330'], minItemCount: 12 },
-        reward: { kind: 'FREE_ITEM_CHOICE', choices: ['WATER-330', 'MANGO-250'], qty: 1 },
+        name: 'اشترِ كولا — هدية بالاختيار',
+        description: 'هدية واحدة لكل 10 كولا (تختار من مياه/مانجو)',
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['COLA-330'] },
+        reward: {
+          kind: 'GIFT',
+          giftItems: ['WATER-330', 'MANGO-250'],
+          itemsPerGift: 10,
+        },
         eligibility: { customerScope: 'ALL' },
         priority: 8,
         stackable: false,
         isActive: true,
       },
       {
-        name: 'عرض المياه — خصم 8%',
-        description: '20 عبوة مياه أو أكثر = خصم 8% على المياه',
-        type: 'ITEM_SET_THRESHOLD',
-        trigger: { itemNumbers: ['WATER-330', 'WATER-600', 'WATER-1.5L'], minTotalQty: 20, match: 'ANY' },
-        reward: { kind: 'DISCOUNT', discountType: 'PERCENT', value: 8, appliesTo: 'SET' },
+        name: 'خصم كمية بيبسي — 10%',
+        description: 'اشترِ 12 بيبسي أو أكثر = خصم 10% على البيبسي',
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['PEPSI-330'] },
+        reward: {
+          kind: 'ITEM_PERCENT_DISCOUNT',
+          minQty: 12,
+          basePercent: 10,
+          mode: 'STATIC',
+        },
         eligibility: { customerScope: 'ALL' },
         priority: 7,
         stackable: false,
-        isActive: true,
-      },
-      {
-        name: 'ترحيب عميل جديد — خصم 5%',
-        description: 'خصم 5% على أول فاتورة لعميل جديد',
-        type: 'LOYALTY_FIRST_PURCHASE',
-        trigger: {},
-        reward: { kind: 'DISCOUNT', discountType: 'PERCENT', value: 5, appliesTo: 'INVOICE' },
-        eligibility: { customerScope: 'NEW_ONLY' },
-        priority: 6,
-        stackable: true,
         isActive: true,
       },
     ];
