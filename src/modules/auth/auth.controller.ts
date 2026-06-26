@@ -39,6 +39,8 @@ export class AuthController {
   })
   @ApiOkResponse({ description: 'The authenticated user' })
   me(@CurrentUser() user: AuthenticatedUser) {
-    return user;
+    // Re-read fresh permissions from the DB (the JWT claims are from login time),
+    // so the app picks up dashboard permission changes on its next refresh.
+    return this.authService.profile(user as unknown as { sub: string });
   }
 }

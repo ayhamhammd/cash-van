@@ -76,6 +76,9 @@ export class CustomersService {
       code: saved.customerNumber,
       name: saved.customerName,
       phone: saved.phone ?? null,
+      email: saved.email ?? null,
+      taxNumber: saved.tin ?? null,
+      creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
     });
     return saved;
   }
@@ -94,7 +97,17 @@ export class CustomersService {
     if (dto.phone !== undefined) {
       customer.phoneHash = hashPhone(dto.phone);
     }
-    return this.customers.save(customer);
+    const saved = await this.customers.save(customer);
+    // Mirror the update to the ERP (ErpSyncService listener; no-op when ERP off).
+    this.events.emit('erp.customer.updated', {
+      code: saved.customerNumber,
+      name: saved.customerName,
+      phone: saved.phone ?? null,
+      email: saved.email ?? null,
+      taxNumber: saved.tin ?? null,
+      creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
+    });
+    return saved;
   }
 
   async findOneOrThrow(id: string): Promise<Customer> {

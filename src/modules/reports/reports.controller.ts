@@ -1,5 +1,11 @@
-import { Controller, Get, Query } from '@nestjs/common';
-import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiCreatedResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 
 import { ReportsService } from './reports.service';
 import {
@@ -7,9 +13,18 @@ import {
   ReportsRangeQueryDto,
   TripsQueryDto,
 } from './dto/reports-query.dto';
+import {
+  EndOfDayQueryDto,
+  SettleEndOfDayDto,
+  SettlementsQueryDto,
+} from './dto/end-of-day.dto';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('reports')
 @ApiBearerAuth()
+@UseGuards(RolesGuard)
 @Controller({ path: 'reports', version: '1' })
 export class ReportsController {
   constructor(private readonly reports: ReportsService) {}
@@ -97,5 +112,39 @@ export class ReportsController {
   @ApiOkResponse({ description: 'Paginated visits' })
   visits(@Query() q: ReportsQueryDto) {
     return this.reports.visits(q.offset ?? 0, q.limit ?? 25);
+  }
+
+  // ── End-of-Day cash reconciliation (admin/manager) ──────────────────────────
+
+  @Get('end-of-day')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: 'End-of-Day report',
+    description:
+      "Per-salesman cash/cheque collections, cash/credit sales, cash returns, discount, expected cash, and the salesman's carried balance, over a date range.",
+  })
+  @ApiOkResponse({ description: '{ from, to, rows, totals } — money in fils' })
+  endOfDay(@Query() q: EndOfDayQueryDto) {
+    return this.reports.endOfDay(q.from, q.to, q.repId);
+  }
+
+  @Post('end-of-day/settle')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: 'Settle a salesman End-of-Day',
+    description:
+      'Records the cash received from a salesman for a period; carries the difference (expected − received) onto their running balance. Recomputes the period server-side.',
+  })
+  @ApiCreatedResponse({ description: 'The created settlement (with newBalanceFils)' })
+  settle(@Body() dto: SettleEndOfDayDto, @CurrentUser('sub') userId: string) {
+    return this.reports.settle(dto, userId);
+  }
+
+  @Get('end-of-day/settlements')
+  @Roles('admin', 'manager')
+  @ApiOperation({ summary: 'Settlement history', description: 'Past End-of-Day settlements (newest first).' })
+  @ApiOkResponse({ description: 'SalesmanSettlement[]' })
+  settlements(@Query() q: SettlementsQueryDto) {
+    return this.reports.listSettlements(q);
   }
 }

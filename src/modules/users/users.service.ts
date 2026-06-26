@@ -105,4 +105,9 @@ export class UsersService {
     });
     return { items, total, page, limit, pages: Math.ceil(total / limit) };
   }
+
+  /** Every active user (flat, unpaginated) — for the app's permissions screen. */
+  async listAll(): Promise<User[]> {
+    return this.usersRepo.find({ order: { name: 'ASC' } });
+  }
 }

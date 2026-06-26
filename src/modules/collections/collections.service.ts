@@ -6,7 +6,14 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Between, In, LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
+import {
+  Between,
+  type EntityManager,
+  In,
+  LessThanOrEqual,
+  MoreThanOrEqual,
+  Repository,
+} from 'typeorm';
 
 import { Collection } from './entities/collection.entity';
 import { Cheque } from './entities/cheque.entity';
@@ -71,8 +78,27 @@ export class CollectionsService {
     return c;
   }
 
+  /**
+   * Atomic per-warehouse payment (C) counter → "C-<store>-<6 digits>".
+   * Reuses voucher_counters with trans_kind='PAYMENT'; the next number always
+   * continues from the last saved one (counter increments).
+   */
+  private async nextCollectionNumber(em: EntityManager, store: string): Promise<string> {
+    const rows: Array<{ last_number: string }> = await em.query(
+      `INSERT INTO voucher_counters (store_number, trans_kind, last_number)
+       VALUES ($1, 'PAYMENT', 1)
+       ON CONFLICT (store_number, trans_kind)
+       DO UPDATE SET last_number = voucher_counters.last_number + 1
+       RETURNING last_number`,
+      [store],
+    );
+    const seq = Number(rows[0]?.last_number ?? 1);
+    return `C-${store}-${String(seq).padStart(6, '0')}`;
+  }
+
   async create(dto: CreateCollectionDto): Promise<Collection> {
-    if (!(await this.reps.exist({ where: { id: dto.repId } }))) {
+    const rep = await this.reps.findOne({ where: { id: dto.repId } });
+    if (!rep) {
       throw new BadRequestException(`Rep ${dto.repId} not found`);
     }
     if (!(await this.customers.exist({ where: { id: dto.customerId } }))) {
@@ -82,15 +108,27 @@ export class CollectionsService {
       throw new BadRequestException('cheque details are required when method=cheque');
     }
 
-    return this.collections.manager.transaction(async (em) => {
+    // Collections are confirmed on creation (both cash-van app and dashboard),
+    // so a recorded payment immediately counts and queues to the ERP. The only
+    // exception is a cheque whose amount-in-words doesn't match — that must be
+    // reconciled first, so it stays 'pending' for the reconcile queue.
+    const isMismatchCheque =
+      dto.method === 'cheque' && dto.cheque?.wordsMatch === false;
+    const initialStatus = isMismatchCheque ? 'pending' : 'confirmed';
+
+    const created = await this.collections.manager.transaction(async (em) => {
+      // Per-warehouse payment (C) number, keyed off the rep's van store.
+      const collectionNumber = await this.nextCollectionNumber(em, rep.code ?? dto.repId);
       const collection = await em.getRepository(Collection).save(
         em.getRepository(Collection).create({
           repId: dto.repId,
           customerId: dto.customerId,
+          collectionNumber,
           invoiceId: dto.invoiceId ?? null,
           amount: dto.amount,
           method: dto.method,
-          status: 'pending',
+          status: initialStatus,
+          confirmedAt: initialStatus === 'confirmed' ? new Date() : null,
           collectedAt: dto.collectedAt ? new Date(dto.collectedAt) : new Date(),
           note: dto.note ?? null,
         }),
@@ -121,6 +159,12 @@ export class CollectionsService {
         relations: { cheque: true },
       });
     });
+
+    // Mirror the confirmed receipt to the ERP (best-effort; no-op when ERP off).
+    if (created.status === 'confirmed') {
+      this.events.emit('erp.collection.confirmed', { collectionId: created.id });
+    }
+    return created;
   }
 
   async confirm(id: string): Promise<Collection> {

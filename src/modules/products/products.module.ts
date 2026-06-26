@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { ItemUnit } from '../units/entities/item-unit.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { CustomerAiProfile } from '../customers/entities/customer-ai-profile.entity';
 
@@ -24,6 +25,7 @@ import { PriceRulesController } from './price-rules.controller';
   imports: [
     TypeOrmModule.forFeature([
       ItemCart,
+      ItemUnit,
       ProductCategory,
       VanStock,
       PriceRule,

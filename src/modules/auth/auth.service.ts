@@ -90,6 +90,25 @@ export class AuthService {
     };
   }
 
+  /**
+   * Fresh profile for `GET /auth/me` — re-reads the user from the DB so permission
+   * changes an admin makes on the dashboard take effect on the app's next refresh
+   * (the JWT payload is stale from login time). Falls back to the token's claims.
+   */
+  async profile(
+    current: { sub: string } & Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const user = await this.usersService.findOneOrThrow(current.sub).catch(() => null);
+    if (!user) return current;
+    return {
+      ...current,
+      role: user.role ?? 'viewer',
+      userType: user.userType,
+      permissions: this.extractPermissions(user),
+      permKeys: user.permissions ?? [],
+    };
+  }
+
   private extractPermissions(user: User): Record<string, boolean> {
     return {
       canMakeVoucher: user.canMakeVoucher,

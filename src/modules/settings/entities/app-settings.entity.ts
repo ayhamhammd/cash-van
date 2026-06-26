@@ -85,6 +85,14 @@ export class AppSettings {
   @Column({ name: 'erp_last_sync_at', type: 'timestamptz', nullable: true })
   erpLastSyncAt?: Date | null;
 
+  /**
+   * When ON (default), posted vouchers + confirmed collections push to the ERP
+   * automatically. When OFF, nothing auto-pushes — they wait in the "ERP Export"
+   * page to be exported manually.
+   */
+  @Column({ name: 'erp_direct_export', type: 'boolean', default: true })
+  erpDirectExport!: boolean;
+
   /** The cash-van store that the ERP's van warehouse maps to (for stock sync). */
   @Column({ name: 'erp_van_store', type: 'text', nullable: true })
   erpVanStore?: string | null;

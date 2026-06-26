@@ -49,4 +49,12 @@ export class UpdateErpDto {
   @IsString()
   @MaxLength(64)
   defaultTaxRateId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Auto-push posted vouchers + confirmed collections to the ERP. When false, they wait for manual export.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  directExport?: boolean;
 }

@@ -176,6 +176,21 @@ export class ApprovalsService {
     return row;
   }
 
+  /** The requester cancels their own still-pending request (e.g. left the screen). */
+  async cancel(id: string, requesterUserId: string): Promise<ApprovalRequest> {
+    const row = await this.findOneOrThrow(id);
+    if (row.requesterUser !== requesterUserId) {
+      throw new ConflictException('You can only cancel your own request');
+    }
+    if (row.status !== 'pending') {
+      throw new ConflictException(`Request is already ${row.status}`);
+    }
+    row.status = 'cancelled';
+    row.decidedAt = new Date();
+    await this.repo.save(row);
+    return row;
+  }
+
   private async notifyDecision(row: ApprovalRequest): Promise<void> {
     const label = TYPE_LABEL[row.type];
     const approved = row.status === 'approved';

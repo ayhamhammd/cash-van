@@ -28,10 +28,11 @@ import {
 } from './dto/category.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 
 @ApiTags('product-categories')
 @ApiBearerAuth()
-@UseGuards(RolesGuard)
+@UseGuards(RolesGuard, ErpReadOnlyGuard)
 @Controller({ path: 'product-categories', version: '1' })
 export class CategoriesController {
   constructor(private readonly categories: CategoriesService) {}

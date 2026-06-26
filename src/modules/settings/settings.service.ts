@@ -37,6 +37,7 @@ export interface AppSettingsView {
     isConfigured: boolean;
     lastSyncAt: Date | null;
     vanStore: string | null;
+    directExport: boolean;
   };
   updatedAt: Date;
   updatedBy: string | null;
@@ -118,6 +119,10 @@ export class SettingsService {
     this.events.emit('erp.settings.updated', {
       name: row.companyNameEn || row.companyNameAr,
       salesTaxMode: row.taxCalcMethod,
+      logoUrl: row.logoUrl ?? null,
+      address: row.sellerAddress ?? null,
+      phone: row.sellerPhone ?? null,
+      taxNumber: row.sellerTin ?? null,
     });
     return this.toView(row);
   }
@@ -127,16 +132,27 @@ export class SettingsService {
    * (no 'erp.settings.updated' event) so an inbound pull never echoes back out.
    * The Arabic name is only set when currently empty (don't clobber a curated one).
    */
-  async applyErpOrg(name: string | null, salesTaxMode: string | null): Promise<void> {
+  async applyErpOrg(org: {
+    name?: string | null;
+    salesTaxMode?: string | null;
+    logoUrl?: string | null;
+    address?: string | null;
+    phone?: string | null;
+    taxNumber?: string | null;
+  }): Promise<void> {
     const row = await this.requireRow();
     let changed = false;
-    if (name) {
-      if (row.companyNameEn !== name) { row.companyNameEn = name; changed = true; }
-      if (!row.companyNameAr) { row.companyNameAr = name; changed = true; }
+    if (org.name) {
+      if (row.companyNameEn !== org.name) { row.companyNameEn = org.name; changed = true; }
+      if (!row.companyNameAr) { row.companyNameAr = org.name; changed = true; }
     }
-    if (salesTaxMode === 'EXCLUSIVE' || salesTaxMode === 'INCLUSIVE') {
-      if (row.taxCalcMethod !== salesTaxMode) { row.taxCalcMethod = salesTaxMode; changed = true; }
+    if (org.salesTaxMode === 'EXCLUSIVE' || org.salesTaxMode === 'INCLUSIVE') {
+      if (row.taxCalcMethod !== org.salesTaxMode) { row.taxCalcMethod = org.salesTaxMode; changed = true; }
     }
+    if (org.logoUrl && row.logoUrl !== org.logoUrl) { row.logoUrl = org.logoUrl; changed = true; }
+    if (org.address != null && row.sellerAddress !== org.address) { row.sellerAddress = org.address; changed = true; }
+    if (org.phone != null && row.sellerPhone !== org.phone) { row.sellerPhone = org.phone; changed = true; }
+    if (org.taxNumber != null && row.sellerTin !== org.taxNumber) { row.sellerTin = org.taxNumber; changed = true; }
     if (changed) await this.repo.save(row);
   }
 
@@ -167,6 +183,38 @@ export class SettingsService {
       secretLast4: row.jofotaraSecretLast4,
       sandbox: row.jofotaraSandbox,
       updatedAt: row.updatedAt,
+    };
+  }
+
+  /**
+   * Lightweight company profile for the app (any authenticated user) — no secrets,
+   * no ERP/JoFotara/AI internals. Includes taxCalcMethod so the app's offline
+   * money engine uses the SAME inclusive/exclusive mode as the dashboard.
+   */
+  async getCompanyInfo(): Promise<{
+    companyNameAr: string;
+    companyNameEn: string | null;
+    sellerTin: string | null;
+    sellerAddress: string | null;
+    sellerPhone: string | null;
+    sellerCityCode: string | null;
+    logoUrl: string | null;
+    taxCalcMethod: TaxCalcMethod;
+    timezone: string;
+    locale: string;
+  }> {
+    const row = await this.requireRow();
+    return {
+      companyNameAr: row.companyNameAr,
+      companyNameEn: row.companyNameEn ?? null,
+      sellerTin: row.sellerTin ?? null,
+      sellerAddress: row.sellerAddress ?? null,
+      sellerPhone: row.sellerPhone ?? null,
+      sellerCityCode: row.sellerCityCode ?? null,
+      logoUrl: row.logoUrl ?? null,
+      taxCalcMethod: row.taxCalcMethod,
+      timezone: row.timezone,
+      locale: row.locale,
     };
   }
 
@@ -204,6 +252,7 @@ export class SettingsService {
         isConfigured: !!row.erpBaseUrl && !!row.erpApiKeyLast4,
         lastSyncAt: row.erpLastSyncAt ?? null,
         vanStore: row.erpVanStore ?? null,
+        directExport: row.erpDirectExport ?? true,
       },
       updatedAt: row.updatedAt,
       updatedBy: row.updatedBy ?? null,
@@ -232,8 +281,15 @@ export class SettingsService {
       row.erpDefaultCategoryId = dto.defaultCategoryId.trim() || null;
     if (dto.defaultTaxRateId !== undefined)
       row.erpDefaultTaxRateId = dto.defaultTaxRateId.trim() || null;
+    if (dto.directExport !== undefined) row.erpDirectExport = dto.directExport;
     row.updatedBy = this.userCtx.getUserId();
     await this.repo.save(row);
+    // On (re)connect, immediately pull company info from the ERP organization —
+    // don't wait for the 60s sync cycle. ErpSyncService listens. (erpApiKeyEncrypted
+    // is select:false so it's absent here; erpApiKeyLast4 signals a key is set.)
+    if (row.erpSyncEnabled && row.erpBaseUrl && (dto.apiKey || row.erpApiKeyLast4)) {
+      this.events.emit('erp.connected');
+    }
     return {
       enabled: row.erpSyncEnabled,
       baseUrl: row.erpBaseUrl ?? null,
@@ -241,6 +297,7 @@ export class SettingsService {
       isConfigured: !!row.erpBaseUrl && !!row.erpApiKeyLast4,
       lastSyncAt: row.erpLastSyncAt ?? null,
       vanStore: row.erpVanStore ?? null,
+      directExport: row.erpDirectExport ?? true,
     };
   }
 
@@ -252,6 +309,7 @@ export class SettingsService {
     vanStore: string | null;
     defaultCategoryId: string | null;
     defaultTaxRateId: string | null;
+    directExport: boolean;
   }> {
     const row = await this.repo
       .createQueryBuilder('s')
@@ -266,6 +324,7 @@ export class SettingsService {
       vanStore: row.erpVanStore ?? null,
       defaultCategoryId: row.erpDefaultCategoryId ?? null,
       defaultTaxRateId: row.erpDefaultTaxRateId ?? null,
+      directExport: row.erpDirectExport ?? true,
     };
   }
 

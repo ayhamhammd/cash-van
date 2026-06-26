@@ -27,6 +27,7 @@ import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 
 @ApiTags('settings')
 @ApiBearerAuth()
@@ -48,6 +49,7 @@ export class SettingsController {
   }
 
   @Patch()
+  @UseGuards(ErpReadOnlyGuard)
   @ApiOperation({
     summary: 'Update app settings',
     description:
@@ -59,6 +61,7 @@ export class SettingsController {
   }
 
   @Post('logo')
+  @UseGuards(ErpReadOnlyGuard)
   @UseInterceptors(
     FileInterceptor('file', { limits: { fileSize: 2 * 1024 * 1024 } }),
   )

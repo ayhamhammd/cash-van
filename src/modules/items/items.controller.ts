@@ -10,6 +10,7 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -32,9 +33,11 @@ import { CreateExpiryItemDto } from './dto/create-expiry-item.dto';
 
 import { PaginationDto } from '../../common/dto/pagination.dto';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
+import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 
 @ApiTags('items')
 @ApiBearerAuth()
+@UseGuards(ErpReadOnlyGuard)
 @Controller({ path: 'items', version: '1' })
 export class ItemsController {
   constructor(

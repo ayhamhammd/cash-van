@@ -80,7 +80,7 @@ export class VoucherTransaction extends BaseEntity {
   @Column({ name: 'discount_percentage', type: 'numeric', precision: 5, scale: 2, default: 0 })
   discountPercentage!: string;
 
-  @Column({ name: 'discount_value', type: 'numeric', precision: 14, scale: 2, default: 0 })
+  @Column({ name: 'discount_value', type: 'numeric', precision: 14, scale: 3, default: 0 })
   discountValue!: string;
 
   @Column({ name: 'real_date', type: 'timestamptz', default: () => 'now()' })
@@ -115,9 +115,9 @@ export class VoucherTransaction extends BaseEntity {
   @Column({ name: 'signed_qty', type: 'numeric', precision: 14, scale: 3, default: 0 })
   signedQty!: string;
 
-  @Column({ type: 'numeric', precision: 14, scale: 2, default: 0 })
+  @Column({ type: 'numeric', precision: 14, scale: 3, default: 0 })
   total!: string;
 
-  @Column({ name: 'net_total', type: 'numeric', precision: 14, scale: 2, default: 0 })
+  @Column({ name: 'net_total', type: 'numeric', precision: 14, scale: 3, default: 0 })
   netTotal!: string;
 }

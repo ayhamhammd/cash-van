@@ -51,6 +51,14 @@ export class ItemCart extends BaseEntity {
   @Column({ type: 'integer', nullable: true })
   cost?: number | null;
 
+  /** ERP category id (chosen on the form) used when mirroring this item to the ERP. */
+  @Column({ name: 'erp_category_id', type: 'text', nullable: true })
+  erpCategoryId?: string | null;
+
+  /** ERP tax-rate id used when mirroring this item to the ERP. */
+  @Column({ name: 'erp_tax_rate_id', type: 'text', nullable: true })
+  erpTaxRateId?: string | null;
+
   @Column({ name: 'image_url', type: 'text', nullable: true })
   imageUrl?: string | null;
 

@@ -6,6 +6,7 @@ import {
   IsString,
   IsUrl,
   Length,
+  MaxLength,
   Min,
 } from 'class-validator';
 
@@ -46,4 +47,13 @@ export class CreateItemDto {
   @IsOptional()
   @IsUrl()
   photoUrl?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Product image URL (absolute, or a relative ERP upload path). Shown in the app + dashboard.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  imageUrl?: string;
 }

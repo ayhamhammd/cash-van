@@ -13,6 +13,7 @@ import compression from 'compression';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import {
   ApiErrorResponseDto,
   ApiSuccessEnvelopeDto,
@@ -78,7 +79,7 @@ async function bootstrap(): Promise<void> {
     }),
   );
   app.useGlobalFilters(new HttpExceptionFilter());
-  app.useGlobalInterceptors(new TransformInterceptor());
+  app.useGlobalInterceptors(new LoggingInterceptor(), new TransformInterceptor());
 
   // Swagger is on outside production, or in production when explicitly opted
   // in via SWAGGER_ENABLED=true (so docs can be exposed without weakening

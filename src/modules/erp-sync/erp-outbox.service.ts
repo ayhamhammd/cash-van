@@ -93,8 +93,8 @@ export class ErpOutboxService {
       if (!calls || calls.length === 0) {
         return this.fail(row, 'payload could not be built (source missing)');
       }
-      // A document may need >1 ERP call (a TRANSFER = OUT + IN adjustments). Each
-      // call carries its own externalId, so a retry replays them idempotently.
+      // A document may map to >1 ERP call; each carries its own externalId, so a
+      // retry replays them idempotently. (Most kinds are a single call.)
       let lastData: unknown = null;
       for (const c of calls) {
         const res = await this.erp.post(c.path, c.body, c.idem ?? row.ref);
@@ -117,6 +117,9 @@ export class ErpOutboxService {
   private async buildCalls(
     row: ErpOutbox,
   ): Promise<Array<{ path: string; body: Record<string, unknown>; idem?: string }> | null> {
+    // A TRANSFER becomes TWO immediate stock-adjustments (OUT source + IN dest)
+    // so ERP stock moves RIGHT AWAY — the ERP `stock-transfers` document instead
+    // sits PENDING_DISPATCH and doesn't touch stock until dispatch+receive.
     if (row.kind === 'STOCK_TRANSFER') return this.buildTransferCalls(row.ref);
     const one = await this.buildPayload(row);
     return one ? [one] : null;
@@ -144,8 +147,9 @@ export class ErpOutboxService {
     if (row.kind === 'SALES_RETURN') return this.buildReturn(row.ref);
     if (row.kind === 'SALES_ORDER') return this.buildOrder(row.ref);
     if (row.kind === 'STOCK_ADJUSTMENT') return this.buildAdjustment(row.ref);
+    // STOCK_TRANSFER is handled as two calls in buildCalls (buildTransferCalls).
     if (row.kind === 'PAYMENT') return this.buildPayment(row.ref);
-    return null; // STOCK_TRANSFER handled by buildCalls
+    return null;
   }
 
   /**
@@ -160,11 +164,16 @@ export class ErpOutboxService {
     if (!col) return null;
     const customer = await this.customers.findOne({ where: { id: col.customerId } });
     if (!customer?.customerNumber) return null; // can't receipt without a customer code
+    // Resolve to the ERP identity: ERP-origin customers carry a derived
+    // `ERP-…` number the ERP can't match by code, so prefer the mapped ERP uuid
+    // (customerId). Falls back to customerCode for van-native customers.
+    const ref = await this.customerRef(customer.customerNumber);
+    if (!('customerId' in ref) && !('customerCode' in ref)) return null;
     return {
       path: 'receipts',
       body: {
         externalId: collectionId,
-        customerCode: customer.customerNumber,
+        ...ref,
         amount: col.amount / 1000, // fils → JOD major (ERP expects decimal)
         paymentMethod: col.method === 'cheque' ? 'CHECK' : 'CASH',
         notes: col.note ?? undefined,
@@ -205,26 +214,77 @@ export class ErpOutboxService {
     return { path: 'sales-orders', body: { customerId: cust.erpId, lines: orderLines } };
   }
 
+  /**
+   * Resolve a cash-van customer to the identity the ERP can look up: prefer the
+   * ERP customer UUID (`customerId`, via the id-map) — required for ERP-origin
+   * customers that have NO `code` (their cash-van number is the derived `ERP-…`,
+   * which the ERP can't match → CUSTOMER_NOT_FOUND). Fall back to `customerCode`
+   * for customers whose code IS their cash-van number.
+   */
+  private async customerRef(
+    customerNumber: string | null | undefined,
+  ): Promise<{ customerId: string } | { customerCode: string } | Record<string, never>> {
+    if (!customerNumber) return {};
+    const map = await this.idmap.findOne({
+      where: { entity: 'customer', localId: customerNumber },
+    });
+    if (map?.erpId) return { customerId: map.erpId };
+    return { customerCode: customerNumber };
+  }
+
+  /**
+   * Resolve an item's tax rate% to the org's ERP `taxRateId`, so the ERP applies
+   * the SAME tax the dashboard computed (without it the ERP silently taxes at 0%).
+   * The ERP tax-rate list is cached for the process lifetime (rates rarely change;
+   * a restart refreshes it).
+   */
+  private taxRateMap: Map<number, string> | null = null;
+  private async taxRateIdForPct(pct: number): Promise<string | undefined> {
+    if (!this.taxRateMap) {
+      try {
+        const { data } = await this.erp.list<{ id: string; percentage: number }>(
+          'tax-rates',
+          { pageSize: 100 },
+        );
+        this.taxRateMap = new Map(
+          data.map((t) => [Math.round(Number(t.percentage) || 0), t.id]),
+        );
+      } catch {
+        return undefined;
+      }
+    }
+    return this.taxRateMap.get(Math.round(pct || 0));
+  }
+
   private async buildSale(
     voucherNumber: string,
   ): Promise<{ path: string; body: Record<string, unknown> } | null> {
     const header = await this.headers.findOne({ where: { voucherNumber } });
     if (!header) return null;
     const lines = await this.lines.find({ where: { voucherNumber } });
+    const items = await Promise.all(
+      lines.map(async (l) => {
+        // quantity is in BASE pieces (item_qty), so send the per-PIECE price.
+        // For base-unit lines (unit_base_qty = 1) this equals unit_price exactly.
+        const baseQty = l.unitBaseQty && l.unitBaseQty > 0 ? l.unitBaseQty : 1;
+        return {
+          skuCode: l.itemNumber, // cash-van item_number == ERP sku (set on inbound sync)
+          quantity: Number(l.itemQty) || 0,
+          unitPrice: (Number(l.unitPrice) || 0) / baseQty, // JOD major, per base piece
+          discount: Number(l.discountValue) || 0, // resolved line discount (incl header share)
+          taxRateId: await this.taxRateIdForPct(Number(l.taxPercentage) || 0),
+        };
+      }),
+    );
     return {
       path: 'sales-invoices',
       body: {
         externalId: voucherNumber,
         deviceId: header.userCode,
-        customerCode: header.customerNumber ?? undefined,
+        ...(await this.customerRef(header.customerNumber)),
         warehouseCode: this.vanStoreOf(lines, header.userCode), // attribute to the van
         invoiceDate: header.inDate,
-        items: lines.map((l) => ({
-          skuCode: l.itemNumber, // cash-van item_number == ERP sku (set on inbound sync)
-          quantity: Number(l.itemQty) || 0,
-          unitPrice: Number(l.unitPrice) || 0, // JOD major decimal — ERP expects decimal
-          discount: Number(l.discountValue) || 0,
-        })),
+        items,
       },
     };
   }
@@ -246,7 +306,7 @@ export class ErpOutboxService {
       body: {
         externalId: voucherNumber,
         deviceId: header.userCode,
-        customerCode: header.customerNumber ?? undefined,
+        ...(await this.customerRef(header.customerNumber)),
         warehouseCode: this.vanStoreOf(lines, header.userCode), // physical return to the van
         originalInvoiceNumber,
         lines: lines.map((l) => ({
@@ -281,11 +341,13 @@ export class ErpOutboxService {
   }
 
   /**
-   * A van-to-van TRANSFER → two immediate stock-adjustments (OUT of source van,
-   * IN to destination van). Unlike the ERP's `stock-transfers` document (which
-   * stays PENDING_DISPATCH until staff dispatch + receive), adjustments move
-   * stock on both vans right away — matching the dashboard's atomic transfer.
-   * Distinct externalIds per leg make retries idempotent.
+   * A van-to-van (or store-to-van) TRANSFER → TWO immediate ERP stock-adjustments:
+   * an OUT from the source warehouse + an IN to the destination. This moves ERP
+   * stock RIGHT AWAY (the ERP `stock-transfers` document would instead sit
+   * PENDING_DISPATCH and not touch stock until dispatch+receive). Each call has a
+   * distinct externalId (`<voucher>-OUT` / `<voucher>-IN`) so a retry replays both
+   * idempotently. The cash-van side already moved its own stock via the one
+   * TRANSFER voucher — no extra IN/OUT vouchers locally.
    */
   private async buildTransferCalls(
     voucherNumber: string,

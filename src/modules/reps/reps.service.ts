@@ -9,6 +9,8 @@ import { Brackets, DataSource, ILike, IsNull, Not, Repository } from 'typeorm';
 
 import { Rep } from './entities/rep.entity';
 import { ErpSyncService } from '../erp-sync/erp-sync.service';
+import { SettingsService } from '../settings/settings.service';
+import { UsersService } from '../users/users.service';
 import { provisionRep } from './rep-provision';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
@@ -29,6 +31,8 @@ export class RepsService {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly erpSync: ErpSyncService,
+    private readonly settings: SettingsService,
+    private readonly users: UsersService,
   ) {}
 
   async list(query: ListRepsQuery): Promise<{ items: Rep[]; total: number }> {
@@ -139,10 +143,33 @@ export class RepsService {
 
   async update(id: string, dto: UpdateRepDto): Promise<Rep> {
     const rep = await this.findOne(id);
-    if (dto.userId) await this.assertUserUnlinked(dto.userId, id);
-    if (dto.code) await this.assertCodeUnique(dto.code, id);
-    Object.assign(rep, dto);
-    return this.repo.save(rep);
+    const { password, ...fields } = dto;
+
+    // When working WITH the ERP, the salesman's identity (name + code/userNumber)
+    // is ERP-managed and must not be changed here. Everything else (phone, region,
+    // quota, active, hire date, and the login password) stays editable.
+    const erpOn = (await this.settings.getErpConfig().catch(() => null))?.enabled;
+    if (erpOn) {
+      delete fields.code; // == userNumber / store number
+      delete fields.nameAr;
+      delete fields.nameEn;
+    }
+
+    if (fields.userId) await this.assertUserUnlinked(fields.userId, id);
+    if (fields.code) await this.assertCodeUnique(fields.code, id);
+    Object.assign(rep, fields);
+    const saved = await this.repo.save(rep);
+
+    // Set/change the salesman's login password on the linked user.
+    if (password) {
+      if (!rep.userId) {
+        throw new BadRequestException(
+          'This salesman has no linked login user, so a password cannot be set',
+        );
+      }
+      await this.users.changePassword(rep.userId, password);
+    }
+    return saved;
   }
 
   private async assertCodeUnique(code: string, exceptRepId?: string): Promise<void> {

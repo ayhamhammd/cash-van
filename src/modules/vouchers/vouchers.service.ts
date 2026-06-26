@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -28,6 +29,8 @@ import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
 import { UserContextService } from '../../common/context/user-context.service';
 import { OffersService } from '../offers/offers.service';
 import { OffersEngineService } from '../offers/offers-engine.service';
+import { SettingsService } from '../settings/settings.service';
+import { calcVoucher, toFils, filsToJod, type TaxMode } from './voucher-calc';
 import type { EvaluationResult } from '../offers/offers.types';
 
 /**
@@ -71,22 +74,47 @@ const VOUCHER_PREFIX: Record<string, string> = {
 };
 import { CreateChequeDto } from './dto/create-cheque.dto';
 
-interface ComputedLine {
-  line: VoucherLineDto;
-  net: number;
-  tax: number;
-  total: number;
-}
 
 /** Permission keys gating sensitive salesman actions (F10). */
 export const PERM_RETURN_DIRECT = 'vouchers.return.direct';
+/** May create returns at all (off → no returns). */
+export const PERM_RETURN_CREATE = 'vouchers.return.create';
+/** When set (with create), each return needs admin approval before it posts. */
+export const PERM_RETURN_APPROVAL = 'vouchers.return.approval';
 export const PERM_DISCOUNT_DIRECT = 'vouchers.discount.direct';
+/** May enter a discount, but it requires admin approval (blocks save until approved). */
+export const PERM_DISCOUNT_APPROVAL = 'vouchers.discount.approval';
 export const PERM_PRICE_OVERRIDE = 'vouchers.priceOverride';
 /** Prefix key encoding the max direct-discount %, e.g. "vouchers.discount.max:5". */
 export const PERM_DISCOUNT_MAX_PREFIX = 'vouchers.discount.max:';
 
+/**
+ * Canonical transaction kinds the app relies on. Ensured on every startup so a
+ * fresh/clean DB can always create SALE/RETURN/ORDER/… vouchers (and mirror them
+ * to the ERP) — no manual seed needed. Insert-only (never clobbers a curated row).
+ */
+const STANDARD_TRANS_KINDS: ReadonlyArray<{
+  transKind: string;
+  transName: string;
+  sign: number;
+}> = [
+  { transKind: 'SALE', transName: 'بيع', sign: -1 },
+  { transKind: 'RETURN', transName: 'مرتجع', sign: 1 },
+  { transKind: 'ORDER', transName: 'طلبية', sign: 0 },
+  { transKind: 'TRANSFER_IN', transName: 'تحميل المركبة', sign: 1 },
+  { transKind: 'TRANSFER_OUT', transName: 'تنزيل المركبة', sign: -1 },
+  { transKind: 'TRANSFER', transName: 'تحويل بين المخازن', sign: 0 },
+  { transKind: 'IN', transName: 'إدخال للمخزن', sign: 1 },
+  { transKind: 'OUT', transName: 'إخراج من المخزن', sign: -1 },
+  { transKind: 'PURCHASE', transName: 'شراء', sign: 1 },
+  { transKind: 'VENDOR_RETURN', transName: 'مرتجع مورد', sign: -1 },
+  { transKind: 'ADJUSTMENT', transName: 'تسوية', sign: 0 },
+  { transKind: 'PAYMENT_IN', transName: 'سند قبض', sign: 0 },
+  { transKind: 'PAYMENT_OUT', transName: 'سند صرف', sign: 0 },
+];
+
 @Injectable()
-export class VouchersService {
+export class VouchersService implements OnModuleInit {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(VoucherHeader)
@@ -97,9 +125,32 @@ export class VouchersService {
     private readonly events: EventEmitter2,
     private readonly offers: OffersService,
     private readonly offersEngine: OffersEngineService,
+    private readonly settings: SettingsService,
   ) {}
 
   private readonly logger = new Logger(VouchersService.name);
+
+  /**
+   * Ensure the standard transaction kinds always exist (insert-only, idempotent).
+   * Without this a clean DB throws "Unknown trans_kind: SALE" on the first sale.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const res = await this.dataSource
+        .getRepository(TransactionKind)
+        .createQueryBuilder()
+        .insert()
+        .values([...STANDARD_TRANS_KINDS])
+        .orIgnore() // ON CONFLICT DO NOTHING — never overwrites a curated row
+        .execute();
+      const added = res.identifiers.filter(Boolean).length;
+      if (added) this.logger.log(`Seeded ${added} missing transaction kind(s)`);
+    } catch (e) {
+      this.logger.warn(
+        `Could not ensure transaction kinds: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
 
   async create(dto: CreateVoucherDto): Promise<VoucherHeader> {
     // F10 gate: salesmen need explicit permission for returns, discounts and
@@ -334,12 +385,28 @@ export class VouchersService {
         }
       }
 
-      const computed = dto.transactions.map((line) => this.computeLine(line));
-      const totalNet = computed.reduce((s, c) => s + c.net, 0);
-      const totalTax = computed.reduce((s, c) => s + c.tax, 0);
-      const totalGross = computed.reduce((s, c) => s + c.total, 0);
-      const headerDiscount = Number(dto.totalDiscountValue ?? 0);
-      const netTotal = totalGross - headerDiscount;
+      // Canonical money engine (voucher-calc.ts) — fils-integer tax + discount in
+      // the seller's INCLUSIVE/EXCLUSIVE mode. Line discount = % + value (stacked);
+      // ONE header discount (% or value) distributed across lines PRE-tax. This is
+      // the single spec the app + ERP conform to (docs/VOUCHER-CALC-SPEC.md).
+      this.validateLines(dto.transactions);
+      const settingsView = await this.settings.get().catch(() => null);
+      const taxMode: TaxMode =
+        settingsView?.taxCalcMethod === 'INCLUSIVE' ? 'INCLUSIVE' : 'EXCLUSIVE';
+      const calc = calcVoucher({
+        taxMode,
+        headerDiscountPct: Number(dto.totalDiscountPercentage ?? 0) || 0,
+        headerDiscountFils: toFils(dto.totalDiscountValue ?? 0),
+        lines: dto.transactions.map((l) => ({
+          unitPriceFils: toFils(l.unitPrice),
+          qty: Number(l.itemQty) || 0,
+          lineDiscountPct: Number(l.discountPercentage ?? 0) || 0,
+          lineDiscountFils: toFils(l.discountValue ?? 0),
+          taxRatePct: Number(l.taxPercentage ?? 0) || 0,
+        })),
+      });
+      // Per-line results aligned 1:1 with dto.transactions.
+      const computed = dto.transactions.map((line, i) => ({ line, res: calc.lines[i] }));
 
       const header = em.getRepository(VoucherHeader).create({
         voucherNumber: dto.voucherNumber,
@@ -349,10 +416,10 @@ export class VouchersService {
         vendorNumber: dto.vendorNumber ?? null,
         referenceVoucherNumber,
         inDate: dto.inDate ? new Date(dto.inDate) : new Date(),
-        total: totalNet.toFixed(2),
-        totalTax: totalTax.toFixed(2),
-        netTotal: netTotal.toFixed(2),
-        totalDiscountValue: (dto.totalDiscountValue ?? '0').toString(),
+        total: filsToJod(calc.totalNetFils), // net (tax base)
+        totalTax: filsToJod(calc.totalTaxFils),
+        netTotal: filsToJod(calc.grandTotalFils), // grand total (with tax)
+        totalDiscountValue: filsToJod(calc.headerDiscountFils),
         totalDiscountPercentage: (dto.totalDiscountPercentage ?? '0').toString(),
         appliedOfferIds: dto.appliedOfferIds ?? [],
         isPosted: dto.isPosted ?? false,
@@ -372,7 +439,7 @@ export class VouchersService {
 
       // First pass: resolve each line's stock movement (qty in base pieces).
       const prepared = [];
-      for (const { line, net, total } of computed) {
+      for (const { line, res } of computed) {
         const lineKind = line.transKind ?? dto.transKind;
         const unitFactor =
           line.unitBaseQty && line.unitBaseQty > 0 ? line.unitBaseQty : 1;
@@ -380,7 +447,7 @@ export class VouchersService {
         const baseQty = qtyOfUnit * unitFactor;
         const sign = await resolveSign(lineKind);
         const move = this.resolveStockMovement(line, baseQty, sign, isTransferVoucher);
-        prepared.push({ line, net, total, lineKind, unitFactor, qtyOfUnit, baseQty, move });
+        prepared.push({ line, res, lineKind, unitFactor, qtyOfUnit, baseQty, move });
       }
 
       // Don't allow a sale/out/transfer-out to drive a store's stock negative.
@@ -414,7 +481,9 @@ export class VouchersService {
           toStoreNumber: p.move.toStoreNumber,
           taxPercentage: p.line.taxPercentage ?? '0',
           discountPercentage: p.line.discountPercentage ?? '0',
-          discountValue: p.line.discountValue ?? '0',
+          // RESOLVED total line discount = own line discount + its share of the
+          // header discount (fils). This is exactly what the ERP push needs.
+          discountValue: filsToJod(p.res.lineDiscountFils + p.res.headerShareFils),
           itemQty: p.baseQty.toString(),
           unitPrice: (p.line.unitPrice ?? '0').toString(),
           qtyOfUnit: p.qtyOfUnit.toString(),
@@ -422,8 +491,8 @@ export class VouchersService {
           unitName: p.line.unitName ?? null,
           unitBaseQty: p.unitFactor,
           signedQty: p.move.signedQty.toString(),
-          total: p.net.toFixed(2),
-          netTotal: p.total.toFixed(2),
+          total: filsToJod(p.res.netFils), // line net (tax base, post-discount)
+          netTotal: filsToJod(p.res.totalFils), // line total (with tax)
         }),
       );
       await em.getRepository(VoucherTransaction).save(txEntities);
@@ -454,7 +523,7 @@ export class VouchersService {
    * (out for SALE/TRANSFER_OUT, in for RETURN/TRANSFER_IN, reserve for ORDER).
    */
   async post(id: string): Promise<VoucherHeader> {
-    return this.dataSource.transaction(async (em) => {
+    const result = await this.dataSource.transaction(async (em) => {
       const header = await em.getRepository(VoucherHeader).findOne({
         where: { id },
         relations: { transactions: true },
@@ -481,6 +550,14 @@ export class VouchersService {
         relations: { transactions: true, payments: true },
       });
     });
+    // Mirror to the ERP now that it's posted — same as create()'s posted path.
+    // Critical for the create-then-post flows (TRANSFER, and any draft posted
+    // later), which would otherwise never reach the ERP outbox.
+    this.events.emit('erp.voucher.posted', {
+      voucherNumber: result.voucherNumber,
+      transKind: result.transKind,
+    });
+    return result;
   }
 
   /**
@@ -819,28 +896,18 @@ export class VouchersService {
     return { fromStoreNumber: null, toStoreNumber: null, storeNumber: store, signedQty: 0 };
   }
 
-  private computeLine(line: VoucherLineDto): ComputedLine {
-    const qty = Number(line.itemQty);
-    const unit = Number(line.unitPrice);
-    if (!Number.isFinite(qty) || qty <= 0) {
-      throw new BadRequestException('itemQty must be > 0');
+  /** Validate line qty/price inputs before the canonical money engine runs. */
+  private validateLines(lines: VoucherLineDto[]): void {
+    for (const line of lines) {
+      const qty = Number(line.itemQty);
+      const unit = Number(line.unitPrice);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new BadRequestException('itemQty must be > 0');
+      }
+      if (!Number.isFinite(unit) || unit < 0) {
+        throw new BadRequestException('unitPrice must be >= 0');
+      }
     }
-    if (!Number.isFinite(unit) || unit < 0) {
-      throw new BadRequestException('unitPrice must be >= 0');
-    }
-    const lineGross = qty * unit;
-    const discPct = Number(line.discountPercentage ?? 0);
-    const discVal = Number(line.discountValue ?? 0);
-    const afterDiscount =
-      lineGross - lineGross * (discPct / 100) - discVal;
-    const taxPct = Number(line.taxPercentage ?? 0);
-    const tax = afterDiscount * (taxPct / 100);
-    return {
-      line,
-      net: afterDiscount,
-      tax,
-      total: afterDiscount + tax,
-    };
   }
 
   private async loadTransKind(
@@ -881,7 +948,22 @@ export class VouchersService {
       return Number.isFinite(n) ? n : 0;
     };
 
-    // 1) RETURN vouchers — post directly like SALE/ORDER (no approval gate).
+    // 1) RETURN vouchers — two-flag gate:
+    //    - no `vouchers.return.create` → not allowed to create returns at all.
+    //    - has create + `vouchers.return.approval` → must be approved first
+    //      (client files an approval request; the manager's approve() re-runs this
+    //      create under their own context, bypassing the gate).
+    //    - has create, no approval flag → post directly.
+    if (dto.transKind === 'RETURN') {
+      // Approval-needed takes precedence and itself authorizes the return (it just
+      // routes through a manager). Otherwise a direct return needs the create flag.
+      if (has(PERM_RETURN_APPROVAL)) {
+        throw new ForbiddenException('APPROVAL_REQUIRED:RETURN_VOUCHER');
+      }
+      if (!has(PERM_RETURN_CREATE)) {
+        throw new ForbiddenException('RETURN_NOT_ALLOWED');
+      }
+    }
 
     // 2) Discounts (header + per-line), with an optional max-% cap
     const gross = dto.transactions.reduce(
@@ -901,7 +983,11 @@ export class VouchersService {
     const totalDisc = lineDisc + headerDisc;
     if (totalDisc > 0.0005) {
       if (!has(PERM_DISCOUNT_DIRECT)) {
-        throw new ForbiddenException('APPROVAL_REQUIRED:VOUCHER_DISCOUNT');
+        // No direct-discount: route to approval if allowed, else block outright.
+        if (has(PERM_DISCOUNT_APPROVAL)) {
+          throw new ForbiddenException('APPROVAL_REQUIRED:VOUCHER_DISCOUNT');
+        }
+        throw new ForbiddenException('DISCOUNT_NOT_ALLOWED');
       }
       const maxKey = keys.find((k) => k.startsWith(PERM_DISCOUNT_MAX_PREFIX));
       if (maxKey) {

@@ -91,6 +91,10 @@ export class Customer extends BaseEntity {
   })
   totalCredit!: string;
 
+  /** Email — mirrors the ERP customer's email. */
+  @Column({ type: 'text', nullable: true })
+  email?: string | null;
+
   // ---- JoFotara buyer identity (required for invoices >= 10,000 JOD) ----
   @Column({ type: 'text', nullable: true })
   tin?: string | null;
