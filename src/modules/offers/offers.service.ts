@@ -376,6 +376,9 @@ export class OffersService {
       if (reward.itemsPerGift == null || reward.itemsPerGift < 1) {
         throw new BadRequestException('GIFT reward requires itemsPerGift ≥ 1');
       }
+      if (reward.giftsPerStep != null && reward.giftsPerStep < 1) {
+        throw new BadRequestException('GIFT giftsPerStep must be ≥ 1');
+      }
       if (reward.maxFreeQty != null && reward.maxFreeQty < 1) {
         throw new BadRequestException('GIFT maxFreeQty must be ≥ 1');
       }

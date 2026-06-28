@@ -76,10 +76,11 @@ Buy a quantity of selected item(s) → a **gift** or a **per-item discount**. Th
 
 **reward** — one of:
 ```jsonc
-// (a) GIFT — rep picks free items from a pool; count = floor(qty / itemsPerGift), capped
+// (a) GIFT — rep picks free items from a pool; count = floor(qty / itemsPerGift) × giftsPerStep, capped
 { "kind": "GIFT",
   "giftItems": ["WATER-330", "MANGO-250"],          // pool the rep chooses from
-  "itemsPerGift": 10,                                // buy 10 → 1 free, 20 → 2, 1000 → 100
+  "itemsPerGift": 10,                                // items bought per step
+  "giftsPerStep": 3,                                 // free gifts per step (default 1) → buy 10 get 3, 20 get 6
   "maxFreeQty": 5 }                                  // optional cap on free gifts
 
 // (b) ITEM_PERCENT_DISCOUNT — % off the SELECTED items' lines once combined qty ≥ minQty
@@ -89,7 +90,7 @@ Buy a quantity of selected item(s) → a **gift** or a **per-item discount**. Th
 ```
 Dynamic rate (same anchored formula as above; here `qty` = combined selected-item qty and the anchor is `minQty`, so at exactly `minQty` you get the base rate). For a GIFT offer, evaluate surfaces `appliedOffers[].freeItemChoice = { choices: giftItems, qty: freeQty }`; the rep's picks come back as `freeLines` once `chosenFreeItems` is sent (see evaluate).
 
-**Legality**: `itemNumbers` non-empty; GIFT requires `giftItems` non-empty + `itemsPerGift` ≥ 1 (`maxFreeQty` optional, ≥ 1); ITEM_PERCENT_DISCOUNT requires `minQty` ≥ 1 + the percentage fields above.
+**Legality**: `itemNumbers` non-empty; GIFT requires `giftItems` non-empty + `itemsPerGift` ≥ 1 (`giftsPerStep` optional, ≥ 1, default 1; `maxFreeQty` optional, ≥ 1); ITEM_PERCENT_DISCOUNT requires `minQty` ≥ 1 + the percentage fields above.
 
 ---
 
