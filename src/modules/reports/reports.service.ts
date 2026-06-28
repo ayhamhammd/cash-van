@@ -1,6 +1,34 @@
-import { Injectable } from '@nestjs/common';
-import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
+
+import { SalesmanSettlement } from './entities/salesman-settlement.entity';
+
+/** One salesman's End-of-Day cash summary over a period (all money in fils). */
+export interface EodRow {
+  repId: string | null;
+  repCode: string | null;
+  repName: string | null;
+  collectedCashFils: number;
+  collectedChequeFils: number;
+  cashSalesFils: number;
+  creditSalesFils: number;
+  cashReturnsFils: number;
+  totalDiscountFils: number;
+  expectedCashFils: number; // cashSales + collectedCash − cashReturns
+  previousBalanceFils: number; // carried from prior settlements
+  totalDueFils: number; // expectedCash + previousBalance
+  visitCount: number; // customer visits in range
+  noActionVisitCount: number; // visits with no voucher AND no collection that day
+  lastSettledTo: string | null;
+}
+
+export interface EodResponse {
+  from: string;
+  to: string;
+  rows: EodRow[];
+  totals: Omit<EodRow, 'repId' | 'repCode' | 'repName' | 'lastSettledTo'>;
+}
 
 export interface Paged<T> {
   items: T[];
@@ -119,7 +147,203 @@ interface RawPing {
 
 @Injectable()
 export class ReportsService {
-  constructor(@InjectDataSource() private readonly ds: DataSource) {}
+  constructor(
+    @InjectDataSource() private readonly ds: DataSource,
+    @InjectRepository(SalesmanSettlement)
+    private readonly settlements: Repository<SalesmanSettlement>,
+  ) {}
+
+  // ── End-of-Day cash reconciliation ─────────────────────────────────────────
+
+  /** Raw per-salesman aggregates for [from, to]. Money in fils. */
+  private async eodRows(from: string, to: string, repId?: string): Promise<EodRow[]> {
+    const rows: Array<Record<string, string | null>> = await this.ds.query(
+      `
+      WITH coll AS (
+        SELECT rep_id,
+          COALESCE(SUM(amount) FILTER (WHERE method='cash'   AND status IN ('confirmed','deposited')),0) AS collected_cash,
+          COALESCE(SUM(amount) FILTER (WHERE method='cheque' AND status IN ('confirmed','deposited')),0) AS collected_cheque
+        FROM collections
+        WHERE collected_at >= $1::date AND collected_at < ($2::date + 1)
+        GROUP BY rep_id
+      ),
+      vp AS (
+        SELECT r.id AS rep_id,
+          COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CASH'   AND h.trans_kind='SALE'),0)   AS cash_sales,
+          COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CREDIT' AND h.trans_kind='SALE'),0)   AS credit_sales,
+          COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CASH'   AND h.trans_kind='RETURN'),0) AS cash_returns
+        FROM payments p
+        JOIN voucher_headers h ON h.voucher_number = p.voucher_number
+        JOIN users u ON u.user_number = h.user_code
+        JOIN reps  r ON r.user_id = u.id
+        WHERE h.is_posted = true AND h.in_date >= $1::date AND h.in_date < ($2::date + 1)
+        GROUP BY r.id
+      ),
+      disc AS (
+        SELECT r.id AS rep_id,
+          COALESCE(SUM(ROUND(h.total_discount_value*1000)),0) AS total_discount
+        FROM voucher_headers h
+        JOIN users u ON u.user_number = h.user_code
+        JOIN reps  r ON r.user_id = u.id
+        WHERE h.is_posted = true AND h.trans_kind='SALE'
+          AND h.in_date >= $1::date AND h.in_date < ($2::date + 1)
+        GROUP BY r.id
+      ),
+      bal AS (
+        SELECT DISTINCT ON (rep_id) rep_id, new_balance_fils, period_to
+        FROM salesman_settlement
+        ORDER BY rep_id, created_at DESC
+      ),
+      vis AS (
+        SELECT v.rep_id,
+          COUNT(*) AS visit_count,
+          COUNT(*) FILTER (
+            -- "no action" = visited but no collection AND no posted voucher
+            -- for that customer on the same (local) day.
+            WHERE NOT EXISTS (
+              SELECT 1 FROM collections c
+              WHERE c.rep_id = v.rep_id AND c.customer_id = v.customer_id
+                AND c.collected_at::date = v.visited_at::date
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM voucher_headers h2
+              JOIN users u2 ON u2.user_number = h2.user_code
+              JOIN reps  r2 ON r2.user_id = u2.id
+              JOIN customers cu ON cu.customer_number = h2.customer_number
+              WHERE r2.id = v.rep_id AND cu.id = v.customer_id
+                AND h2.is_posted = true AND h2.in_date::date = v.visited_at::date
+            )
+          ) AS no_action_count
+        FROM customer_visits v
+        WHERE v.visited_at >= $1::date AND v.visited_at < ($2::date + 1)
+        GROUP BY v.rep_id
+      )
+      SELECT r.id AS "repId", r.code AS "repCode", r.name_ar AS "repName",
+        COALESCE(coll.collected_cash,0)::bigint   AS "collectedCashFils",
+        COALESCE(coll.collected_cheque,0)::bigint AS "collectedChequeFils",
+        COALESCE(vp.cash_sales,0)::bigint         AS "cashSalesFils",
+        COALESCE(vp.credit_sales,0)::bigint       AS "creditSalesFils",
+        COALESCE(vp.cash_returns,0)::bigint       AS "cashReturnsFils",
+        COALESCE(disc.total_discount,0)::bigint   AS "totalDiscountFils",
+        COALESCE(bal.new_balance_fils,0)::bigint  AS "previousBalanceFils",
+        COALESCE(vis.visit_count,0)::int          AS "visitCount",
+        COALESCE(vis.no_action_count,0)::int      AS "noActionVisitCount",
+        to_char(bal.period_to,'YYYY-MM-DD')       AS "lastSettledTo"
+      FROM reps r
+      LEFT JOIN coll ON coll.rep_id = r.id
+      LEFT JOIN vp   ON vp.rep_id   = r.id
+      LEFT JOIN disc ON disc.rep_id = r.id
+      LEFT JOIN bal  ON bal.rep_id  = r.id
+      LEFT JOIN vis  ON vis.rep_id  = r.id
+      WHERE r.deleted_at IS NULL
+        AND ($3::uuid IS NULL OR r.id = $3::uuid)
+        AND (coll.rep_id IS NOT NULL OR vp.rep_id IS NOT NULL
+             OR vis.rep_id IS NOT NULL OR COALESCE(bal.new_balance_fils,0) <> 0)
+      ORDER BY r.name_ar
+      `,
+      [from, to, repId ?? null],
+    );
+    return rows.map((r) => {
+      const n = (k: string) => Number(r[k] ?? 0);
+      const expectedCashFils =
+        n('cashSalesFils') + n('collectedCashFils') - n('cashReturnsFils');
+      const previousBalanceFils = n('previousBalanceFils');
+      return {
+        repId: r.repId,
+        repCode: r.repCode,
+        repName: r.repName,
+        collectedCashFils: n('collectedCashFils'),
+        collectedChequeFils: n('collectedChequeFils'),
+        cashSalesFils: n('cashSalesFils'),
+        creditSalesFils: n('creditSalesFils'),
+        cashReturnsFils: n('cashReturnsFils'),
+        totalDiscountFils: n('totalDiscountFils'),
+        expectedCashFils,
+        previousBalanceFils,
+        totalDueFils: expectedCashFils + previousBalanceFils,
+        visitCount: n('visitCount'),
+        noActionVisitCount: n('noActionVisitCount'),
+        lastSettledTo: r.lastSettledTo,
+      };
+    });
+  }
+
+  /** End-of-Day report: per-salesman rows + totals. */
+  async endOfDay(from: string, to: string, repId?: string): Promise<EodResponse> {
+    const rows = await this.eodRows(from, to, repId);
+    const sum = (k: keyof EodRow) =>
+      rows.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+    return {
+      from,
+      to,
+      rows,
+      totals: {
+        collectedCashFils: sum('collectedCashFils'),
+        collectedChequeFils: sum('collectedChequeFils'),
+        cashSalesFils: sum('cashSalesFils'),
+        creditSalesFils: sum('creditSalesFils'),
+        cashReturnsFils: sum('cashReturnsFils'),
+        totalDiscountFils: sum('totalDiscountFils'),
+        expectedCashFils: sum('expectedCashFils'),
+        previousBalanceFils: sum('previousBalanceFils'),
+        totalDueFils: sum('totalDueFils'),
+        visitCount: sum('visitCount'),
+        noActionVisitCount: sum('noActionVisitCount'),
+      },
+    };
+  }
+
+  /**
+   * Record an End-of-Day settlement for one salesman: recompute the period's
+   * aggregates server-side (never trust client numbers), write a settlement with
+   * new_balance = previous + expected − received, and return it. Doesn't touch
+   * any sale/collection.
+   */
+  async settle(
+    dto: { repId: string; from: string; to: string; receivedFils: number; note?: string },
+    userId?: string,
+  ): Promise<SalesmanSettlement> {
+    if (dto.receivedFils < 0) throw new BadRequestException('receivedFils must be ≥ 0');
+    const [row] = await this.eodRows(dto.from, dto.to, dto.repId);
+    if (!row) throw new NotFoundException('No activity/rep for this period');
+    const newBalance = row.previousBalanceFils + row.expectedCashFils - dto.receivedFils;
+    const saved = await this.settlements.save(
+      this.settlements.create({
+        repId: dto.repId,
+        periodFrom: dto.from,
+        periodTo: dto.to,
+        expectedCashFils: String(row.expectedCashFils),
+        collectedCashFils: String(row.collectedCashFils),
+        collectedChequeFils: String(row.collectedChequeFils),
+        cashSalesFils: String(row.cashSalesFils),
+        creditSalesFils: String(row.creditSalesFils),
+        cashReturnsFils: String(row.cashReturnsFils),
+        totalDiscountFils: String(row.totalDiscountFils),
+        previousBalanceFils: String(row.previousBalanceFils),
+        receivedFils: String(dto.receivedFils),
+        newBalanceFils: String(newBalance),
+        note: dto.note ?? null,
+        createdByUserId: userId ?? null,
+      }),
+    );
+    return saved;
+  }
+
+  /** Settlement history (audit / the carried "additional" per salesman). */
+  async listSettlements(q: {
+    repId?: string;
+    from?: string;
+    to?: string;
+  }): Promise<SalesmanSettlement[]> {
+    const qb = this.settlements
+      .createQueryBuilder('s')
+      .orderBy('s.created_at', 'DESC')
+      .take(200);
+    if (q.repId) qb.andWhere('s.rep_id = :r', { r: q.repId });
+    if (q.from) qb.andWhere('s.period_to >= :f', { f: q.from });
+    if (q.to) qb.andWhere('s.period_from <= :t', { t: q.to });
+    return qb.getMany();
+  }
 
   /** Best-selling items from posted SALE voucher lines (by quantity), optionally within N days. */
   async bestItems(offset = 0, limit = 25, days?: number): Promise<Paged<BestItemRow>> {

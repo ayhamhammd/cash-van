@@ -67,6 +67,43 @@ export class AppSettings {
   @Column({ name: 'jofotara_sandbox', type: 'boolean', default: true })
   jofotaraSandbox!: boolean;
 
+  // ── ERP (erp-saas) integration ────────────────────────────────────────────
+  /** The toggle: work WITH the ERP (sync items/units/stores/stock) or standalone. */
+  @Column({ name: 'erp_sync_enabled', type: 'boolean', default: false })
+  erpSyncEnabled!: boolean;
+
+  /** ERP origin (e.g. https://erp.example.com); the API base "/api/v1" is appended. */
+  @Column({ name: 'erp_base_url', type: 'text', nullable: true })
+  erpBaseUrl?: string | null;
+
+  @Column({ name: 'erp_api_key_encrypted', type: 'text', nullable: true, select: false })
+  erpApiKeyEncrypted?: string | null;
+
+  @Column({ name: 'erp_api_key_last4', type: 'text', nullable: true })
+  erpApiKeyLast4?: string | null;
+
+  @Column({ name: 'erp_last_sync_at', type: 'timestamptz', nullable: true })
+  erpLastSyncAt?: Date | null;
+
+  /**
+   * When ON (default), posted vouchers + confirmed collections push to the ERP
+   * automatically. When OFF, nothing auto-pushes — they wait in the "ERP Export"
+   * page to be exported manually.
+   */
+  @Column({ name: 'erp_direct_export', type: 'boolean', default: true })
+  erpDirectExport!: boolean;
+
+  /** The cash-van store that the ERP's van warehouse maps to (for stock sync). */
+  @Column({ name: 'erp_van_store', type: 'text', nullable: true })
+  erpVanStore?: string | null;
+
+  /** ERP category + tax-rate ids used when mirroring a new cash-van item to the ERP. */
+  @Column({ name: 'erp_default_category_id', type: 'text', nullable: true })
+  erpDefaultCategoryId?: string | null;
+
+  @Column({ name: 'erp_default_tax_rate_id', type: 'text', nullable: true })
+  erpDefaultTaxRateId?: string | null;
+
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 

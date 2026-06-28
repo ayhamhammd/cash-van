@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -26,6 +27,7 @@ import {
   SyncCollectionDto,
   SyncVoucherDto,
   SyncVoucherResultDto,
+  UpdateInboxPayloadDto,
 } from './dto/sync.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -67,6 +69,21 @@ export class SyncController {
   @ApiOkResponse({ description: '{ items, total, pending, failed }' })
   list(@Query() q: ListInboxQueryDto) {
     return this.sync.list(q);
+  }
+
+  @Patch('inbox/:id')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: "Edit a staged document's payload before re-exporting it",
+    description:
+      "Replaces the raw payload (e.g. add a RETURN's referenceVoucherNumber, fix a store or quantity). Resets the row to pending and clears the error; call retry to re-promote.",
+  })
+  @ApiOkResponse({ description: 'The updated inbox row' })
+  updatePayload(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateInboxPayloadDto,
+  ) {
+    return this.sync.updatePayload(id, dto.payload);
   }
 
   @Post('inbox/:id/retry')

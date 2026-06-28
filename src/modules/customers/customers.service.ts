@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Brackets, Repository } from 'typeorm';
 import { parse } from 'csv-parse/sync';
 
@@ -53,6 +54,7 @@ export class CustomersService {
     private readonly attachments: Repository<CustomerAttachment>,
     private readonly jobs: JobsService,
     private readonly storage: StorageService,
+    private readonly events: EventEmitter2,
   ) {}
 
   async create(dto: CreateCustomerDto): Promise<Customer> {
@@ -68,7 +70,17 @@ export class CustomersService {
       nameAr: dto.nameAr ?? dto.customerName,
       phoneHash: hashPhone(dto.phone),
     });
-    return this.customers.save(entity);
+    const saved = await this.customers.save(entity);
+    // Mirror to the ERP (handled by ErpSyncService listener; no-op when ERP off).
+    this.events.emit('erp.customer.created', {
+      code: saved.customerNumber,
+      name: saved.customerName,
+      phone: saved.phone ?? null,
+      email: saved.email ?? null,
+      taxNumber: saved.tin ?? null,
+      creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
+    });
+    return saved;
   }
 
   /** Next serial customer number: CUST-000001. */
@@ -85,7 +97,17 @@ export class CustomersService {
     if (dto.phone !== undefined) {
       customer.phoneHash = hashPhone(dto.phone);
     }
-    return this.customers.save(customer);
+    const saved = await this.customers.save(customer);
+    // Mirror the update to the ERP (ErpSyncService listener; no-op when ERP off).
+    this.events.emit('erp.customer.updated', {
+      code: saved.customerNumber,
+      name: saved.customerName,
+      phone: saved.phone ?? null,
+      email: saved.email ?? null,
+      taxNumber: saved.tin ?? null,
+      creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
+    });
+    return saved;
   }
 
   async findOneOrThrow(id: string): Promise<Customer> {
@@ -102,7 +124,8 @@ export class CustomersService {
       .take(query.limit ?? 25)
       .skip(query.offset ?? 0);
 
-    if (query.repId) qb.andWhere('c.rep_id = :repId', { repId: query.repId });
+    if (query.unassigned) qb.andWhere('c.rep_id IS NULL');
+    else if (query.repId) qb.andWhere('c.rep_id = :repId', { repId: query.repId });
     if (query.regionId) qb.andWhere('c.region_id = :regionId', { regionId: query.regionId });
     if (query.isActive !== undefined) qb.andWhere('c.is_active = :a', { a: query.isActive });
 

@@ -1,10 +1,12 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { VoucherInbox, InboxStatus } from './entities/voucher-inbox.entity';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { CollectionsService } from '../collections/collections.service';
+import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
+import { SettingsService } from '../settings/settings.service';
 import { CreateVoucherDto } from '../vouchers/dto/create-voucher.dto';
 import { CreateCollectionDto } from '../collections/dto/create-collection.dto';
 import { SyncVoucherDto, SyncCollectionDto, ListInboxQueryDto } from './dto/sync.dto';
@@ -18,6 +20,8 @@ export class SyncService {
     private readonly inbox: Repository<VoucherInbox>,
     private readonly vouchers: VouchersService,
     private readonly collections: CollectionsService,
+    private readonly erpOutbox: ErpOutboxService,
+    private readonly settings: SettingsService,
   ) {}
 
   /**
@@ -48,10 +52,13 @@ export class SyncService {
     // van store. Inject it onto storeless lines so stock moves from the van.
     const repId = await this.resolveRepId(voucher.userCode);
     const store = await this.resolveStore(voucher, repId);
-    const assignedNumber = await this.vouchers.reserveVoucherNumber(
-      voucher.transKind,
-      store,
-    );
+    // Keep the app's own voucher number — a single series across app + server, so
+    // the number never changes on upload. Only fall back to a server-reserved
+    // number if the client didn't supply one. (App numbers embed the userCode +
+    // yearly sequence, so they're unique per rep.)
+    const assignedNumber =
+      voucher.voucherNumber?.trim() ||
+      (await this.vouchers.reserveVoucherNumber(voucher.transKind, store));
 
     const row = await this.inbox.save(
       this.inbox.create({
@@ -97,6 +104,26 @@ export class SyncService {
     await this.promoteCollection(row);
     const fresh = await this.inbox.findOneByOrFail({ id: row.id });
     return { id: fresh.id, status: fresh.status, error: fresh.error };
+  }
+
+  /**
+   * Replace a staged document's payload (dashboard "edit"). Only allowed before
+   * it has posted; resets the row to pending and clears the previous error so it
+   * can be re-exported with a retry.
+   */
+  async updatePayload(
+    id: string,
+    payload: Record<string, unknown>,
+  ): Promise<VoucherInbox> {
+    const row = await this.findOneOrThrow(id);
+    if (row.status === 'posted') {
+      throw new ConflictException('Cannot edit a document that already posted');
+    }
+    row.payload = payload;
+    row.status = 'pending';
+    row.error = null;
+    await this.inbox.save(row);
+    return this.findOneOrThrow(id);
   }
 
   /** Re-attempt a pending/failed row (dashboard "retry"). */
@@ -155,8 +182,21 @@ export class SyncService {
       }));
       const created = await this.vouchers.create(dto);
       await this.markPosted(row.id, created.voucherNumber);
+      // ERP push is enqueued via the 'erp.voucher.posted' event from vouchers.create.
     } catch (e) {
       await this.markFailed(row.id, e);
+    }
+  }
+
+  /** When ERP mode is on, queue a posted van sale/return for push to the ERP. */
+  private async queueErpPush(transKind: string, voucherNumber: string): Promise<void> {
+    try {
+      const cfg = await this.settings.getErpConfig();
+      if (!cfg.enabled) return;
+      if (transKind === 'SALE') await this.erpOutbox.enqueue('SALE_INVOICE', voucherNumber);
+      else if (transKind === 'RETURN') await this.erpOutbox.enqueue('SALES_RETURN', voucherNumber);
+    } catch {
+      // best-effort; a missed enqueue is recoverable via a future re-sync/retry
     }
   }
 

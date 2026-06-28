@@ -42,6 +42,7 @@ import { MobileModule } from './modules/mobile/mobile.module';
 import { UnitsModule } from './modules/units/units.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { SyncModule } from './modules/sync/sync.module';
+import { ErpSyncModule } from './modules/erp-sync/erp-sync.module';
 import { ApprovalsModule } from './modules/approvals/approvals.module';
 import { AgentModule } from './modules/agent/agent.module';
 import { OffersModule } from './modules/offers/offers.module';
@@ -99,6 +100,7 @@ import { OffersModule } from './modules/offers/offers.module';
     NotificationsModule,
     ApprovalsModule,
     SyncModule,
+    ErpSyncModule,
     AgentModule,
     OffersModule,
   ],

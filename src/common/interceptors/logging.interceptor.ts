@@ -5,34 +5,65 @@ import {
   Logger,
   NestInterceptor,
 } from '@nestjs/common';
-import { Observable } from 'rxjs';
-import { tap } from 'rxjs/operators';
-import { Request, Response } from 'express';
+import { Observable, tap } from 'rxjs';
+
+/** Redact secrets before logging a body. */
+function redact(v: unknown): unknown {
+  if (!v || typeof v !== 'object') return v;
+  const SECRET = /password|apikey|api_key|secret|token|authorization/i;
+  const out: Record<string, unknown> = Array.isArray(v) ? ([] as never) : {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    out[k] = SECRET.test(k) ? '***' : redact(val);
+  }
+  return out;
+}
+
+function brief(v: unknown, max = 2000): string {
+  let s: string;
+  try {
+    s = JSON.stringify(redact(v));
+  } catch {
+    s = String(v);
+  }
+  if (!s) return '';
+  return s.length > max ? `${s.slice(0, max)}…(${s.length}b)` : s;
+}
 
 /**
- * One access-log line per HTTP request: `METHOD url status duration`. Errors
- * (4xx/5xx) are logged with their stack by HttpExceptionFilter, so this only
- * logs completed (non-throwing) responses to avoid double reporting. Health
- * checks are skipped — Render pings them constantly and they'd drown the log.
+ * Logs every API request + response: method, url, request body, status,
+ * response body (redacted + truncated) and duration. Registered globally.
+ * Health checks are skipped — Render pings them constantly and they'd drown
+ * the log.
  */
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
-  private readonly logger = new Logger('HTTP');
+  private readonly logger = new Logger('API');
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     if (context.getType() !== 'http') return next.handle();
-
-    const http = context.switchToHttp();
-    const req = http.getRequest<Request>();
-    const res = http.getResponse<Response>();
-    if (req.url.includes('/health')) return next.handle();
-
+    const req = context.switchToHttp().getRequest<{
+      method: string;
+      originalUrl?: string;
+      url?: string;
+      body?: unknown;
+      query?: unknown;
+    }>();
+    const method = req.method;
+    const url = req.originalUrl ?? req.url ?? '';
+    if (url.includes('/health')) return next.handle();
     const start = Date.now();
-    const { method, url } = req;
+    const reqBody =
+      req.body && Object.keys(req.body as object).length ? ` body=${brief(req.body)}` : '';
+    this.logger.log(`→ ${method} ${url}${reqBody}`);
+
     return next.handle().pipe(
-      tap(() => {
-        const ms = Date.now() - start;
-        this.logger.log(`${method} ${url} ${res.statusCode} ${ms}ms`);
+      tap({
+        next: (data) =>
+          this.logger.log(`← ${method} ${url} ${Date.now() - start}ms res=${brief(data)}`),
+        error: (err: { status?: number; message?: string }) =>
+          this.logger.warn(
+            `✗ ${method} ${url} ${Date.now() - start}ms ${err?.status ?? ''} ${err?.message ?? err}`,
+          ),
       }),
     );
   }

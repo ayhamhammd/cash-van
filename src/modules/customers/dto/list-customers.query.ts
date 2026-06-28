@@ -28,6 +28,12 @@ export class ListCustomersQuery {
   @IsUUID()
   repId?: string;
 
+  @ApiPropertyOptional({ description: 'Only customers not linked to any salesman' })
+  @IsOptional()
+  @Type(() => Boolean)
+  @IsBoolean()
+  unassigned?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @Type(() => Boolean)

@@ -47,6 +47,10 @@ export class User extends BaseEntity {
   @Column({ name: 'is_active', type: 'boolean', default: true })
   isActive!: boolean;
 
+  /** True for auto-provisioned salesman logins until they set their own password. */
+  @Column({ name: 'must_change_password', type: 'boolean', default: false })
+  mustChangePassword!: boolean;
+
   @Column({ name: 'can_make_voucher', type: 'boolean', default: false })
   canMakeVoucher!: boolean;
 

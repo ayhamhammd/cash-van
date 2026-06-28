@@ -8,9 +8,11 @@ import { RepsController } from './reps.controller';
 import { LocationsService } from './locations.service';
 import { LocationsController } from './locations.controller';
 import { PartitionMaintenanceService } from './partition-maintenance.service';
+import { ErpSyncModule } from '../erp-sync/erp-sync.module';
+import { UsersModule } from '../users/users.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Rep, RepLocationEvent])],
+  imports: [TypeOrmModule.forFeature([Rep, RepLocationEvent]), ErpSyncModule, UsersModule],
   controllers: [RepsController, LocationsController],
   providers: [RepsService, LocationsService, PartitionMaintenanceService],
   exports: [RepsService, LocationsService],

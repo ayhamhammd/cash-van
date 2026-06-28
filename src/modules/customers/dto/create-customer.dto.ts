@@ -46,6 +46,12 @@ export class CreateCustomerDto {
   @Length(0, 32)
   phone?: string;
 
+  @ApiPropertyOptional({ description: 'Email (mirrors the ERP customer email)' })
+  @IsOptional()
+  @IsString()
+  @Length(0, 255)
+  email?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()

@@ -23,6 +23,8 @@ export interface LoginResponse {
     permissions: Record<string, boolean>;
     /** Granular dashboard permission keys. */
     permKeys: string[];
+    /** True for a fresh salesman login — client must force a password change. */
+    mustChangePassword: boolean;
   };
 }
 
@@ -83,7 +85,27 @@ export class AuthService {
         repId,
         permissions,
         permKeys,
+        mustChangePassword: user.mustChangePassword ?? false,
       },
+    };
+  }
+
+  /**
+   * Fresh profile for `GET /auth/me` — re-reads the user from the DB so permission
+   * changes an admin makes on the dashboard take effect on the app's next refresh
+   * (the JWT payload is stale from login time). Falls back to the token's claims.
+   */
+  async profile(
+    current: { sub: string } & Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const user = await this.usersService.findOneOrThrow(current.sub).catch(() => null);
+    if (!user) return current;
+    return {
+      ...current,
+      role: user.role ?? 'viewer',
+      userType: user.userType,
+      permissions: this.extractPermissions(user),
+      permKeys: user.permissions ?? [],
     };
   }
 

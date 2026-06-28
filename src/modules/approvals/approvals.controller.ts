@@ -104,4 +104,15 @@ export class ApprovalsController {
   ) {
     return this.approvals.reject(id, reviewerId, dto.reason);
   }
+
+  @Post(':id/cancel')
+  @ApiOperation({ summary: 'Salesman cancels their own pending request' })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ description: 'Cancelled request' })
+  cancel(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser('sub') userId: string,
+  ) {
+    return this.approvals.cancel(id, userId);
+  }
 }

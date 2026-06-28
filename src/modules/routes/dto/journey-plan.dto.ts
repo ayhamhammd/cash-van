@@ -8,8 +8,10 @@ import {
   IsBoolean,
   IsInt,
   IsOptional,
+  IsString,
   IsUUID,
   Max,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -39,6 +41,34 @@ export class UpsertJourneyPlanDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Admin note for the salesman about this outlet trip',
+    example: 'Owner only accepts deliveries before noon.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  note?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Task the salesman must complete when visiting this outlet',
+    example: 'Collect signed return form and photograph the fridge.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  todo?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Manual visit order within a day (ascending)',
+    default: 0,
+    example: 1,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
 }
 
 class BulkJourneyPlanItemDto extends UpsertJourneyPlanDto {
