@@ -120,11 +120,17 @@ export class OfferRewardDto {
   @IsString({ each: true })
   giftItems?: string[];
 
-  @ApiPropertyOptional({ description: 'GIFT: buy this many of the selected items to earn one free gift.' })
+  @ApiPropertyOptional({ description: 'GIFT: buy this many of the selected items to earn one step of free gifts.' })
   @IsOptional()
   @IsInt()
   @Min(1)
   itemsPerGift?: number;
+
+  @ApiPropertyOptional({ description: 'GIFT: free gifts granted per step (default 1). E.g. itemsPerGift 10 + giftsPerStep 3 → buy 10 get 3.' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  giftsPerStep?: number;
 
   @ApiPropertyOptional({ description: 'GIFT: optional cap on the number of free gifts.' })
   @IsOptional()

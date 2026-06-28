@@ -232,6 +232,33 @@ describe('OffersEngineService', () => {
     ).toHaveLength(0); // below itemsPerGift → nothing
   });
 
+  it('ITEM_QTY_REWARD gift grants giftsPerStep gifts per step (buy 10 → 3)', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: { kind: 'GIFT', giftItems: ['B', 'C'], itemsPerGift: 10, giftsPerStep: 3 },
+    };
+    const free = async (q: number) =>
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: q }]))
+        .appliedOffers[0]?.freeItemChoice?.qty;
+    expect(await free(10)).toBe(3); // 1 step × 3
+    expect(await free(20)).toBe(6); // 2 steps × 3
+    expect(await free(9)).toBeUndefined(); // below the first step → no offer
+  });
+
+  it('ITEM_QTY_REWARD gift respects maxFreeQty with giftsPerStep', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: { kind: 'GIFT', giftItems: ['B'], itemsPerGift: 10, giftsPerStep: 3, maxFreeQty: 3 },
+    };
+    const free = async (q: number) =>
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: q }]))
+        .appliedOffers[0]?.freeItemChoice?.qty;
+    expect(await free(10)).toBe(3); // 3, at cap
+    expect(await free(50)).toBe(3); // 5 steps × 3 = 15, capped at 3
+  });
+
   it('ITEM_QTY_REWARD discount applies % to the selected items only, above minQty', async () => {
     const offer: Partial<Offer> = {
       type: 'ITEM_QTY_REWARD',

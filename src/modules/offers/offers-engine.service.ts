@@ -302,7 +302,9 @@ export class OffersEngineService {
   /** Free-gift count: one per `itemsPerGift` bought, capped at `maxFreeQty`. */
   private giftFreeQty(reward: GiftReward, qty: number): number {
     if (!reward.itemsPerGift || reward.itemsPerGift < 1) return 0;
-    const n = Math.floor(qty / reward.itemsPerGift);
+    const perStep =
+      reward.giftsPerStep && reward.giftsPerStep > 0 ? reward.giftsPerStep : 1;
+    const n = Math.floor(qty / reward.itemsPerGift) * perStep;
     return reward.maxFreeQty != null ? Math.min(n, reward.maxFreeQty) : n;
   }
 
@@ -470,7 +472,8 @@ export class OffersEngineService {
       const on = items.join('/');
       if (r?.kind === 'GIFT') {
         const cap = r.maxFreeQty != null ? ` (max ${r.maxFreeQty})` : '';
-        return `Buy ${on}: 1 gift / ${r.itemsPerGift} bought${cap}, from ${r.giftItems.length} items`;
+        const per = r.giftsPerStep && r.giftsPerStep > 1 ? `${r.giftsPerStep} gifts` : '1 gift';
+        return `Buy ${on}: ${per} / ${r.itemsPerGift} bought${cap}, from ${r.giftItems.length} items`;
       }
       if (r?.kind === 'ITEM_PERCENT_DISCOUNT') {
         const base =

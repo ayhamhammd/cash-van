@@ -101,8 +101,11 @@ export interface GiftReward {
   kind: 'GIFT';
   /** Pool of item numbers the rep may choose the free gift(s) from. */
   giftItems: string[];
-  /** Buy this many of the selected items to earn one free gift. */
+  /** Buy this many of the selected items to earn one step of free gifts. */
   itemsPerGift: number;
+  /** Free gifts granted per step (default 1). E.g. itemsPerGift 10 +
+   *  giftsPerStep 3 → buy 10 → 3 free, buy 20 → 6 free. */
+  giftsPerStep?: number;
   /** Optional cap on the number of free gifts. */
   maxFreeQty?: number;
 }
