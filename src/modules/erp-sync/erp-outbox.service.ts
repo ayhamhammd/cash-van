@@ -7,6 +7,7 @@ import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { Customer } from '../customers/entities/customer.entity';
+import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { SettingsService } from '../settings/settings.service';
 import { ErpHttpClient } from './erp-http.client';
 import { ErpIdMap } from './entities/erp-id-map.entity';
@@ -33,6 +34,7 @@ export class ErpOutboxService {
     @InjectRepository(VoucherTransaction) private readonly lines: Repository<VoucherTransaction>,
     @InjectRepository(Collection) private readonly collections: Repository<Collection>,
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
+    @InjectRepository(SalesmanSettlement) private readonly salesmanSettlements: Repository<SalesmanSettlement>,
   ) {}
 
   /** Queue a van document for push to the ERP (best-effort; never throws to the caller). */
@@ -149,6 +151,7 @@ export class ErpOutboxService {
     if (row.kind === 'STOCK_ADJUSTMENT') return this.buildAdjustment(row.ref);
     // STOCK_TRANSFER is handled as two calls in buildCalls (buildTransferCalls).
     if (row.kind === 'PAYMENT') return this.buildPayment(row.ref);
+    if (row.kind === 'CASH_SETTLEMENT') return this.buildSettlement(row.ref);
     return null;
   }
 
@@ -387,6 +390,33 @@ export class ErpOutboxService {
         },
       },
     ];
+  }
+
+  /**
+   * Build an ERP cash-settlement request from a salesman settlement record.
+   * Records the admin receiving cash from the salesman (internal cash transfer).
+   * The ERP creates a van_cash_settlement financial transaction for accounting.
+   */
+  private async buildSettlement(
+    settlementId: string,
+  ): Promise<{ path: string; body: Record<string, unknown> } | null> {
+    const s = await this.salesmanSettlements.findOne({ where: { id: settlementId } });
+    if (!s) return null;
+    const receivedFils = Number(s.receivedFils);
+    if (receivedFils <= 0) return null; // nothing was handed over — skip ERP entry
+    // Resolve the salesman's van warehouse code via the rep → user code relationship.
+    // The rep_id links to the reps table; query via the rep entity to get the code.
+    const rep = await this.idmap.findOne({ where: { entity: 'rep', localId: s.repId } }).catch(() => null);
+    return {
+      path: 'cash-settlements',
+      body: {
+        externalId: settlementId,
+        deviceId: rep?.erpCode ?? s.repId,
+        amount: receivedFils / 1000, // fils → JOD major
+        date: s.periodTo,
+        note: s.note ?? undefined,
+      },
+    };
   }
 
   private extractResultRef(data: unknown): string | null {

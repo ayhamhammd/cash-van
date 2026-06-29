@@ -67,3 +67,13 @@ export class SettlementsQueryDto {
   @IsDateString()
   to?: string;
 }
+
+export class EodLockQueryDto {
+  @ApiPropertyOptional({
+    description: 'Date to check lock for (YYYY-MM-DD, defaults to today)',
+    example: '2026-06-28',
+  })
+  @IsOptional()
+  @IsDateString()
+  date?: string;
+}

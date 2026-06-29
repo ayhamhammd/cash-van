@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 
+import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
 import { SalesmanSettlement } from './entities/salesman-settlement.entity';
 
 /** One salesman's End-of-Day cash summary over a period (all money in fils). */
@@ -33,6 +34,36 @@ export interface EodResponse {
 export interface Paged<T> {
   items: T[];
   total: number;
+}
+
+export interface SettlementRow {
+  id: string;
+  repId: string;
+  repName: string | null;
+  repCode: string | null;
+  periodFrom: string;
+  periodTo: string;
+  expectedCashFils: string;
+  collectedCashFils: string;
+  collectedChequeFils: string;
+  cashSalesFils: string;
+  creditSalesFils: string;
+  cashReturnsFils: string;
+  totalDiscountFils: string;
+  previousBalanceFils: string;
+  receivedFils: string;
+  newBalanceFils: string;
+  note: string | null;
+  createdByUserId: string | null;
+  createdAt: Date;
+}
+
+export interface EodLockResult {
+  locked: boolean;
+  lockedSince?: string;
+  periodFrom?: string;
+  periodTo?: string;
+  settlementId?: string;
 }
 
 export interface BestItemRow {
@@ -151,6 +182,7 @@ export class ReportsService {
     @InjectDataSource() private readonly ds: DataSource,
     @InjectRepository(SalesmanSettlement)
     private readonly settlements: Repository<SalesmanSettlement>,
+    private readonly erpOutbox: ErpOutboxService,
   ) {}
 
   // ── End-of-Day cash reconciliation ─────────────────────────────────────────
@@ -326,23 +358,87 @@ export class ReportsService {
         createdByUserId: userId ?? null,
       }),
     );
+    // Queue the accounting entry to the ERP (best-effort, non-blocking).
+    await this.erpOutbox.enqueue('CASH_SETTLEMENT', saved.id);
     return saved;
   }
 
-  /** Settlement history (audit / the carried "additional" per salesman). */
+  /** Settlement history with rep name/code (for the dedicated history page). */
   async listSettlements(q: {
     repId?: string;
     from?: string;
     to?: string;
-  }): Promise<SalesmanSettlement[]> {
-    const qb = this.settlements
-      .createQueryBuilder('s')
-      .orderBy('s.created_at', 'DESC')
-      .take(200);
-    if (q.repId) qb.andWhere('s.rep_id = :r', { r: q.repId });
-    if (q.from) qb.andWhere('s.period_to >= :f', { f: q.from });
-    if (q.to) qb.andWhere('s.period_from <= :t', { t: q.to });
-    return qb.getMany();
+  }): Promise<SettlementRow[]> {
+    // DataSource.query() requires PostgreSQL positional params ($1, $2…), not named ones.
+    const conditions: string[] = [];
+    const params: string[] = [];
+
+    if (q.repId) { params.push(q.repId);  conditions.push(`s.rep_id = $${params.length}`); }
+    if (q.from)  { params.push(q.from);   conditions.push(`s.period_to >= $${params.length}`); }
+    if (q.to)    { params.push(q.to);     conditions.push(`s.period_from <= $${params.length}`); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    return this.ds.query<SettlementRow[]>(
+      `SELECT
+         s.id,
+         s.rep_id                AS "repId",
+         r.name_ar               AS "repName",
+         r.code                  AS "repCode",
+         s.period_from           AS "periodFrom",
+         s.period_to             AS "periodTo",
+         s.expected_cash_fils    AS "expectedCashFils",
+         s.collected_cash_fils   AS "collectedCashFils",
+         s.collected_cheque_fils AS "collectedChequeFils",
+         s.cash_sales_fils       AS "cashSalesFils",
+         s.credit_sales_fils     AS "creditSalesFils",
+         s.cash_returns_fils     AS "cashReturnsFils",
+         s.total_discount_fils   AS "totalDiscountFils",
+         s.previous_balance_fils AS "previousBalanceFils",
+         s.received_fils         AS "receivedFils",
+         s.new_balance_fils      AS "newBalanceFils",
+         s.note,
+         s.created_by_user_id    AS "createdByUserId",
+         s.created_at            AS "createdAt"
+       FROM salesman_settlement s
+       LEFT JOIN reps r ON r.id = s.rep_id
+       ${where}
+       ORDER BY s.created_at DESC
+       LIMIT 200`,
+      params,
+    );
+  }
+
+  /**
+   * Check whether a rep's day is locked for new transactions.
+   * A day is locked when a settlement covers it (period_from ≤ date ≤ period_to).
+   * The mobile app calls this before allowing the salesman to create a voucher,
+   * return, or collection.
+   */
+  async getEodLock(repId: string, date?: string): Promise<EodLockResult> {
+    const checkDate = date ?? new Date().toISOString().slice(0, 10);
+    const rows = await this.ds.query<Array<{
+      id: string;
+      createdAt: Date;
+      periodFrom: string;
+      periodTo: string;
+    }>>(
+      `SELECT id, created_at AS "createdAt", period_from AS "periodFrom", period_to AS "periodTo"
+       FROM salesman_settlement
+       WHERE rep_id = $1 AND period_from <= $2 AND period_to >= $2
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [repId, checkDate],
+    );
+    if (!rows.length) return { locked: false };
+    const s = rows[0];
+    return {
+      locked: true,
+      lockedSince: s.createdAt.toISOString(),
+      periodFrom: s.periodFrom,
+      periodTo: s.periodTo,
+      settlementId: s.id,
+    };
   }
 
   /** Best-selling items from posted SALE voucher lines (by quantity), optionally within N days. */
