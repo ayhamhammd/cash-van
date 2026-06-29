@@ -166,18 +166,33 @@ export class VouchersService {
       }
 
       // 3) free lines → appended as their own line at real price, 100% discount.
+      //    The engine returns one entry per gift pick, so collapse to a single line
+      //    per item with the summed qty (e.g. "3 × water", not three "1 × water"
+      //    rows). Mirror the matching sold line's name + unit so the gift reads the
+      //    same as what the customer bought (Arabic name + "حبة"), not the legacy
+      //    English fallback / default "Piece" — the gift is the same product the rep
+      //    sold in the dominant buy-X-get-Y-of-the-same-item case. unitBaseQty stays
+      //    1: the gift qty is already in base pieces (keeps the stock math correct).
       if (result.freeLines.length) {
-        const names = await this.loadItemNames(
-          result.freeLines.map((f) => f.itemNumber),
-        );
         const saleStore = dto.transactions.find((t) => t.storeNumber)
           ?.storeNumber;
+        const byItem = new Map<string, { qty: number; unitPriceFils: number }>();
         for (const f of result.freeLines) {
+          const acc = byItem.get(f.itemNumber);
+          if (acc) acc.qty += f.qty;
+          else byItem.set(f.itemNumber, { qty: f.qty, unitPriceFils: f.unitPriceFils });
+        }
+        const items = await this.loadGiftItems([...byItem.keys()]);
+        for (const [itemNumber, g] of byItem) {
+          const sold = dto.transactions.find((t) => t.itemNumber === itemNumber);
+          const item = items.get(itemNumber);
           dto.transactions.push({
-            itemNumber: f.itemNumber,
-            itemName: names.get(f.itemNumber) ?? f.itemNumber,
-            itemQty: String(f.qty),
-            unitPrice: (f.unitPriceFils / 1000).toFixed(3),
+            itemNumber,
+            itemName: sold?.itemName ?? item?.nameAr ?? item?.name ?? itemNumber,
+            itemQty: String(g.qty),
+            unitPrice: (g.unitPriceFils / 1000).toFixed(3),
+            unitCode: sold?.unitCode,
+            unitName: sold?.unitName ?? item?.unit,
             discountPercentage: '100',
             discountValue: '0',
             unitBaseQty: 1,
@@ -199,15 +214,20 @@ export class VouchersService {
     }
   }
 
-  private async loadItemNames(
+  /**
+   * Load name + unit for gift items not present in the cart, so a server-added free
+   * line can show the Arabic name + unit (matching the dashboard) instead of the
+   * legacy English `item_name`. Keyed by itemNumber.
+   */
+  private async loadGiftItems(
     itemNumbers: string[],
-  ): Promise<Map<string, string>> {
+  ): Promise<Map<string, ItemCart>> {
     const unique = [...new Set(itemNumbers)];
     if (!unique.length) return new Map();
     const items = await this.dataSource
       .getRepository(ItemCart)
       .find({ where: { itemNumber: In(unique) } });
-    return new Map(items.map((i) => [i.itemNumber, i.name ?? i.itemNumber]));
+    return new Map(items.map((i) => [i.itemNumber, i]));
   }
 
   /**
