@@ -64,15 +64,12 @@ export const envValidationSchema = Joi.object({
   AGENT_SQL_ROW_LIMIT: Joi.number().default(5000),
   AGENT_SQL_TIMEOUT_MS: Joi.number().default(15000),
 
-  // Read-only Postgres role for the agent's generated SQL. Required in
-  // production; in dev it falls back to the main DB creds (read-only tx still
-  // enforced) so you can try the agent without provisioning a role first.
+  // Read-only Postgres role for the agent's generated SQL. Optional at boot —
+  // ReadonlyDbService falls back to the main DB creds (read-only transaction
+  // still enforced) and logs a warning when it's unset, so a missing dedicated
+  // role degrades the agent gracefully instead of crashing the whole API on
+  // start. Provision `report_agent` + set REPORT_DB_PASSWORD for stricter prod
+  // isolation.
   REPORT_DB_USER: Joi.string().default('report_agent'),
-  REPORT_DB_PASSWORD: Joi.string()
-    .allow('')
-    .when('NODE_ENV', {
-      is: 'production',
-      then: Joi.string().min(1).required(),
-      otherwise: Joi.optional(),
-    }),
+  REPORT_DB_PASSWORD: Joi.string().allow('').optional(),
 });
