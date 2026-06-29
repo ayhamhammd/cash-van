@@ -19,7 +19,6 @@ import { Rep } from '../../modules/reps/entities/rep.entity';
 import { Customer } from '../../modules/customers/entities/customer.entity';
 import { VoucherHeader } from '../../modules/vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../../modules/vouchers/entities/voucher-transaction.entity';
-import { Offer } from '../../modules/offers/entities/offer.entity';
 
 /**
  * Demo seed: "مشروبات الأردن" — a Jordan drinks distribution company.
@@ -359,80 +358,14 @@ async function seed(): Promise<void> {
       }
     }
 
-    // ── demo offers (payment-method, percentage per line) ─────────────────
-    // Money is fils. basePercent/maxPercent are 0–100. Legality is enforced by
-    // OffersService.validateConfig (mirrored here). Upserted by name.
-    const offerRepo = m.getRepository(Offer);
-    const offerDefs: Array<Partial<Offer>> = [
-      {
-        name: 'دفع نقدي — خصم 5%',
-        description: 'خصم 5% على كل صنف عند الدفع نقداً لفواتير 10 دنانير فأكثر',
-        type: 'PAYMENT_METHOD_DISCOUNT',
-        trigger: { paymentCondition: 'CASH', minOrderTotal: 10000 },
-        reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 5, mode: 'STATIC' },
-        eligibility: { customerScope: 'ALL' },
-        priority: 10,
-        stackable: false,
-        isActive: true,
-      },
-      {
-        name: 'دفع آجل — خصم متصاعد',
-        description: 'خصم 10% يتصاعد مع الكمية عند الدفع الآجل (×0.5 لكل 6 أصناف، حتى 25%)',
-        type: 'PAYMENT_METHOD_DISCOUNT',
-        trigger: { paymentCondition: 'CREDIT', minItemCount: 6 },
-        reward: {
-          kind: 'LINE_PERCENT_DISCOUNT',
-          basePercent: 10,
-          mode: 'DYNAMIC',
-          multiplier: 0.5,
-          itemsPerStep: 6,
-          maxPercent: 25,
-        },
-        eligibility: { customerScope: 'ALL' },
-        priority: 9,
-        stackable: false,
-        isActive: true,
-      },
-      {
-        name: 'اشترِ كولا — هدية بالاختيار',
-        description: 'هدية واحدة لكل 10 كولا (تختار من مياه/مانجو)',
-        type: 'ITEM_QTY_REWARD',
-        trigger: { itemNumbers: ['COLA-330'] },
-        reward: {
-          kind: 'GIFT',
-          giftItems: ['WATER-330', 'MANGO-250'],
-          itemsPerGift: 10,
-        },
-        eligibility: { customerScope: 'ALL' },
-        priority: 8,
-        stackable: false,
-        isActive: true,
-      },
-      {
-        name: 'خصم كمية بيبسي — 10%',
-        description: 'اشترِ 12 بيبسي أو أكثر = خصم 10% على البيبسي',
-        type: 'ITEM_QTY_REWARD',
-        trigger: { itemNumbers: ['PEPSI-330'] },
-        reward: {
-          kind: 'ITEM_PERCENT_DISCOUNT',
-          minQty: 12,
-          basePercent: 10,
-          mode: 'STATIC',
-        },
-        eligibility: { customerScope: 'ALL' },
-        priority: 7,
-        stackable: false,
-        isActive: true,
-      },
-    ];
-    for (const o of offerDefs) {
-      await upsert(offerRepo, { name: o.name }, o);
-    }
+    // Offers are NOT seeded: this is a live single-tenant deployment, so the
+    // company manages its own offers from the dashboard. Re-seeding them here
+    // would resurrect (un-soft-delete) offers the user intentionally removed.
 
     await qr.commitTransaction();
     // eslint-disable-next-line no-console
     console.log(
-      `Seed completed: ${drinks.length} products, ${repDefs.length} reps, ${custDefs.length} customers, ${regionDefs.length} regions, ${offerDefs.length} offers.`,
+      `Seed completed: ${drinks.length} products, ${repDefs.length} reps, ${custDefs.length} customers, ${regionDefs.length} regions.`,
     );
   } catch (err) {
     await qr.rollbackTransaction();
