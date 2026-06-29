@@ -94,12 +94,18 @@ export class MobileService {
       ? await this.categories.findOne({ where: { id: item.categoryId } })
       : null;
 
-    // Base stock for this item on the salesman's van comes from van_stock (the
-    // VanFlow per-rep load), not the legacy posted-voucher item_balance view.
-    const v = await this.vanStock.findOne({
-      where: { repId: rep.id, productId: item.id },
-    });
-    const baseVanQty = v?.quantity ?? 0;
+    // Base stock for this item on the salesman's van — read from the posted-voucher
+    // `item_balance` ledger for the rep's van store, the single source of truth shared
+    // with the dashboard and the SALE stock check.
+    const vanStoreNumber = rep.vanId
+      ? (await this.warehouses.findOne({ where: { id: rep.vanId } }))?.whNumber ?? null
+      : null;
+    const bal = vanStoreNumber
+      ? await this.balances.findOne({
+          where: { itemNumber: item.itemNumber, stockNumber: vanStoreNumber },
+        })
+      : null;
+    const baseVanQty = bal ? Math.trunc(Number(bal.qty)) : 0;
 
     // Per-item unit mappings come from item_units; the conversion factor lives
     // on the unit master (`unit.baseQty`). PCE = base = 1.
@@ -143,12 +149,24 @@ export class MobileService {
   async getVanStock(
     rep: Rep,
   ): Promise<Array<Record<string, unknown>>> {
-    const vsRows = await this.vanStock.find({ where: { repId: rep.id } });
-    if (vsRows.length === 0) return [];
-    const itemIds = vsRows.map((v) => v.productId);
+    // On-van inventory = the posted-voucher `item_balance` ledger for the rep's van
+    // store (same source as the dashboard + SALE stock check). Stock appears here
+    // once a load/transfer voucher into the van is posted.
+    const store = rep.vanId
+      ? (await this.warehouses.findOne({ where: { id: rep.vanId } }))?.whNumber ?? null
+      : null;
+    if (!store) return [];
 
-    const items = await this.items.find({ where: { id: In(itemIds) } });
-    const itemById = new Map(items.map((i) => [i.id, i]));
+    const balRows = await this.balances.find({ where: { stockNumber: store } });
+    const loaded = balRows.filter((b) => Number(b.qty) !== 0);
+    if (loaded.length === 0) return [];
+
+    const itemNumbers = loaded.map((b) => b.itemNumber);
+    const items = await this.items.find({
+      where: { itemNumber: In(itemNumbers), deletedAt: IsNull() },
+    });
+    const itemByNumber = new Map(items.map((i) => [i.itemNumber, i]));
+    const itemIds = items.map((i) => i.id);
 
     const ius = await this.itemUnitsRepo.find({
       where: { itemId: In(itemIds) },
@@ -172,12 +190,12 @@ export class MobileService {
     }
 
     const out: Array<Record<string, unknown>> = [];
-    for (const v of vsRows) {
-      const item = itemById.get(v.productId);
+    for (const b of loaded) {
+      const item = itemByNumber.get(b.itemNumber);
       if (!item) continue;
       out.push({
         ...item,
-        quantity: v.quantity,
+        quantity: Math.trunc(Number(b.qty)),
         units: unitsByItem.get(item.id) ?? [],
       });
     }
@@ -187,67 +205,27 @@ export class MobileService {
   async getItemBalance(
     itemNumber: string,
     storeNo: string | undefined,
-    rep: Rep,
+    _rep: Rep,
     companyNumber: string,
     salesmanCode: string,
   ): Promise<ItemBalanceRowDto[]> {
-    // Resolve the rep's van store number (e.g. "4") and the catalog row (we
-    // need its UUID id to look up van_stock).
-    const vanStoreNumber = rep.vanId
-      ? (await this.warehouses.findOne({ where: { id: rep.vanId } }))?.whNumber ?? null
-      : null;
-    const item = await this.items.findOne({
-      where: { itemNumber, deletedAt: IsNull() },
-    });
+    // Single source of truth: the posted-voucher `item_balance` ledger — the SAME
+    // table the dashboard and the SALE stock check read, so device and server agree.
+    // (Stock lands in a store/van only after a posted load/transfer voucher.)
+    const qb = this.balances
+      .createQueryBuilder('b')
+      .where('b.item_number = :itemNumber', { itemNumber })
+      .andWhere('b.stock_number IS NOT NULL');
+    if (storeNo) qb.andWhere('b.stock_number = :s', { s: storeNo });
+    const rows = await qb.orderBy('b.stock_number', 'ASC').getMany();
 
-    const wantVan = !!vanStoreNumber && (!storeNo || storeNo === vanStoreNumber);
-    const wantOther = !storeNo || storeNo !== vanStoreNumber;
-    const out: ItemBalanceRowDto[] = [];
-
-    // 1. Non-van stores from the legacy item_balance view (posted vouchers).
-    if (wantOther) {
-      const qb = this.balances
-        .createQueryBuilder('b')
-        .where('b.item_number = :itemNumber', { itemNumber })
-        .andWhere('b.stock_number IS NOT NULL');
-      if (storeNo) {
-        qb.andWhere('b.stock_number = :s', { s: storeNo });
-      } else if (vanStoreNumber) {
-        // No filter: exclude the van so van_stock is the single source for it.
-        qb.andWhere('b.stock_number <> :van', { van: vanStoreNumber });
-      }
-      const rows = await qb.orderBy('b.stock_number', 'ASC').getMany();
-      for (const r of rows) {
-        out.push({
-          companyNumber,
-          salesmanCode,
-          itemNumber: r.itemNumber,
-          itemQty: String(Math.trunc(Number(r.qty))),
-          storeNumber: r.stockNumber as string,
-        });
-      }
-    }
-
-    // 2. Van store from van_stock (per-rep load).
-    if (wantVan && item) {
-      const v = await this.vanStock.findOne({
-        where: { repId: rep.id, productId: item.id },
-      });
-      const qty = v?.quantity ?? 0;
-      // Include the van row when explicitly asked, or whenever it has stock.
-      if (storeNo === vanStoreNumber || qty > 0) {
-        out.push({
-          companyNumber,
-          salesmanCode,
-          itemNumber,
-          itemQty: String(qty),
-          storeNumber: vanStoreNumber as string,
-        });
-      }
-    }
-
-    out.sort((a, b) => a.storeNumber.localeCompare(b.storeNumber));
-    return out;
+    return rows.map((r) => ({
+      companyNumber,
+      salesmanCode,
+      itemNumber: r.itemNumber,
+      itemQty: String(Math.trunc(Number(r.qty))),
+      storeNumber: r.stockNumber as string,
+    }));
   }
 }
 
