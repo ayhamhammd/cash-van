@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
@@ -15,6 +15,7 @@ import {
 } from './dto/reports-query.dto';
 import {
   EndOfDayQueryDto,
+  EodLockQueryDto,
   SettleEndOfDayDto,
   SettlementsQueryDto,
 } from './dto/end-of-day.dto';
@@ -142,9 +143,29 @@ export class ReportsController {
 
   @Get('end-of-day/settlements')
   @Roles('admin', 'manager')
-  @ApiOperation({ summary: 'Settlement history', description: 'Past End-of-Day settlements (newest first).' })
-  @ApiOkResponse({ description: 'SalesmanSettlement[]' })
+  @ApiOperation({ summary: 'Settlement history', description: 'Past End-of-Day settlements with rep name (newest first).' })
+  @ApiOkResponse({ description: 'SettlementRow[]' })
   settlements(@Query() q: SettlementsQueryDto) {
     return this.reports.listSettlements(q);
+  }
+
+  /**
+   * EOD lock check — called by the mobile app before creating any transaction.
+   * If locked=true the salesman may not post vouchers, returns, or collections
+   * for the locked date until the admin unlocks or a new day begins.
+   * Accessible to any authenticated user (salesman JWT included).
+   */
+  @Get('eod-lock/:repId')
+  @ApiOperation({
+    summary: 'Check EOD lock for a salesman',
+    description:
+      'Returns locked=true when the salesman has a settled End-of-Day covering the given date (defaults to today). The mobile app calls this before allowing new transactions.',
+  })
+  @ApiOkResponse({ description: '{ locked, lockedSince?, periodFrom?, periodTo?, settlementId? }' })
+  eodLock(
+    @Param('repId') repId: string,
+    @Query() q: EodLockQueryDto,
+  ) {
+    return this.reports.getEodLock(repId, q.date);
   }
 }

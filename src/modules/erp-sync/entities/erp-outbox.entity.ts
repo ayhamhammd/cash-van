@@ -13,7 +13,8 @@ export type ErpOutboxKind =
   | 'SALES_ORDER'
   | 'STOCK_ADJUSTMENT'
   | 'STOCK_TRANSFER'
-  | 'PAYMENT';
+  | 'PAYMENT'
+  | 'CASH_SETTLEMENT';
 export type ErpOutboxStatus = 'pending' | 'posted' | 'failed' | 'dead_letter';
 
 /** Outbound queue: van transactions to push to the ERP (idempotent by `ref`). */
