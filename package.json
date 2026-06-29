@@ -24,7 +24,7 @@
     "migration:run:prod": "typeorm migration:run -d dist/database/data-source.js",
     "seed": "ts-node src/database/seeds/run.ts",
     "seed:prod": "node dist/database/seeds/run.js",
-    "start:deploy": "npm run migration:run:prod && npm run seed:prod && node dist/main.js"
+    "start:deploy": "npm run migration:run:prod && (npm run seed:prod || true) && node dist/main.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
