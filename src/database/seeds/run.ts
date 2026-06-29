@@ -17,7 +17,8 @@ import { ItemCart } from '../../modules/items/entities/item-cart.entity';
 import { Region } from '../../modules/regions/entities/region.entity';
 import { Rep } from '../../modules/reps/entities/rep.entity';
 import { Customer } from '../../modules/customers/entities/customer.entity';
-import { VanStock } from '../../modules/products/entities/van-stock.entity';
+import { VoucherHeader } from '../../modules/vouchers/entities/voucher-header.entity';
+import { VoucherTransaction } from '../../modules/vouchers/entities/voucher-transaction.entity';
 import { Offer } from '../../modules/offers/entities/offer.entity';
 
 /**
@@ -295,8 +296,22 @@ async function seed(): Promise<void> {
       );
     }
 
-    // ── van stock (load each van) ────────────────────────────────────────
-    const vsRepo = m.getRepository(VanStock);
+    // ── van stock: load each van via a POSTED "IN" voucher ───────────────
+    // Stock is the posted-voucher `item_balance` ledger (single source of truth
+    // for mobile + dashboard + the SALE stock check). So loading a van means
+    // posting an inbound voucher (to_store_number = van), not writing van_stock.
+    // Idempotent: one header per van (fixed number), transactions upserted per item.
+    const headerRepo = m.getRepository(VoucherHeader);
+    const txnRepo = m.getRepository(VoucherTransaction);
+    const repVan: Record<string, string> = {};
+    const repUser: Record<string, string> = {};
+    for (const r of repDefs) {
+      repVan[r.code] = r.van;
+      repUser[r.code] = r.userNumber;
+    }
+    const nameBySku: Record<string, string> = {};
+    for (const d of drinks) nameBySku[d.sku] = d.nameEn;
+
     const load: Record<string, Array<{ sku: string; qty: number }>> = {
       'S-101': [
         { sku: 'COLA-330', qty: 120 }, { sku: 'PEPSI-330', qty: 96 },
@@ -307,6 +322,7 @@ async function seed(): Promise<void> {
         { sku: 'COLA-1L', qty: 60 }, { sku: 'SPRITE-330', qty: 80 },
         { sku: 'WATER-1.5L', qty: 100 }, { sku: 'AJ-1L', qty: 24 },
         { sku: 'MANGO-250', qty: 40 }, { sku: 'COFFEE-240', qty: 12 },
+        { sku: 'ICETEA-330', qty: 60 },
       ],
       'S-103': [
         { sku: 'WATER-330', qty: 240 }, { sku: 'COLA-330', qty: 60 },
@@ -315,15 +331,29 @@ async function seed(): Promise<void> {
       ],
     };
     for (const [repCode, lines] of Object.entries(load)) {
+      const van = repVan[repCode];
+      const voucherNumber = `LOAD-${van}`;
+      await upsert(
+        headerRepo,
+        { voucherNumber },
+        {
+          voucherNumber,
+          userCode: repUser[repCode],
+          transKind: 'IN',
+          isPosted: true,
+        },
+      );
       for (const ln of lines) {
         await upsert(
-          vsRepo,
-          { repId: repId[repCode], productId: productId[ln.sku] },
+          txnRepo,
+          { voucherNumber, itemNumber: ln.sku },
           {
-            repId: repId[repCode],
-            productId: productId[ln.sku],
-            quantity: ln.qty,
-            loadedAt: new Date(),
+            voucherNumber,
+            itemNumber: ln.sku,
+            itemName: nameBySku[ln.sku] ?? ln.sku,
+            transKind: 'IN',
+            toStoreNumber: van,   // inbound → item_balance(van) gains qty
+            itemQty: String(ln.qty),
           },
         );
       }
