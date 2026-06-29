@@ -158,7 +158,13 @@ export class VouchersService implements OnModuleInit {
     // (the approving manager re-runs create() under their own role). Runs BEFORE
     // offers so system-granted offer discounts bypass the manual-discount gate.
     await this.enforceSalesmanPolicy(dto);
+    // Server-authoritative offers: bake per-line discounts and gift free-lines
+    // into the dto BEFORE the voucher is built, so gifts post as real lines and
+    // their stock moves. MUST run before createUnchecked (was previously dead
+    // code after an early return, so offers never applied on posted sales).
+    const offerResult = await this.applyOffers(dto);
     const result = await this.createUnchecked(dto);
+    await this.recordOfferRedemptions(result, offerResult);
     // Mirror posted vouchers to the ERP (ErpSync listener filters by kind + enqueues
     // an outbox push; no-op when ERP off). Stock IN/OUT adjustments aren't mirrored.
     if (result.isPosted) {
@@ -168,10 +174,6 @@ export class VouchersService implements OnModuleInit {
       });
     }
     return result;
-    const offerResult = await this.applyOffers(dto);
-    const header = await this.createUnchecked(dto);
-    await this.recordOfferRedemptions(header, offerResult);
-    return header;
   }
 
   /**
