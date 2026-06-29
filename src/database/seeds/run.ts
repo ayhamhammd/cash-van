@@ -30,14 +30,25 @@ async function seed(): Promise<void> {
   await qr.connect();
   await qr.startTransaction();
 
-  /** Find-or-create on a natural key. */
+  /**
+   * Find-or-create on a natural key. Looks at soft-deleted rows too: a row that
+   * was soft-deleted (e.g. a demo item removed from the dashboard) still occupies
+   * its UNIQUE key, so a plain insert would throw a duplicate-key error and crash
+   * the deploy's seed step. When we find a soft-deleted match we recover it so
+   * re-seeding stays idempotent instead of failing.
+   */
   async function upsert<T extends ObjectLiteral>(
     repo: Repository<T>,
     where: FindOptionsWhere<NoInfer<T>>,
     data: DeepPartial<NoInfer<T>>,
   ): Promise<T> {
-    const found = await repo.findOne({ where });
-    if (found) return found;
+    const found = await repo.findOne({ where, withDeleted: true });
+    if (found) {
+      if ((found as { deletedAt?: Date | null }).deletedAt) {
+        await repo.recover(found);
+      }
+      return found;
+    }
     return repo.save(repo.create(data));
   }
 
