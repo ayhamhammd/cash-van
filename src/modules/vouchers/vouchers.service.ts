@@ -231,13 +231,30 @@ export class VouchersService implements OnModuleInit {
       }
 
       // 3) free lines → appended as their own line at real price, 100% discount.
+      // The engine emits one qty-1 line per gift pick; merge them by item so the
+      // same gift posts as a single "× N" line (like the paid lines) instead of N
+      // repeated rows.
       if (result.freeLines.length) {
         const names = await this.loadItemNames(
           result.freeLines.map((f) => f.itemNumber),
         );
         const saleStore = dto.transactions.find((t) => t.storeNumber)
           ?.storeNumber;
+        const merged = new Map<
+          string,
+          { itemNumber: string; unitPriceFils: number; qty: number }
+        >();
         for (const f of result.freeLines) {
+          const m = merged.get(f.itemNumber);
+          if (m) m.qty += f.qty;
+          else
+            merged.set(f.itemNumber, {
+              itemNumber: f.itemNumber,
+              unitPriceFils: f.unitPriceFils,
+              qty: f.qty,
+            });
+        }
+        for (const f of merged.values()) {
           dto.transactions.push({
             itemNumber: f.itemNumber,
             itemName: names.get(f.itemNumber) ?? f.itemNumber,
@@ -272,7 +289,11 @@ export class VouchersService implements OnModuleInit {
     const items = await this.dataSource
       .getRepository(ItemCart)
       .find({ where: { itemNumber: In(unique) } });
-    return new Map(items.map((i) => [i.itemNumber, i.name ?? i.itemNumber]));
+    // Prefer the Arabic name so gift lines read the same as the paid lines the app
+    // sends (e.g. "مياه 1.5 لتر", not the English "Water 1.5L").
+    return new Map(
+      items.map((i) => [i.itemNumber, i.nameAr ?? i.name ?? i.itemNumber]),
+    );
   }
 
   /**
