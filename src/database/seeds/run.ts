@@ -37,10 +37,15 @@ async function seed(): Promise<void> {
    * its UNIQUE key, so a plain insert would throw a duplicate-key error and crash
    * the deploy's seed step. When we find a soft-deleted match we recover it so
    * re-seeding stays idempotent instead of failing.
+   *
+   * [where] may be an array of conditions (OR): pass every UNIQUE key of the entity
+   * so an existing row is found no matter which key already holds — e.g. a rep has
+   * both `user_id` and `code` unique, and matching on only one lets an insert collide
+   * on the other.
    */
   async function upsert<T extends ObjectLiteral>(
     repo: Repository<T>,
-    where: FindOptionsWhere<NoInfer<T>>,
+    where: FindOptionsWhere<NoInfer<T>> | FindOptionsWhere<NoInfer<T>>[],
     data: DeepPartial<NoInfer<T>>,
   ): Promise<T> {
     const found = await repo.findOne({ where, withDeleted: true });
@@ -239,9 +244,12 @@ async function seed(): Promise<void> {
           canEditExpiry: false,
         },
       );
+      // Match on BOTH unique keys (user_id and code): the live DB may hold a rep for
+      // this user under a different code (renamed via dashboard/ERP), so a code-only
+      // lookup would miss it and the insert would collide on idx_reps_user_id.
       const rep = await upsert(
         repRepo,
-        { code: r.code },
+        [{ userId: u.id }, { code: r.code }],
         {
           code: r.code,
           nameAr: r.nameAr,
