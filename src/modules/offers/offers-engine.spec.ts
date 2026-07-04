@@ -18,7 +18,11 @@ describe('OffersEngineService', () => {
     getCount: async () => 0,
   };
 
-  function makeEngine(offers: Partial<Offer>[]): OffersEngineService {
+  function makeEngine(
+    offers: Partial<Offer>[],
+    taxCalcMethod: 'INCLUSIVE' | 'EXCLUSIVE' = 'EXCLUSIVE',
+    itemList: typeof items = items,
+  ): OffersEngineService {
     const full = offers.map((o, i) => ({
       id: o.id ?? `off-${i}`,
       name: o.name ?? `offer ${i}`,
@@ -43,9 +47,12 @@ describe('OffersEngineService', () => {
 
     const offersRepo = { find: jest.fn().mockResolvedValue(full) } as any;
     const redemptionsRepo = { createQueryBuilder: jest.fn(() => chain) } as any;
-    const itemsRepo = { find: jest.fn().mockResolvedValue(items) } as any;
+    const itemsRepo = { find: jest.fn().mockResolvedValue(itemList) } as any;
     const customersRepo = { findOne: jest.fn().mockResolvedValue(null) } as any;
     const vouchersRepo = { createQueryBuilder: jest.fn(() => chain) } as any;
+    const settingsRepo = {
+      findOne: jest.fn().mockResolvedValue({ id: 1, taxCalcMethod }),
+    } as any;
 
     return new OffersEngineService(
       offersRepo,
@@ -53,6 +60,7 @@ describe('OffersEngineService', () => {
       itemsRepo,
       customersRepo,
       vouchersRepo,
+      settingsRepo,
     );
   }
 
@@ -77,6 +85,24 @@ describe('OffersEngineService', () => {
     expect(b.lineDiscountFils).toBe(50); // 1000 × 5%
     expect(res.totals.lineDiscountFils).toBe(250);
     expect(res.appliedOffers).toHaveLength(1);
+  });
+
+  it('honours the company tax mode: INCLUSIVE extracts tax, EXCLUSIVE adds it on top', async () => {
+    // One unit at 1150 fils, 15% tax.
+    const taxed = [
+      { itemNumber: 'A', price: 1150, taxPercentage: '15', name: 'A', nameEn: 'A' },
+    ];
+    const line = [{ itemNumber: 'A', qty: 1 }];
+
+    // INCLUSIVE: 1150 already includes tax → net stays 1150, tax extracted = 150.
+    const inc = await makeEngine([], 'INCLUSIVE', taxed).evaluate(line, {});
+    expect(inc.totals.taxFils).toBe(150);
+    expect(inc.totals.grandTotalFils).toBe(1150);
+
+    // EXCLUSIVE: tax added on top → 1150 + round(172.5)=173.
+    const exc = await makeEngine([], 'EXCLUSIVE', taxed).evaluate(line, {});
+    expect(exc.totals.taxFils).toBe(173);
+    expect(exc.totals.grandTotalFils).toBe(1323);
   });
 
   it('treats any non-CREDIT payment as cash, but not CREDIT', async () => {

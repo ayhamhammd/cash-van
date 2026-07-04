@@ -6,6 +6,7 @@ import { roundFils } from '../../common/utils/currency.util';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
+import { AppSettings } from '../settings/entities/app-settings.entity';
 import { Offer } from './entities/offer.entity';
 import { OfferRedemption } from './entities/offer-redemption.entity';
 import type {
@@ -54,6 +55,8 @@ export class OffersEngineService {
     private readonly customersRepo: Repository<Customer>,
     @InjectRepository(VoucherHeader)
     private readonly vouchersRepo: Repository<VoucherHeader>,
+    @InjectRepository(AppSettings)
+    private readonly settingsRepo: Repository<AppSettings>,
   ) {}
 
   async evaluate(
@@ -255,6 +258,13 @@ export class OffersEngineService {
       });
     }
 
+    // Honour the company tax mode (mirrors the ERP): INCLUSIVE prices already
+    // contain tax (extract it, don't add on top), EXCLUSIVE adds it on top. Same
+    // rule as the voucher calc + the app's LocalOfferEvaluator — otherwise the
+    // sale screen shows tax added on top even for an inclusive-priced company.
+    const settingsRow = await this.settingsRepo.findOne({ where: { id: 1 } });
+    const taxInclusive = settingsRow?.taxCalcMethod === 'INCLUSIVE';
+
     // Clamp per-line discount to the line gross, then build the response.
     const resultLines: EvaluatedLine[] = [];
     let lineDiscountTotal = 0;
@@ -264,7 +274,9 @@ export class OffersEngineService {
       const discount = Math.min(l.discountFils, gross);
       const net = gross - discount;
       lineDiscountTotal += discount;
-      taxFils += roundFils(net * (l.taxPct / 100));
+      taxFils += taxInclusive
+        ? net - (l.taxPct > 0 ? roundFils((net * 100) / (100 + l.taxPct)) : net)
+        : roundFils(net * (l.taxPct / 100));
       resultLines.push({
         itemNumber,
         qty: l.qty,
@@ -280,8 +292,12 @@ export class OffersEngineService {
       invoiceDiscountFils,
       netBeforeInvoiceDiscount,
     );
+    // INCLUSIVE: tax is already inside the net, so the grand total is just the
+    // net (tax is reported for information). EXCLUSIVE: tax is added on top.
     const grandTotalFils =
-      netBeforeInvoiceDiscount + taxFils - clampedInvoiceDiscount;
+      netBeforeInvoiceDiscount +
+      (taxInclusive ? 0 : taxFils) -
+      clampedInvoiceDiscount;
 
     return {
       lines: resultLines,
