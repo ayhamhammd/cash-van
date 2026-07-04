@@ -53,6 +53,14 @@ export class RepStatusService {
     const appState = dto.appState ?? 'active';
     const now = new Date();
 
+    // Capture the prior GPS state + alert timestamp BEFORE mutating `next` —
+    // when `prev` exists, `next` is the same object reference, so writing
+    // `next.gpsEnabled` below would otherwise overwrite what we compare against.
+    const prevGps: boolean | null = prev?.gpsEnabled ?? null;
+    const prevGpsAlertedMs = prev?.gpsAlertedAt
+      ? new Date(prev.gpsAlertedAt).getTime()
+      : 0;
+
     const next: RepStatus =
       prev ??
       this.statuses.create({
@@ -67,16 +75,13 @@ export class RepStatusService {
 
     // GPS transitions are only meaningful for a working rep, not a sign-out.
     if (appState !== 'signed_out') {
-      const wasOn = prev?.gpsEnabled === true;
-      const wasOff = prev?.gpsEnabled === false;
-      if (wasOn && dto.gpsEnabled === false) {
-        const alertedAt = prev?.gpsAlertedAt ? new Date(prev.gpsAlertedAt).getTime() : 0;
-        if (now.getTime() - alertedAt > GPS_ALERT_COOLDOWN_MS) {
+      if (prevGps === true && dto.gpsEnabled === false) {
+        if (now.getTime() - prevGpsAlertedMs > GPS_ALERT_COOLDOWN_MS) {
           next.gpsAlertedAt = now;
           this.bus.emit('rep.gps_off', { repId, at: now });
           this.logger.log(`rep.gps_off rep=${repId}`);
         }
-      } else if (wasOff && dto.gpsEnabled === true) {
+      } else if (prevGps === false && dto.gpsEnabled === true) {
         next.gpsAlertedAt = null;
         this.bus.emit('rep.gps_on', { repId, at: now });
         this.logger.log(`rep.gps_on rep=${repId}`);
