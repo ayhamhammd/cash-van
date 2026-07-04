@@ -25,6 +25,8 @@ import { SettingsService } from './settings.service';
 import { UpdateAppSettingsDto } from './dto/update-settings.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
+import { UpdateAiDto } from './dto/update-ai.dto';
+import { SetTobaccoTaxDto } from './dto/set-tobacco-tax.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
@@ -94,6 +96,17 @@ export class SettingsController {
     return this.settings.setLogo(file);
   }
 
+  @Patch('tobacco-tax')
+  @ApiOperation({
+    summary: 'Toggle the tobacco tax feature',
+    description:
+      'Enable/disable local tobacco ("smoke") tax. A FlowVan feature flag — NOT ERP-managed, so it works even when the ERP integration is on. Admin only.',
+  })
+  @ApiOkResponse({ description: '{ tobaccoTaxEnabled }' })
+  setTobaccoTax(@Body() dto: SetTobaccoTaxDto) {
+    return this.settings.setTobaccoTaxEnabled(dto.enabled);
+  }
+
   @Patch('jofotara')
   @ApiOperation({
     summary: 'Set JoFotara credentials',
@@ -124,5 +137,16 @@ export class SettingsController {
   @ApiOkResponse({ description: '{ ok, message }' })
   testErp() {
     return this.settings.testErp();
+  }
+
+  @Patch('ai')
+  @ApiOperation({
+    summary: 'Configure the AI assistant provider + key',
+    description:
+      'Pick the LLM provider (anthropic | openai | gemini) and set its API key (encrypted). Omit apiKey to keep the current one. Admin only.',
+  })
+  @ApiOkResponse({ description: 'AI settings (key masked)' })
+  updateAi(@Body() dto: UpdateAiDto) {
+    return this.settings.updateAi(dto);
   }
 }

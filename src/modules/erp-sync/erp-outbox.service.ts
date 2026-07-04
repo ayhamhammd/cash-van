@@ -5,6 +5,7 @@ import { LessThanOrEqual, Repository } from 'typeorm';
 
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
+import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
@@ -32,6 +33,7 @@ export class ErpOutboxService {
     @InjectRepository(ErpIdMap) private readonly idmap: Repository<ErpIdMap>,
     @InjectRepository(VoucherHeader) private readonly headers: Repository<VoucherHeader>,
     @InjectRepository(VoucherTransaction) private readonly lines: Repository<VoucherTransaction>,
+    @InjectRepository(TobaccoTaxProfile) private readonly tobaccoProfiles: Repository<TobaccoTaxProfile>,
     @InjectRepository(Collection) private readonly collections: Repository<Collection>,
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
     @InjectRepository(SalesmanSettlement) private readonly salesmanSettlements: Repository<SalesmanSettlement>,
@@ -259,6 +261,18 @@ export class ErpOutboxService {
     return this.taxRateMap.get(Math.round(pct || 0));
   }
 
+  /**
+   * Resolve a local tobacco profile id → the ERP profile id (stored as `erpId`
+   * on the synced profile). Returns undefined if unknown, in which case the ERP
+   * rejects the line (surfacing the misconfiguration) rather than silently
+   * dropping the tobacco tax.
+   */
+  private async erpTobaccoProfileId(localId: string | null | undefined): Promise<string | undefined> {
+    if (!localId) return undefined;
+    const p = await this.tobaccoProfiles.findOne({ where: { id: localId } }).catch(() => null);
+    return p?.erpId ?? undefined;
+  }
+
   private async buildSale(
     voucherNumber: string,
   ): Promise<{ path: string; body: Record<string, unknown> } | null> {
@@ -270,13 +284,24 @@ export class ErpOutboxService {
         // quantity is in BASE pieces (item_qty), so send the per-PIECE price.
         // For base-unit lines (unit_base_qty = 1) this equals unit_price exactly.
         const baseQty = l.unitBaseQty && l.unitBaseQty > 0 ? l.unitBaseQty : 1;
-        return {
+        const base = {
           skuCode: l.itemNumber, // cash-van item_number == ERP sku (set on inbound sync)
           quantity: Number(l.itemQty) || 0,
           unitPrice: (Number(l.unitPrice) || 0) / baseQty, // JOD major, per base piece
           discount: Number(l.discountValue) || 0, // resolved line discount (incl header share)
-          taxRateId: await this.taxRateIdForPct(Number(l.taxPercentage) || 0),
         };
+        // Tobacco line: send the flag + ERP profile id + consumer price (no
+        // taxRateId — the ERP re-computes the tobacco tax authoritatively).
+        if (l.isTobaccoLine) {
+          const erpProfileId = await this.erpTobaccoProfileId(l.tobaccoTaxProfileId);
+          return {
+            ...base,
+            isTobaccoLine: true,
+            tobaccoTaxProfileId: erpProfileId,
+            consumerPrice: (l.consumerPriceFils ?? 0) / 1000, // JOD major per base piece
+          };
+        }
+        return { ...base, taxRateId: await this.taxRateIdForPct(Number(l.taxPercentage) || 0) };
       }),
     );
     return {

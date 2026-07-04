@@ -4,7 +4,7 @@ import {
   Entity,
   Index,
   JoinColumn,
-  OneToOne,
+  ManyToOne,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
@@ -22,7 +22,7 @@ export class Cheque {
   @Column({ name: 'collection_id', type: 'uuid' })
   collectionId!: string;
 
-  @OneToOne(() => Collection, (c) => c.cheque, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Collection, (c) => c.cheques, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'collection_id' })
   collection?: Collection;
 

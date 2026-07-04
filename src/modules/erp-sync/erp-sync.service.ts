@@ -5,6 +5,7 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { Warehouse } from '../warehouses/entities/warehouse.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { provisionRep } from '../reps/rep-provision';
@@ -54,6 +55,34 @@ interface ErpSku {
   isActive?: boolean;
   /** Product image URL (relative to the ERP origin, e.g. /uploads/<org>/x.png). */
   imageUrl?: string | null;
+  // ── Tobacco tax (resolved SKU→product on the ERP; see /skus) ────────────────
+  isTobaccoProduct?: boolean;
+  tobaccoTaxProfileId?: string | null; // ERP profile id
+  consumerPrice?: number | string | null; // JOD major
+}
+
+/** A tobacco tax profile from the ERP `GET /api/v1/tobacco-tax-profiles`. */
+interface ErpTobaccoProfile {
+  id: string;
+  name: string;
+  description?: string | null;
+  taxBase: string;
+  salesTaxEnabled: boolean;
+  salesTaxRate: number;
+  specialTaxEnabled: boolean;
+  specialTaxCalculationType: string;
+  specialTaxBase: string;
+  specialTaxRate?: number | null;
+  specialTaxFixedAmount?: number | string | null; // JOD major per unit
+  withheldTaxEnabled: boolean;
+  withheldTaxCalculationType: string;
+  withheldTaxBase: string;
+  withheldTaxAmount?: number | string | null; // JOD major per unit
+  withheldTaxRate?: number | null;
+  taxIncludedInConsumerPrice?: boolean;
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
+  isActive?: boolean;
 }
 
 /** A warehouse row from the ERP `GET /api/v1/warehouses`. */
@@ -140,6 +169,7 @@ export class ErpSyncService {
     private readonly settings: SettingsService,
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(ItemCart) private readonly items: Repository<ItemCart>,
+    @InjectRepository(TobaccoTaxProfile) private readonly tobaccoProfiles: Repository<TobaccoTaxProfile>,
     @InjectRepository(Warehouse) private readonly whs: Repository<Warehouse>,
     @InjectRepository(Rep) private readonly reps: Repository<Rep>,
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
@@ -580,6 +610,7 @@ export class ErpSyncService {
       await this.runEntity('warehouse', () => this.pullWarehouses()),
       await this.runEntity('category', () => this.pullCategories()),
       await this.runEntity('unit', () => this.pullUnits()),
+      await this.runEntity('tobacco_profile', () => this.pullTobaccoProfiles()),
       await this.runEntity('item', () => this.pullItems()),
       await this.runEntity('customer', () => this.pullCustomers()),
     ];
@@ -626,6 +657,7 @@ export class ErpSyncService {
       await this.runEntity('warehouse', () => this.pullWarehouses()),
       await this.runEntity('category', () => this.pullCategories()),
       await this.runEntity('unit', () => this.pullUnits()),
+      await this.runEntity('tobacco_profile', () => this.pullTobaccoProfiles()),
       await this.runEntity('item', () => this.pullItems()),
       await this.runEntity('customer', () => this.pullCustomers()),
     ];
@@ -674,6 +706,45 @@ export class ErpSyncService {
       unit.nameEn = code;
       unit.baseQty = Math.max(1, Math.round(Number(u.multiplier) || 1));
       await this.units.save(unit);
+      n += 1;
+    }
+    return n;
+  }
+
+  /**
+   * Pull ERP tobacco tax profiles → upsert cash-van tobacco_tax_profiles (keyed
+   * by erp_id). Money fields (per-unit fixed amounts) arrive JOD major → fils.
+   * Runs BEFORE items so a synced item can link to its (already-mapped) profile.
+   */
+  private async pullTobaccoProfiles(): Promise<number> {
+    const { data } = await this.erp.list<ErpTobaccoProfile>('tobacco-tax-profiles');
+    let n = 0;
+    for (const p of data) {
+      let row = await this.tobaccoProfiles.findOne({ where: { erpId: p.id } });
+      if (!row) row = this.tobaccoProfiles.create({ erpId: p.id });
+      row.name = p.name;
+      row.description = p.description ?? null;
+      row.taxBase = p.taxBase as TobaccoTaxProfile['taxBase'];
+      row.salesTaxEnabled = p.salesTaxEnabled;
+      row.salesTaxRate = Math.round(Number(p.salesTaxRate) || 0);
+      row.specialTaxEnabled = p.specialTaxEnabled;
+      row.specialTaxCalculationType = p.specialTaxCalculationType as TobaccoTaxProfile['specialTaxCalculationType'];
+      row.specialTaxBase = p.specialTaxBase as TobaccoTaxProfile['specialTaxBase'];
+      row.specialTaxRate = p.specialTaxRate != null ? Math.round(Number(p.specialTaxRate)) : null;
+      row.specialTaxFixedAmount =
+        p.specialTaxFixedAmount != null ? Math.round(Number(p.specialTaxFixedAmount) * 1000) : null;
+      row.withheldTaxEnabled = p.withheldTaxEnabled;
+      row.withheldTaxCalculationType = p.withheldTaxCalculationType as TobaccoTaxProfile['withheldTaxCalculationType'];
+      row.withheldTaxBase = p.withheldTaxBase as TobaccoTaxProfile['withheldTaxBase'];
+      row.withheldTaxAmount =
+        p.withheldTaxAmount != null ? Math.round(Number(p.withheldTaxAmount) * 1000) : null;
+      row.withheldTaxRate = p.withheldTaxRate != null ? Math.round(Number(p.withheldTaxRate)) : null;
+      row.taxIncludedInConsumerPrice = p.taxIncludedInConsumerPrice ?? false;
+      row.effectiveFrom = p.effectiveFrom ?? null;
+      row.effectiveTo = p.effectiveTo ?? null;
+      row.isActive = p.isActive ?? true;
+      const saved = await this.tobaccoProfiles.save(row);
+      await this.upsertIdMap('tobacco_profile', p.id, null, saved.id);
       n += 1;
     }
     return n;
@@ -1031,6 +1102,23 @@ export class ErpSyncService {
     item.cost = Math.round((Number(base.unitCost) || 0) * 1000); // major → fils
     item.isActive = base.isActive ?? true;
     item.imageUrl = this.absoluteImageUrl(base.imageUrl, erpOrigin);
+
+    // Tobacco tax: the ERP /skus already resolves SKU→product inheritance. Map
+    // the ERP profile id → our local profile id (synced just before items), and
+    // store the consumer price in fils per base piece.
+    item.isTobaccoProduct = base.isTobaccoProduct ?? false;
+    if (item.isTobaccoProduct) {
+      const localProfile = base.tobaccoTaxProfileId
+        ? await this.tobaccoProfiles.findOne({ where: { erpId: base.tobaccoTaxProfileId } })
+        : null;
+      item.tobaccoTaxProfileId = localProfile?.id ?? null;
+      item.consumerPriceFils =
+        base.consumerPrice != null ? Math.round(Number(base.consumerPrice) * 1000) : null;
+    } else {
+      item.tobaccoTaxProfileId = null;
+      item.consumerPriceFils = null;
+    }
+
     item = await this.items.save(item);
 
     // Map every unit-SKU (base + larger) to this item, so movements/sales that

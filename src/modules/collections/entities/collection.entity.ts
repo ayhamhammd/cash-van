@@ -3,7 +3,7 @@ import {
   CreateDateColumn,
   Entity,
   Index,
-  OneToOne,
+  OneToMany,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
@@ -64,6 +64,6 @@ export class Collection {
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 
-  @OneToOne(() => Cheque, (c) => c.collection)
-  cheque?: Cheque;
+  @OneToMany(() => Cheque, (c) => c.collection)
+  cheques?: Cheque[];
 }
