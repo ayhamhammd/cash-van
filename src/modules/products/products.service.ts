@@ -5,6 +5,7 @@ import { Brackets, In, IsNull, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
+import { ProductCategory } from './entities/product-category.entity';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ListProductsQuery } from './dto/list-products.query';
@@ -28,6 +29,8 @@ export class ProductsService {
     private readonly products: Repository<ItemCart>,
     @InjectRepository(ItemUnit)
     private readonly itemUnits: Repository<ItemUnit>,
+    @InjectRepository(ProductCategory)
+    private readonly categories: Repository<ProductCategory>,
     private readonly events: EventEmitter2,
   ) {}
 
@@ -54,7 +57,25 @@ export class ProductsService {
     }
     const [items, total] = await qb.getManyAndCount();
     await this.attachUnits(items);
+    await this.attachCategoryNames(items);
     return { items, total };
+  }
+
+  /**
+   * Attach a human category name (Arabic) to each item so the app shows real
+   * category labels instead of the raw category UUID. One query for the page.
+   */
+  private async attachCategoryNames(items: ItemCart[]): Promise<void> {
+    const ids = [
+      ...new Set(items.map((i) => i.categoryId).filter((c): c is string => !!c)),
+    ];
+    if (ids.length === 0) return;
+    const cats = await this.categories.find({ where: { id: In(ids) } });
+    const nameById = new Map(cats.map((c) => [c.id, c.nameAr]));
+    for (const item of items) {
+      (item as ItemCart & { categoryName: string | null }).categoryName =
+        item.categoryId ? (nameById.get(item.categoryId) ?? null) : null;
+    }
   }
 
   /**
