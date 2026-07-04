@@ -73,10 +73,11 @@ services:
         value: "60"
       - key: RATE_LIMIT_LIMIT
         value: "100"
-      # Allows the frontend (and any origin) to call the API. Tighten to the
-      # frontend URL once known, e.g. https://cashvan-web.onrender.com
+      # Browser origins allowed to call the API (comma-separated; "*" = any).
+      # Scoped to the dashboard frontend. If its Render URL differs (name suffix)
+      # or you add more clients, update this list.
       - key: CORS_ORIGINS
-        value: "*"
+        value: "https://vanflow-dashboard.onrender.com"
       - key: CACHE_MAX_ENTRIES
         value: "5000"
       - key: CACHE_DEFAULT_TTL_SEC
