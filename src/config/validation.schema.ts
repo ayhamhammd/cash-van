@@ -37,12 +37,21 @@ export const envValidationSchema = Joi.object({
   // this distance of the customer's saved location to sell / act).
   CUSTOMER_PROXIMITY_RADIUS_M: Joi.number().min(100).default(1000),
 
-  // 32-byte hex (64 chars). Required in production; dev fallback in code.
+  // 32-byte hex (64 chars) when provided. Required only for REAL JoFotara
+  // e-invoicing (production with JOFOTARA_MOCK=false). In mock mode it's optional
+  // — secret.util derives a stable AES key from JWT_SECRET so the app still boots
+  // and can encrypt stored secrets without a dedicated KMS key.
   JOFOTARA_KMS_KEY: Joi.string()
     .pattern(/^[0-9a-fA-F]{64}$/)
     .when('NODE_ENV', {
       is: 'production',
-      then: Joi.required(),
+      then: Joi.string()
+        .pattern(/^[0-9a-fA-F]{64}$/)
+        .when('JOFOTARA_MOCK', {
+          is: false,
+          then: Joi.required(),
+          otherwise: Joi.optional(),
+        }),
       otherwise: Joi.optional(),
     }),
 

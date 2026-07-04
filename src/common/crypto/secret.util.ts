@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LEN = 12;
@@ -20,8 +20,22 @@ function getKey(): Buffer {
     return cachedKey;
   }
   if (process.env.NODE_ENV === 'production') {
+    // No dedicated KMS key set (e.g. a mock-mode deploy). Derive a stable AES key
+    // from JWT_SECRET — a Render-managed secret that never lives in git — so
+    // stored secrets can still be encrypted. Set JOFOTARA_KMS_KEY for a dedicated
+    // key before going live with real JoFotara (then re-save any stored secrets,
+    // since the key changes).
+    const seed = process.env.JWT_SECRET;
+    if (seed) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[secret.util] JOFOTARA_KMS_KEY not set — deriving the encryption key from JWT_SECRET.',
+      );
+      cachedKey = createHash('sha256').update(`jofotara-kms:${seed}`).digest();
+      return cachedKey;
+    }
     throw new Error(
-      'JOFOTARA_KMS_KEY must be set to a 32-byte hex string (64 hex chars) in production',
+      'JOFOTARA_KMS_KEY (or JWT_SECRET) must be set in production',
     );
   }
   // Dev fallback — deterministic, NOT secret.
