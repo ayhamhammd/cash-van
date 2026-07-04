@@ -107,4 +107,16 @@ export class Customer extends BaseEntity {
 
   @Column({ name: 'is_active', type: 'boolean', default: true })
   isActive!: boolean;
+
+  // ---- ERP customer pricing (mirrored from the ERP; see customer_prices) ----
+  /** The ERP price list assigned to this customer (informational). */
+  @Column({ name: 'erp_price_list_id', type: 'text', nullable: true })
+  erpPriceListId?: string | null;
+
+  @Column({ name: 'erp_price_list_name', type: 'text', nullable: true })
+  erpPriceListName?: string | null;
+
+  /** When false, the rep may NOT edit the contracted price in the app. */
+  @Column({ name: 'allow_manual_price_edit', type: 'boolean', default: true })
+  allowManualPriceEdit!: boolean;
 }

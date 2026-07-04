@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { OnEvent } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, IsNull, Not, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
@@ -13,6 +13,7 @@ import { Customer } from '../customers/entities/customer.entity';
 import { Unit } from '../units/entities/unit.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { ProductCategory } from '../products/entities/product-category.entity';
+import { CustomerPrice } from '../products/entities/customer-price.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
@@ -138,6 +139,21 @@ interface ErpCustomer {
   email?: string | null;
   taxNumber?: string | null;
   creditLimit?: number | string | null; // ERP stores thousandths
+  priceListId?: string | null;
+  priceListName?: string | null;
+  allowManualPriceEdit?: boolean | null;
+}
+
+/** A resolved price row from the ERP `GET /api/v1/prices?customerCode=`. */
+interface ErpPrice {
+  skuId?: string;
+  skuCode: string;
+  barcode?: string | null;
+  productName?: string;
+  price?: number | string; // ERP major units
+  currency?: string | null;
+  /** PRICE_LIST | CUSTOMER_PRICE | DEFAULT_PRICE */
+  priceSource?: string | null;
 }
 
 /** Organization (company) settings from the ERP `GET /api/v1/organization`. */
@@ -175,6 +191,7 @@ export class ErpSyncService {
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
     @InjectRepository(Unit) private readonly units: Repository<Unit>,
     @InjectRepository(ItemUnit) private readonly itemUnits: Repository<ItemUnit>,
+    @InjectRepository(CustomerPrice) private readonly customerPrices: Repository<CustomerPrice>,
     @InjectRepository(ProductCategory) private readonly productCategories: Repository<ProductCategory>,
     @InjectRepository(Collection) private readonly collections: Repository<Collection>,
     @InjectRepository(VoucherHeader) private readonly headers: Repository<VoucherHeader>,
@@ -717,6 +734,7 @@ export class ErpSyncService {
       await this.runEntity('tobacco_profile', () => this.pullTobaccoProfiles()),
       await this.runEntity('item', () => this.pullItems()),
       await this.runEntity('customer', () => this.pullCustomers()),
+      await this.runEntity('customer_price', () => this.pullCustomerPrices()),
     ];
   }
 
@@ -843,12 +861,92 @@ export class ErpSyncService {
         if (c.creditLimit != null) {
           cust.creditLimit = Number(c.creditLimit).toFixed(2); // ERP GET returns JOD major already
         }
+        // ERP customer pricing assignment (drives customer_prices + the app lock).
+        cust.erpPriceListId = c.priceListId ?? null;
+        cust.erpPriceListName = c.priceListName ?? null;
+        cust.allowManualPriceEdit = c.allowManualPriceEdit ?? true;
         await this.customers.save(cust);
         await this.upsertIdMap('customer', String(c.id), c.code ?? null, cust.customerNumber);
       }
       processed += data.length;
       page += 1;
       if (page > 200) break; // safety cap (20k customers)
+    }
+    return processed;
+  }
+
+  /**
+   * Pull each price-listed customer's RESOLVED prices from the ERP
+   * (`GET /api/v1/prices?customerCode=`) and cache the real overrides into
+   * `customer_prices` (drops DEFAULT_PRICE rows). Only customers with an assigned
+   * ERP price list are queried, to bound the number of calls — special contract
+   * prices for list-less customers are a follow-up. Runs on the master-data
+   * refresh, not the frequent movement sync. Assumes `pullCustomers()` ran first
+   * (so `erp_price_list_id` is populated).
+   */
+  private async pullCustomerPrices(): Promise<number> {
+    const custs = await this.customers.find({
+      where: { isActive: true, erpPriceListId: Not(IsNull()) },
+    });
+    let processed = 0;
+    for (const cust of custs) {
+      const code = cust.customerNumber;
+      if (!code || code.startsWith('ERP-')) continue; // need a real ERP customer code
+      // Fetch all resolved prices for this customer (paginated).
+      const rows: ErpPrice[] = [];
+      let page = 1;
+      let total = Number.POSITIVE_INFINITY;
+      while (rows.length < total) {
+        const { data, total: t } = await this.erp.list<ErpPrice>('prices', {
+          customerCode: code,
+          page,
+          pageSize: 200,
+        });
+        total = t;
+        if (data.length === 0) break;
+        rows.push(...data);
+        page += 1;
+        if (page > 100) break; // safety cap
+      }
+      // Keep only real overrides (skip the plain SKU default).
+      const overrides = rows.filter(
+        (r) => r.skuCode && (r.priceSource ?? '').toUpperCase() !== 'DEFAULT_PRICE',
+      );
+      const keptSkus = new Set<string>();
+      for (const r of overrides) {
+        const sku = r.skuCode;
+        keptSkus.add(sku);
+        // Resolve the cash-van item + specific unit for this ERP SKU.
+        const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: sku } });
+        const item = map?.localId
+          ? await this.items.findOne({ where: { itemNumber: map.localId } })
+          : null;
+        let itemUnitId: string | null = null;
+        if (item && r.barcode) {
+          const iu = await this.itemUnits.findOne({
+            where: { itemId: item.id, barcode: r.barcode },
+          });
+          itemUnitId = iu?.id ?? null;
+        }
+        let row = await this.customerPrices.findOne({
+          where: { customerId: cust.id, erpSku: sku },
+        });
+        if (!row) row = this.customerPrices.create({ customerId: cust.id, erpSku: sku });
+        row.itemId = item?.id ?? null;
+        row.itemUnitId = itemUnitId;
+        row.barcode = r.barcode ?? null;
+        row.unitPrice = Math.round((Number(r.price) || 0) * 1000); // ERP major → fils
+        row.priceSource = r.priceSource ?? null;
+        row.erpPriceListId = cust.erpPriceListId ?? null;
+        row.syncedAt = new Date();
+        await this.customerPrices.save(row);
+        processed += 1;
+      }
+      // Prune overrides that no longer apply for this customer.
+      const existing = await this.customerPrices.find({ where: { customerId: cust.id } });
+      for (const e of existing) {
+        if (!keptSkus.has(e.erpSku)) await this.customerPrices.delete(e.id);
+      }
     }
     return processed;
   }
