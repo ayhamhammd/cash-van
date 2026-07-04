@@ -25,7 +25,7 @@ services:
   - type: web
     name: cashvan-api
     runtime: docker
-    plan: free
+    plan: starter        # always-on (no ~15 min free-tier cold start)
     region: frankfurt
     dockerfilePath: ./Dockerfile
     dockerContext: .
