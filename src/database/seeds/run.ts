@@ -105,6 +105,18 @@ async function seed(): Promise<void> {
       },
     );
 
+    // Clean production install: stop here after the system transaction kinds and
+    // the default admin — no demo catalog / warehouses / reps / customers / offers.
+    // Set SEED_DEMO=false in the environment (the on-prem .env does this).
+    if (process.env.SEED_DEMO === 'false') {
+      await qr.commitTransaction();
+      // eslint-disable-next-line no-console
+      console.log(
+        'Seed (admin-only): transaction kinds + default admin created; demo data skipped (SEED_DEMO=false).',
+      );
+      return;
+    }
+
     // ── warehouses: main + 3 vans ────────────────────────────────────────
     const whRepo = m.getRepository(Warehouse);
     await upsert(
