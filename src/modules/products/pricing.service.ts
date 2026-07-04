@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { PriceRule } from './entities/price-rule.entity';
+import { CustomerPrice } from './entities/customer-price.entity';
 import { CustomerAiProfile } from '../customers/entities/customer-ai-profile.entity';
 
 export interface PriceQuote {
@@ -15,6 +16,8 @@ export interface PriceQuote {
   discountPct: number;
   finalUnitPrice: number; // fils
   lineTotal: number; // fils
+  /** CONTRACT (ERP customer price) | PRICE_RULE (segment) | BASE. */
+  priceSource?: string;
 }
 
 @Injectable()
@@ -24,6 +27,8 @@ export class PricingService {
     private readonly products: Repository<ItemCart>,
     @InjectRepository(PriceRule)
     private readonly rules: Repository<PriceRule>,
+    @InjectRepository(CustomerPrice)
+    private readonly customerPrices: Repository<CustomerPrice>,
     @InjectRepository(CustomerAiProfile)
     private readonly aiProfiles: Repository<CustomerAiProfile>,
   ) {}
@@ -44,6 +49,28 @@ export class PricingService {
     if (customerId) {
       const profile = await this.aiProfiles.findOne({ where: { customerId } });
       segment = profile?.segment ?? null;
+    }
+
+    // ERP-mirrored customer contract price takes precedence over segment rules.
+    if (customerId) {
+      const contract = await this.customerPrices.findOne({
+        where: { customerId, itemId: productId },
+      });
+      if (contract) {
+        const listUnit = product.price;
+        return {
+          productId,
+          qty,
+          segment,
+          listUnitPrice: listUnit,
+          appliedRuleId: null,
+          discountPct:
+            listUnit > 0 ? Math.round((1 - contract.unitPrice / listUnit) * 1000) / 10 : 0,
+          finalUnitPrice: contract.unitPrice,
+          lineTotal: contract.unitPrice * qty,
+          priceSource: contract.priceSource ?? 'CONTRACT',
+        };
+      }
     }
 
     const today = new Date().toISOString().slice(0, 10);
@@ -96,6 +123,7 @@ export class PricingService {
       discountPct: best.discountPct,
       finalUnitPrice: best.finalUnit,
       lineTotal: best.finalUnit * qty,
+      priceSource: best.ruleId ? 'PRICE_RULE' : 'BASE',
     };
   }
 }
