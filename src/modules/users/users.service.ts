@@ -34,6 +34,11 @@ export class UsersService {
       userNumber: dto.userNumber,
       name: dto.name,
       userType: dto.userType ?? 'SALES',
+      role: dto.role ?? 'viewer',
+      nameAr: dto.nameAr ?? null,
+      nameEn: dto.nameEn ?? null,
+      email: dto.email ?? null,
+      permissions: dto.permissions ?? [],
       isActive: dto.isActive ?? true,
       passwordHash,
       canMakeVoucher: dto.canMakeVoucher ?? false,
@@ -55,6 +60,7 @@ export class UsersService {
   async changePassword(id: string, newPassword: string): Promise<void> {
     const user = await this.findOneOrThrow(id);
     user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    user.mustChangePassword = false; // they've now set their own
     await this.usersRepo.save(user);
   }
 
@@ -98,5 +104,10 @@ export class UsersService {
       take: limit,
     });
     return { items, total, page, limit, pages: Math.ceil(total / limit) };
+  }
+
+  /** Every active user (flat, unpaginated) — for the app's permissions screen. */
+  async listAll(): Promise<User[]> {
+    return this.usersRepo.find({ order: { name: 'ASC' } });
   }
 }

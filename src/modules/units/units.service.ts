@@ -117,12 +117,13 @@ export class UnitsService {
 
   async attach(itemId: string, dto: CreateItemUnitDto): Promise<ItemUnit> {
     await this.assertItem(itemId);
-    await this.findOne(dto.unitId);
+    const unit = await this.findOne(dto.unitId);
     const row = this.itemUnits.create({
       itemId,
       unitId: dto.unitId,
       barcode: dto.barcode,
       salePrice: dto.salePrice,
+      qty: dto.qty ?? unit.baseQty,
     });
     try {
       return await this.itemUnits.save(row);
@@ -152,6 +153,7 @@ export class UnitsService {
     }
     if (dto.barcode !== undefined) row.barcode = dto.barcode;
     if (dto.salePrice !== undefined) row.salePrice = dto.salePrice;
+    if (dto.qty !== undefined) row.qty = dto.qty;
     try {
       return await this.itemUnits.save(row);
     } catch (err) {

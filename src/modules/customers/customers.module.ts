@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Customer } from './entities/customer.entity';
 import { CustomerAiProfile } from './entities/customer-ai-profile.entity';
 import { CustomerVisit } from './entities/customer-visit.entity';
+import { CustomerAttachment } from './entities/customer-attachment.entity';
 import {
   AI_PROFILE_REFRESH_QUEUE,
   CustomersService,
@@ -13,7 +14,12 @@ import { JobsService } from '../../common/jobs/jobs.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Customer, CustomerAiProfile, CustomerVisit]),
+    TypeOrmModule.forFeature([
+      Customer,
+      CustomerAiProfile,
+      CustomerVisit,
+      CustomerAttachment,
+    ]),
   ],
   controllers: [CustomersController],
   providers: [CustomersService],

@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -20,6 +21,7 @@ import {
 
 import { CollectionsService } from './collections.service';
 import { CreateCollectionDto } from './dto/create-collection.dto';
+import { UpdateCollectionDto } from './dto/update-collection.dto';
 import { ListCollectionsQuery } from './dto/query.dto';
 import { BatchDepositDto } from './dto/collection-actions.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -93,6 +95,20 @@ export class CollectionsController {
   @ApiOkResponse({ description: 'The collection' })
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.collections.findOne(id);
+  }
+
+  @Patch(':id')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: 'Edit collection',
+    description:
+      'Edit a pending collection (amount, method, note, date, invoice link, cheque). ' +
+      'Blocked once confirmed — ERP receipts are immutable. Admin/manager only.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Collection id' })
+  @ApiOkResponse({ description: 'The updated collection' })
+  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateCollectionDto) {
+    return this.collections.update(id, dto);
   }
 
   @Post(':id/confirm')

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   ParseUUIDPipe,
@@ -18,19 +19,48 @@ import {
 } from '@nestjs/swagger';
 
 import { LocationsService } from './locations.service';
+import { RepStatusService } from './rep-status.service';
 import {
   BulkRecordLocationDto,
   RecordLocationDto,
 } from './dto/record-location.dto';
+import { HeartbeatDto } from './dto/heartbeat.dto';
 import { ListLocationsQuery } from './dto/list-locations.query';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('reps-locations')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'reps', version: '1' })
 export class LocationsController {
-  constructor(private readonly locations: LocationsService) {}
+  constructor(
+    private readonly locations: LocationsService,
+    private readonly repStatus: RepStatusService,
+  ) {}
+
+  @Post(':id/heartbeat')
+  @ApiOperation({
+    summary: 'Liveness heartbeat',
+    description:
+      'Lightweight rep liveness ping (~60s cadence). Reports GPS-enabled and app state so the server can detect disconnections.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
+  @ApiCreatedResponse({ description: 'Heartbeat recorded' })
+  heartbeat(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: HeartbeatDto,
+    @CurrentUser('repId') callerRepId: string | null,
+  ) {
+    // A rep may only heartbeat as themselves. Admins/managers (repId null) pass.
+    if (callerRepId && callerRepId !== id) {
+      throw new ForbiddenException({
+        message: 'Heartbeat must target your own rep id',
+        code: 'forbidden_rep',
+      });
+    }
+    return this.repStatus.heartbeat(id, dto);
+  }
 
   @Post(':id/location')
   @ApiOperation({

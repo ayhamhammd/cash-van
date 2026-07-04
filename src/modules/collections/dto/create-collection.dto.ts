@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMinSize,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsIn,
@@ -16,6 +18,11 @@ import {
 } from 'class-validator';
 
 export class ChequeInputDto {
+  @ApiProperty({ description: "This cheque's amount in fils", minimum: 1 })
+  @IsInt()
+  @Min(1)
+  amount!: number;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -82,10 +89,15 @@ export class CreateCollectionDto {
   @IsUUID()
   invoiceId?: string;
 
-  @ApiProperty({ description: 'Amount in fils', minimum: 1 })
+  @ApiPropertyOptional({
+    description:
+      'Amount in fils. Required for cash. For cheque it is derived from Σ cheques[].amount (ignored if sent).',
+    minimum: 1,
+  })
+  @IsOptional()
   @IsInt()
   @Min(1)
-  amount!: number;
+  amount?: number;
 
   @ApiProperty({ enum: ['cash', 'cheque'] })
   @IsIn(['cash', 'cheque'])
@@ -102,9 +114,14 @@ export class CreateCollectionDto {
   @Length(0, 500)
   note?: string;
 
-  @ApiPropertyOptional({ description: 'Required when method=cheque' })
+  @ApiPropertyOptional({
+    type: [ChequeInputDto],
+    description: 'One or more cheques (required, non-empty, when method=cheque). Receipt total = Σ amounts.',
+  })
   @IsOptional()
-  @ValidateNested()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
   @Type(() => ChequeInputDto)
-  cheque?: ChequeInputDto;
+  cheques?: ChequeInputDto[];
 }

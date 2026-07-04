@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -23,9 +24,11 @@ import {
 import { WarehousesService } from './warehouses.service';
 import { CreateWarehouseDto } from './dto/create-warehouse.dto';
 import { UpdateWarehouseDto } from './dto/update-warehouse.dto';
+import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 
 @ApiTags('warehouses')
 @ApiBearerAuth()
+@UseGuards(ErpReadOnlyGuard)
 @Controller({ path: 'warehouses', version: '1' })
 export class WarehousesController {
   constructor(private readonly warehousesService: WarehousesService) {}

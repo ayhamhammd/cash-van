@@ -39,6 +39,10 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'trans_kind', type: 'text' })
   transKind!: string;
 
+  /** For RETURN vouchers: the original SALE voucher number this return is against. */
+  @Column({ name: 'reference_voucher_number', type: 'text', nullable: true })
+  referenceVoucherNumber?: string | null;
+
   @ManyToOne(() => Customer, { onDelete: 'RESTRICT', nullable: true })
   @JoinColumn({ name: 'customer_number', referencedColumnName: 'customerNumber' })
   customer?: Customer | null;
@@ -53,26 +57,34 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'vendor_number', type: 'text', nullable: true })
   vendorNumber?: string | null;
 
-  @Column({ name: 'total_tax', type: 'numeric', precision: 14, scale: 2, default: 0 })
+  @Column({ name: 'total_tax', type: 'numeric', precision: 14, scale: 3, default: 0 })
   totalTax!: string;
 
-  @Column({ type: 'numeric', precision: 14, scale: 2, default: 0 })
+  @Column({ type: 'numeric', precision: 14, scale: 3, default: 0 })
   total!: string;
 
-  @Column({ name: 'net_total', type: 'numeric', precision: 14, scale: 2, default: 0 })
+  @Column({ name: 'net_total', type: 'numeric', precision: 14, scale: 3, default: 0 })
   netTotal!: string;
 
-  @Column({ name: 'total_discount_value', type: 'numeric', precision: 14, scale: 2, default: 0 })
+  @Column({ name: 'total_discount_value', type: 'numeric', precision: 14, scale: 3, default: 0 })
   totalDiscountValue!: string;
 
   @Column({ name: 'total_discount_percentage', type: 'numeric', precision: 5, scale: 2, default: 0 })
   totalDiscountPercentage!: string;
+
+  /** Ids of offers applied to this sale (offers engine). Empty when none. */
+  @Column({ name: 'applied_offer_ids', type: 'jsonb', default: () => "'[]'::jsonb" })
+  appliedOfferIds!: string[];
 
   @Column({ name: 'is_posted', type: 'boolean', default: false })
   isPosted!: boolean;
 
   @Column({ name: 'is_edit', type: 'boolean', default: false })
   isEdit!: boolean;
+
+  /** ORDER vouchers only: reservation released + shipped from the van. */
+  @Column({ name: 'is_fulfilled', type: 'boolean', default: false })
+  isFulfilled!: boolean;
 
   @OneToMany(() => VoucherTransaction, (t) => t.header, { cascade: true })
   transactions?: VoucherTransaction[];

@@ -16,6 +16,7 @@ import { UsersModule } from '../users/users.module';
 import { CustomersModule } from '../customers/customers.module';
 import { VendorsModule } from '../vendors/vendors.module';
 import { WarehousesModule } from '../warehouses/warehouses.module';
+import { OffersModule } from '../offers/offers.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { WarehousesModule } from '../warehouses/warehouses.module';
     CustomersModule,
     VendorsModule,
     WarehousesModule,
+    OffersModule,
   ],
   controllers: [VouchersController],
   providers: [VouchersService, TransactionKindsService],

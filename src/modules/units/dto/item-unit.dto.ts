@@ -1,10 +1,12 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import {
+  IsInt,
   IsNumberString,
   IsOptional,
   IsString,
   IsUUID,
   MaxLength,
+  Min,
 } from 'class-validator';
 
 /**
@@ -25,6 +27,17 @@ export class CreateItemUnitDto {
   @IsNumberString()
   @MaxLength(20)
   salePrice!: string;
+
+  @ApiPropertyOptional({
+    example: 6,
+    minimum: 1,
+    description:
+      'Pieces this unit represents for this item. Defaults to the unit master baseQty when omitted.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  qty?: number;
 }
 
 export class UpdateItemUnitDto extends PartialType(CreateItemUnitDto) {

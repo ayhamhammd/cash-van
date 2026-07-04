@@ -5,6 +5,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 
 import { Rep } from './entities/rep.entity';
 import { RepLocationEvent } from './entities/rep-location-event.entity';
+import { RepStatusService } from './rep-status.service';
 import { RecordLocationDto, BulkRecordLocationDto } from './dto/record-location.dto';
 import { ListLocationsQuery } from './dto/list-locations.query';
 
@@ -29,6 +30,7 @@ export class LocationsService {
     @InjectRepository(Rep)
     private readonly reps: Repository<Rep>,
     private readonly bus: EventEmitter2,
+    private readonly repStatus: RepStatusService,
   ) {}
 
   async record(repId: string, dto: RecordLocationDto): Promise<RepLocationEvent> {
@@ -48,6 +50,7 @@ export class LocationsService {
       lng: saved.lng,
       recordedAt: saved.recordedAt,
     });
+    await this.repStatus.touch(repId);
     return saved;
   }
 
@@ -77,6 +80,7 @@ export class LocationsService {
       lng: latest.lng,
       recordedAt: latest.recordedAt,
     });
+    await this.repStatus.touch(repId);
     return { accepted: rows.length };
   }
 

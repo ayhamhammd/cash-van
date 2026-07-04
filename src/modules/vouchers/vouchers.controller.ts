@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -24,6 +25,8 @@ import {
 import { VouchersService } from './vouchers.service';
 import { TransactionKindsService } from './transaction-kinds.service';
 import { CreateVoucherDto } from './dto/create-voucher.dto';
+import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
+import { PreviewVoucherNumberQueryDto } from './dto/preview-number.query';
 import { CreateChequeDto } from './dto/create-cheque.dto';
 import { CreateTransactionKindDto } from './dto/create-transaction-kind.dto';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
@@ -56,6 +59,17 @@ export class VouchersController {
   }
 
   // ---- Vouchers --------------------------------------------------------------
+  @Get('next-number')
+  @ApiOperation({
+    summary: 'Preview next voucher number',
+    description:
+      'Returns the serial number the next voucher of this kind/store will get, without consuming the sequence.',
+  })
+  @ApiOkResponse({ description: 'The next voucher number' })
+  previewNumber(@Query() query: PreviewVoucherNumberQueryDto) {
+    return this.vouchersService.previewVoucherNumber(query.transKind, query.store);
+  }
+
   @Post()
   @RequirePermissions('canMakeVoucher')
   @ApiOperation({
@@ -68,10 +82,14 @@ export class VouchersController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List vouchers', description: 'List all vouchers.' })
+  @ApiOperation({
+    summary: 'List vouchers',
+    description:
+      'List vouchers, optionally filtered by transKind, userCode, store and date range.',
+  })
   @ApiOkResponse({ description: 'Voucher list' })
-  list() {
-    return this.vouchersService.list();
+  list(@Query() query: ListVouchersQueryDto) {
+    return this.vouchersService.list(query);
   }
 
   @Get(':id')
@@ -123,6 +141,19 @@ export class VouchersController {
   @ApiOkResponse({ description: 'Posted voucher' })
   post(@Param('id', ParseUUIDPipe) id: string) {
     return this.vouchersService.post(id);
+  }
+
+  @Patch(':id/fulfill')
+  @RequirePermissions('canMakeVoucher')
+  @ApiOperation({
+    summary: 'Fulfil order',
+    description:
+      'Fulfil a posted ORDER voucher: releases its van reservation and ships the goods (reserved → out). Requires canMakeVoucher.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Voucher id' })
+  @ApiOkResponse({ description: 'Fulfilled order voucher' })
+  fulfill(@Param('id', ParseUUIDPipe) id: string) {
+    return this.vouchersService.fulfill(id);
   }
 
   @Delete(':id')

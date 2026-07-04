@@ -6,10 +6,12 @@ import {
   IsBoolean,
   IsDateString,
   IsIn,
+  IsInt,
   IsNumberString,
   IsOptional,
   IsString,
   Length,
+  Min,
   ValidateNested,
 } from 'class-validator';
 import type { PaymentType } from '../entities/payment.entity';
@@ -27,13 +29,37 @@ export class VoucherLineDto {
   @Length(1, 200)
   itemName!: string;
 
-  @ApiProperty({ example: '1.000' })
+  @ApiProperty({
+    example: '1.000',
+    description:
+      'Quantity in the chosen unit (e.g. 3 boxes). Multiplied by unitBaseQty to get base pieces for stock.',
+  })
   @IsNumberString()
   itemQty!: string;
 
   @ApiProperty({ example: '1.250' })
   @IsNumberString()
   unitPrice!: string;
+
+  @ApiPropertyOptional({ description: 'Unit code used for this line (e.g. "PK6"). Omit for base pieces.' })
+  @IsOptional()
+  @IsString()
+  unitCode?: string;
+
+  @ApiPropertyOptional({ description: 'Unit display-name snapshot.' })
+  @IsOptional()
+  @IsString()
+  unitName?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Pieces per unit (conversion factor). itemQty × unitBaseQty = base pieces moved into stock. Defaults to 1.',
+    minimum: 1,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  unitBaseQty?: number;
 
   @ApiPropertyOptional({ default: '0' })
   @IsOptional()
@@ -50,10 +76,29 @@ export class VoucherLineDto {
   @IsNumberString()
   discountValue?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({
+    description:
+      'Single store affected by this line (SALE source / RETURN target). For a TRANSFER use fromStoreNumber + toStoreNumber instead.',
+  })
   @IsOptional()
   @IsString()
   storeNumber?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Stock that loses qty (outflow). Required on each line of a TRANSFER voucher; ignored otherwise.',
+  })
+  @IsOptional()
+  @IsString()
+  fromStoreNumber?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Stock that gains qty (inflow). Required on each line of a TRANSFER voucher; ignored otherwise.',
+  })
+  @IsOptional()
+  @IsString()
+  toStoreNumber?: string;
 
   @ApiPropertyOptional({ description: 'Defaults to header trans_kind' })
   @IsOptional()
@@ -87,15 +132,30 @@ export class VoucherPaymentDto {
 }
 
 export class CreateVoucherDto {
-  @ApiProperty()
+  @ApiPropertyOptional({
+    description:
+      'Auto-generated when omitted: <prefix>-<userCode><6-digit serial> (e.g. INV-U-0001000001).',
+  })
+  @IsOptional()
   @IsString()
-  @Length(1, 32)
-  voucherNumber!: string;
+  @Length(1, 64)
+  voucherNumber?: string;
 
   @ApiProperty({ example: 'SALE' })
   @IsString()
   @Length(1, 32)
   transKind!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Multi-purpose reference. RETURN: the original SALE voucher number. ' +
+      'SALE: the ORDER voucher it was converted from. ' +
+      "PURCHASE: the supplier's own invoice number.",
+  })
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  referenceVoucherNumber?: string;
 
   @ApiProperty()
   @IsString()
@@ -130,6 +190,28 @@ export class CreateVoucherDto {
   @IsOptional()
   @IsBoolean()
   isPosted?: boolean;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'SALE only. Offer ids applied to this sale (from POST /offers/evaluate). ' +
+      'Stamped onto the voucher; redemptions recorded best-effort.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  appliedOfferIds?: string[];
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'SALE only. Gift items the rep chose for ITEM_QTY_REWARD offers; the ' +
+      'server validates them against the offer pool and adds them as free lines.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  chosenFreeItems?: string[];
 
   @ApiProperty({ type: [VoucherLineDto] })
   @IsArray()

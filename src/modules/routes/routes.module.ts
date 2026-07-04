@@ -6,12 +6,14 @@ import { RouteStop } from './entities/route-stop.entity';
 import { JourneyPlanEntry } from './entities/journey-plan-entry.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
+import { CustomerVisit } from '../customers/entities/customer-visit.entity';
 
 import { RoutesService } from './routes.service';
 import { JourneyPlanService } from './journey-plan.service';
 import { RouteAdherenceService } from './route-adherence.service';
 import { RoutesController } from './routes.controller';
 import { JourneyPlanController } from './journey-plan.controller';
+import { MyRouteController } from './my-route.controller';
 
 @Module({
   imports: [
@@ -21,9 +23,10 @@ import { JourneyPlanController } from './journey-plan.controller';
       JourneyPlanEntry,
       Rep,
       Customer,
+      CustomerVisit,
     ]),
   ],
-  controllers: [RoutesController, JourneyPlanController],
+  controllers: [RoutesController, JourneyPlanController, MyRouteController],
   providers: [RoutesService, JourneyPlanService, RouteAdherenceService],
   exports: [RoutesService, JourneyPlanService, RouteAdherenceService],
 })

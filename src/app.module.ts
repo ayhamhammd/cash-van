@@ -26,6 +26,7 @@ import { VendorsModule } from './modules/vendors/vendors.module';
 import { WarehousesModule } from './modules/warehouses/warehouses.module';
 import { ItemsModule } from './modules/items/items.module';
 import { VouchersModule } from './modules/vouchers/vouchers.module';
+import { ReportsModule } from './modules/reports/reports.module';
 import { YearConfigModule } from './modules/year-config/year-config.module';
 import { RepsModule } from './modules/reps/reps.module';
 import { SettingsModule } from './modules/settings/settings.module';
@@ -39,6 +40,13 @@ import { RealtimeModule } from './realtime/realtime.module';
 import { TaxModule } from './modules/tax/tax.module';
 import { MobileModule } from './modules/mobile/mobile.module';
 import { UnitsModule } from './modules/units/units.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
+import { SyncModule } from './modules/sync/sync.module';
+import { ErpSyncModule } from './modules/erp-sync/erp-sync.module';
+import { ApprovalsModule } from './modules/approvals/approvals.module';
+import { AgentModule } from './modules/agent/agent.module';
+import { OffersModule } from './modules/offers/offers.module';
+import { AiInsightsModule } from './modules/ai-insights/ai-insights.module';
 
 @Module({
   imports: [
@@ -76,6 +84,7 @@ import { UnitsModule } from './modules/units/units.module';
     WarehousesModule,
     ItemsModule,
     VouchersModule,
+    ReportsModule,
     YearConfigModule,
     RepsModule,
     SettingsModule,
@@ -89,6 +98,13 @@ import { UnitsModule } from './modules/units/units.module';
     TaxModule,
     MobileModule,
     UnitsModule,
+    NotificationsModule,
+    ApprovalsModule,
+    SyncModule,
+    ErpSyncModule,
+    AgentModule,
+    OffersModule,
+    AiInsightsModule,
   ],
   controllers: [HealthController],
   providers: [

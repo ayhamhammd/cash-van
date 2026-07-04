@@ -10,10 +10,11 @@ import { CollectionsService } from './collections.service';
 import { ChequesService } from './cheques.service';
 import { CollectionsController } from './collections.controller';
 import { ChequesController } from './cheques.controller';
+import { ReferenceController } from './reference.controller';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Collection, Cheque, Rep, Customer])],
-  controllers: [CollectionsController, ChequesController],
+  controllers: [CollectionsController, ChequesController, ReferenceController],
   providers: [CollectionsService, ChequesService],
   exports: [CollectionsService, ChequesService],
 })

@@ -1,0 +1,118 @@
+# Render Blueprint — backend half of the VanFlow stack on ONE free Render
+# account: NestJS API + a free managed PostgreSQL. The Next.js frontend lives
+# in its own repo and is deployed from ITS OWN render.yaml as a separate
+# blueprint (see Flow-Van-Frontend/render.yaml).
+#
+# Connect at https://render.com → "New +" → "Blueprint", pick this repo/branch
+# (deploy/render). Render reads this file and creates the DB + API.
+#
+# FREE-TIER NOTES:
+#   * Web services spin down after ~15 min idle (cold start on next request).
+#   * Free PostgreSQL is deleted ~30 days after creation. For a permanent free
+#     DB, create a Neon (neon.tech) Postgres and replace the DB_* values below.
+#   * Container disk is ephemeral — uploaded files do NOT survive restarts.
+#     Wire object storage (R2/S3) for durable uploads.
+
+databases:
+  - name: cashvan-db
+    plan: free
+    databaseName: cashvan
+    user: cashvan
+    region: frankfurt
+
+services:
+  # ---- Backend API (this repo) ------------------------------------------------
+  - type: web
+    name: cashvan-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    # Run pending migrations + idempotent seed, then boot the API. Both are
+    # no-ops once applied, so this is safe on every (cold) start. The chain
+    # lives in the start:deploy npm script (npm runs it via a real shell) so
+    # Render can exec it directly without shell-quoting issues.
+    dockerCommand: npm run start:deploy
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
+      - key: DB_HOST
+        fromDatabase:
+          name: cashvan-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: cashvan-db
+          property: port
+      - key: DB_USERNAME
+        fromDatabase:
+          name: cashvan-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: cashvan-db
+          property: password
+      - key: DB_NAME
+        fromDatabase:
+          name: cashvan-db
+          property: database
+      - key: DB_SSL
+        value: "true"
+      - key: DB_LOGGING
+        value: "false"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 12h
+      - key: RATE_LIMIT_TTL
+        value: "60"
+      - key: RATE_LIMIT_LIMIT
+        value: "100"
+      # Allows the frontend (and any origin) to call the API. Tighten to the
+      # frontend URL once known, e.g. https://cashvan-web.onrender.com
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: CACHE_MAX_ENTRIES
+        value: "5000"
+      - key: CACHE_DEFAULT_TTL_SEC
+        value: "300"
+      - key: JOBS_ENABLED
+        value: "true"
+      - key: JOFOTARA_MOCK
+        value: "true"
+      # Expose Swagger UI at /docs in production (opt-in).
+      - key: SWAGGER_ENABLED
+        value: "true"
+      # Required in production. 64 hex chars — generate with: openssl rand -hex 32
+      - key: JOFOTARA_KMS_KEY
+        sync: false
+      - key: PHONE_HASH_SECRET
+        generateValue: true
+      # --- AI report agent ---------------------------------------------------
+      - key: LLM_PROVIDER
+        value: anthropic
+      # Cheapest Claude model — conserves the small API budget.
+      - key: AGENT_MODEL
+        value: claude-haiku-4-5-20251001
+      # Your Anthropic API key. Set it in the dashboard (kept out of git).
+      # The agent streams a clean error if it's missing; the API still boots.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Read-only role for the agent's generated SQL. REQUIRED in production.
+      # Pointed at the main DB creds for zero-setup (the agent still runs every
+      # statement in a READ ONLY, always-rolled-back transaction). To harden,
+      # provision a dedicated role with scripts/sql/report-agent-role.sql and
+      # change REPORT_DB_USER/REPORT_DB_PASSWORD to it.
+      - key: REPORT_DB_USER
+        fromDatabase:
+          name: cashvan-db
+          property: user
+      - key: REPORT_DB_PASSWORD
+        fromDatabase:
+          name: cashvan-db
+          property: password

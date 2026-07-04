@@ -12,6 +12,7 @@ import compression from 'compression';
 
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import {
   ApiErrorResponseDto,
@@ -53,7 +54,10 @@ function applyStandardErrorResponses(doc: OpenAPIObject): void {
 }
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  // rawBody: keeps the exact request bytes on req.rawBody (alongside parsed body)
+  // so HMAC webhook signatures (e.g. the Integration Hub's X-Hub-Signature) can be
+  // verified over the original payload.
+  const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
   const config = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
 
@@ -78,9 +82,15 @@ async function bootstrap(): Promise<void> {
     }),
   );
   app.useGlobalFilters(new HttpExceptionFilter());
-  app.useGlobalInterceptors(new TransformInterceptor());
+  app.useGlobalInterceptors(new LoggingInterceptor(), new TransformInterceptor());
 
-  if (config.get<string>('nodeEnv') !== 'production') {
+  // Swagger is on outside production, or in production when explicitly opted
+  // in via SWAGGER_ENABLED=true (so docs can be exposed without weakening
+  // production security/validation behaviour).
+  const swaggerEnabled =
+    config.get<string>('nodeEnv') !== 'production' ||
+    process.env.SWAGGER_ENABLED === 'true';
+  if (swaggerEnabled) {
     const swaggerCfg = new DocumentBuilder()
       .setTitle('VanFlow API')
       .setDescription(

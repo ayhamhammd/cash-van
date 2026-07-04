@@ -8,4 +8,7 @@ coverage
 .DS_Store
 .idea
 .vscode
-storage/
+# Runtime object-storage data dir at the repo root (STORAGE_LOCAL_ROOT=./storage).
+# Anchored with a leading slash so it does NOT match the src/common/storage
+# source module (that omission is what broke the build previously).
+/storage/

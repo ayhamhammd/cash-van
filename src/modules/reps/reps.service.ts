@@ -1,12 +1,17 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, ILike, IsNull, Not, Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { Brackets, DataSource, ILike, IsNull, Not, Repository } from 'typeorm';
 
 import { Rep } from './entities/rep.entity';
+import { ErpSyncService } from '../erp-sync/erp-sync.service';
+import { SettingsService } from '../settings/settings.service';
+import { UsersService } from '../users/users.service';
+import { provisionRep } from './rep-provision';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
@@ -23,6 +28,11 @@ export class RepsService {
   constructor(
     @InjectRepository(Rep)
     private readonly repo: Repository<Rep>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
+    private readonly erpSync: ErpSyncService,
+    private readonly settings: SettingsService,
+    private readonly users: UsersService,
   ) {}
 
   async list(query: ListRepsQuery): Promise<{ items: Rep[]; total: number }> {
@@ -86,19 +96,80 @@ export class RepsService {
     return this.repo.findOne({ where: { code, deletedAt: IsNull() } });
   }
 
+  /**
+   * Create a salesman. Every salesman is provisioned end-to-end in one
+   * transaction: a store (warehouse) whose number == the salesman code, and a
+   * login user whose userNumber == the salesman code (default password, forced
+   * change on first login). The store is linked back as the rep's van, and the
+   * van warehouse is mirrored into the ERP. The salesman code is therefore the
+   * single identity shared across rep ⇄ store (stock_number) ⇄ login ⇄ ERP
+   * warehouse. Pass `userId` to link an existing user instead of creating one.
+   */
   async create(dto: CreateRepDto): Promise<Rep> {
+    if (!dto.code) {
+      throw new BadRequestException(
+        'A salesman code is required — it becomes the store number and login',
+      );
+    }
+    if (dto.vanId) {
+      throw new BadRequestException(
+        'A store is auto-created for every salesman; do not pass an existing vanId',
+      );
+    }
     if (dto.userId) await this.assertUserUnlinked(dto.userId);
-    if (dto.code) await this.assertCodeUnique(dto.code);
-    const rep = this.repo.create(dto);
-    return this.repo.save(rep);
+    await this.assertCodeUnique(dto.code);
+
+    const rep = await this.dataSource.transaction((em) =>
+      provisionRep(em, {
+        code: dto.code!,
+        nameAr: dto.nameAr,
+        nameEn: dto.nameEn,
+        phone: dto.phone,
+        regionId: dto.regionId,
+        userId: dto.userId,
+        isActive: dto.isActive,
+        hireDate: dto.hireDate,
+        dailyQuotaFils: dto.dailyQuotaFils,
+      }),
+    );
+
+    // Mirror the new salesman's van store into the ERP (best-effort; no-op when ERP off).
+    if (rep.code) {
+      await this.erpSync.pushWarehouse(rep.code, rep.nameAr || rep.nameEn || rep.code, true);
+    }
+
+    return rep;
   }
 
   async update(id: string, dto: UpdateRepDto): Promise<Rep> {
     const rep = await this.findOne(id);
-    if (dto.userId) await this.assertUserUnlinked(dto.userId, id);
-    if (dto.code) await this.assertCodeUnique(dto.code, id);
-    Object.assign(rep, dto);
-    return this.repo.save(rep);
+    const { password, ...fields } = dto;
+
+    // When working WITH the ERP, the salesman's identity (name + code/userNumber)
+    // is ERP-managed and must not be changed here. Everything else (phone, region,
+    // quota, active, hire date, and the login password) stays editable.
+    const erpOn = (await this.settings.getErpConfig().catch(() => null))?.enabled;
+    if (erpOn) {
+      delete fields.code; // == userNumber / store number
+      delete fields.nameAr;
+      delete fields.nameEn;
+    }
+
+    if (fields.userId) await this.assertUserUnlinked(fields.userId, id);
+    if (fields.code) await this.assertCodeUnique(fields.code, id);
+    Object.assign(rep, fields);
+    const saved = await this.repo.save(rep);
+
+    // Set/change the salesman's login password on the linked user.
+    if (password) {
+      if (!rep.userId) {
+        throw new BadRequestException(
+          'This salesman has no linked login user, so a password cannot be set',
+        );
+      }
+      await this.users.changePassword(rep.userId, password);
+    }
+    return saved;
   }
 
   private async assertCodeUnique(code: string, exceptRepId?: string): Promise<void> {

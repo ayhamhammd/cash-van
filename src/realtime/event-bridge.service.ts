@@ -68,6 +68,21 @@ export class EventBridgeService {
     });
   }
 
+  @OnEvent('rep.online')
+  onRepOnline(p: { repId: string; at: Date }): void {
+    this.gateway.broadcast('rep.online', { rep_id: p.repId, ts: p.at });
+  }
+
+  @OnEvent('rep.gps_off')
+  onRepGpsOff(p: { repId: string; at: Date }): void {
+    this.gateway.broadcast('rep.gps_off', { rep_id: p.repId, ts: p.at });
+  }
+
+  @OnEvent('rep.gps_on')
+  onRepGpsOn(p: { repId: string; at: Date }): void {
+    this.gateway.broadcast('rep.gps_on', { rep_id: p.repId, ts: p.at });
+  }
+
   // Reserved for plan 08:
   @OnEvent('anomaly.flagged')
   onAnomaly(p: Record<string, unknown>): void {
@@ -77,5 +92,21 @@ export class EventBridgeService {
   @OnEvent('cheque.scanned')
   onChequeScanned(p: Record<string, unknown>): void {
     this.gateway.broadcast('cheque.scanned', p);
+  }
+
+  // F10 — approvals + notification inbox
+  @OnEvent('approval.requested')
+  onApprovalRequested(p: Record<string, unknown>): void {
+    this.gateway.broadcast('approval.requested', p);
+  }
+
+  @OnEvent('approval.decided')
+  onApprovalDecided(p: Record<string, unknown>): void {
+    this.gateway.broadcast('approval.decided', p);
+  }
+
+  @OnEvent('notification.created')
+  onNotificationCreated(p: Record<string, unknown>): void {
+    this.gateway.broadcast('notification.created', p);
   }
 }

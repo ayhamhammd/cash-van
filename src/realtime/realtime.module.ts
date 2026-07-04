@@ -6,12 +6,11 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { EventsGateway } from './events.gateway';
 import { EventBridgeService } from './event-bridge.service';
 import { HeartbeatWatchdogService } from './heartbeat-watchdog.service';
-import { Rep } from '../modules/reps/entities/rep.entity';
-import { RepLocationEvent } from '../modules/reps/entities/rep-location-event.entity';
+import { RepStatus } from '../modules/reps/entities/rep-status.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Rep, RepLocationEvent]),
+    TypeOrmModule.forFeature([RepStatus]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

@@ -51,6 +51,14 @@ export class ItemCart extends BaseEntity {
   @Column({ type: 'integer', nullable: true })
   cost?: number | null;
 
+  /** ERP category id (chosen on the form) used when mirroring this item to the ERP. */
+  @Column({ name: 'erp_category_id', type: 'text', nullable: true })
+  erpCategoryId?: string | null;
+
+  /** ERP tax-rate id used when mirroring this item to the ERP. */
+  @Column({ name: 'erp_tax_rate_id', type: 'text', nullable: true })
+  erpTaxRateId?: string | null;
+
   @Column({ name: 'image_url', type: 'text', nullable: true })
   imageUrl?: string | null;
 
@@ -81,6 +89,19 @@ export class ItemCart extends BaseEntity {
 
   @Column({ name: 'photo_url', type: 'text', nullable: true })
   photoUrl?: string | null;
+
+  // ── Tobacco tax (mirrors the ERP product tobacco fields) ───────────────────
+  /** When true this item uses tobacco tax (via tobaccoTaxProfileId), not GST. */
+  @Column({ name: 'is_tobacco_product', type: 'boolean', default: false })
+  isTobaccoProduct!: boolean;
+
+  /** FK to tobacco_tax_profiles (no DB constraint — profile may be deactivated). */
+  @Column({ name: 'tobacco_tax_profile_id', type: 'uuid', nullable: true })
+  tobaccoTaxProfileId?: string | null;
+
+  /** MSRP / consumer price used as a tobacco tax base, in integer fils per base piece. */
+  @Column({ name: 'consumer_price_fils', type: 'integer', nullable: true })
+  consumerPriceFils?: number | null;
 
   @OneToMany(() => ExpiryItem, (ex) => ex.item)
   expiries?: ExpiryItem[];

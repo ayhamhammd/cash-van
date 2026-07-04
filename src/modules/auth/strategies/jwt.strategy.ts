@@ -22,6 +22,8 @@ export interface JwtPayload {
   /** Field-rep id linked to this user (resolved at login), or null. */
   repId?: string | null;
   permissions: Record<string, boolean>;
+  /** Granular dashboard permission keys. */
+  permKeys?: string[];
 }
 
 @Injectable()

@@ -3,7 +3,7 @@ import {
   CreateDateColumn,
   Entity,
   Index,
-  OneToOne,
+  OneToMany,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
@@ -24,6 +24,10 @@ export class Collection {
   @Index('idx_collections_customer_status')
   @Column({ name: 'customer_id', type: 'uuid' })
   customerId!: string;
+
+  /** Per-warehouse payment number (C series), e.g. C-VAN-01-000001. */
+  @Column({ name: 'collection_number', type: 'text', nullable: true })
+  collectionNumber?: string | null;
 
   @Column({ name: 'invoice_id', type: 'uuid', nullable: true })
   invoiceId?: string | null;
@@ -60,6 +64,6 @@ export class Collection {
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 
-  @OneToOne(() => Cheque, (c) => c.collection)
-  cheque?: Cheque;
+  @OneToMany(() => Cheque, (c) => c.collection)
+  cheques?: Cheque[];
 }

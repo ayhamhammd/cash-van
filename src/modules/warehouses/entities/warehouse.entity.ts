@@ -10,6 +10,13 @@ export class Warehouse extends BaseEntity {
   @Column({ name: 'wh_name', type: 'text' })
   whName!: string;
 
+  @Column({ name: 'wh_address', type: 'text', nullable: true })
+  whAddress?: string | null;
+
+  /** Store type: true = van store (tied to cart/SALE/RETURN/ORDER), false = normal depot. */
+  @Column({ name: 'is_van', type: 'boolean', default: false })
+  isVan!: boolean;
+
   @Column({
     name: 'wh_credit_box',
     type: 'numeric',

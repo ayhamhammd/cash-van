@@ -1,5 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import type { TaxCalcMethod } from '../entities/app-settings.entity';
+
+const TAX_CALC_METHODS: TaxCalcMethod[] = ['INCLUSIVE', 'EXCLUSIVE'];
 
 export class UpdateAppSettingsDto {
   @ApiPropertyOptional({ example: 'C001', description: 'Single-tenant company id (mobile BFF)' })
@@ -50,6 +53,16 @@ export class UpdateAppSettingsDto {
   @MaxLength(16)
   sellerCityCode?: string;
 
+  @ApiPropertyOptional({
+    enum: TAX_CALC_METHODS,
+    example: 'EXCLUSIVE',
+    description:
+      'Whether unit prices already include tax (INCLUSIVE) or tax is added on top (EXCLUSIVE).',
+  })
+  @IsOptional()
+  @IsIn(TAX_CALC_METHODS)
+  taxCalcMethod?: TaxCalcMethod;
+
   @ApiPropertyOptional({ example: 'Asia/Amman' })
   @IsOptional()
   @IsString()
@@ -73,4 +86,13 @@ export class UpdateAppSettingsDto {
   @IsInt()
   @Min(0)
   aiInferQuota?: number;
+
+  @ApiPropertyOptional({
+    example: false,
+    description:
+      'Master toggle for tobacco ("smoke") tax. OFF (default) ⇒ tobacco items taxed as normal GST.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  tobaccoTaxEnabled?: boolean;
 }

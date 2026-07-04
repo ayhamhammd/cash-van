@@ -9,6 +9,7 @@ import { In, Repository } from 'typeorm';
 
 import { RoutePlan } from './entities/route-plan.entity';
 import { RouteStop } from './entities/route-stop.entity';
+import { CustomerVisit } from '../customers/entities/customer-visit.entity';
 import { JourneyPlanService } from './journey-plan.service';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
@@ -46,8 +47,49 @@ export class RoutesService {
     private readonly reps: Repository<Rep>,
     @InjectRepository(Customer)
     private readonly customers: Repository<Customer>,
+    @InjectRepository(CustomerVisit)
+    private readonly visits: Repository<CustomerVisit>,
     private readonly journeyPlan: JourneyPlanService,
   ) {}
+
+  /**
+   * A rep's customer check-ins within a date range (inclusive), newest first.
+   * Powers the weekly-route "off-route" hint: the dashboard compares each
+   * visit's weekday against the customer's journey-plan weekdays.
+   */
+  async repVisits(
+    repId: string,
+    from: string,
+    to: string,
+  ): Promise<
+    Array<{
+      customerId: string;
+      visitedAt: Date;
+      hadSale: boolean;
+      visitNote: string | null;
+    }>
+  > {
+    // Bucket by the business-local (Jordan) calendar date, not UTC. A visit at
+    // 02:35 +03 is 23:35 UTC the previous day, so a naive UTC window would drop
+    // it from "today". The dashboard sends Jordan-local dates, so compare against
+    // the same zone.
+    const rows = await this.visits
+      .createQueryBuilder('v')
+      .where('v.rep_id = :repId', { repId })
+      .andWhere(
+        "(v.visited_at AT TIME ZONE 'Asia/Amman')::date BETWEEN :from AND :to",
+        { from, to },
+      )
+      .orderBy('v.visited_at', 'DESC')
+      .take(500)
+      .getMany();
+    return rows.map((v) => ({
+      customerId: v.customerId,
+      visitedAt: v.visitedAt,
+      hadSale: v.hadSale,
+      visitNote: v.visitNote ?? null,
+    }));
+  }
 
   async list(query: ListRoutesQuery): Promise<RoutePlan[]> {
     const qb = this.plans

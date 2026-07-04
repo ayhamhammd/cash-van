@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNumberString, IsOptional, IsString, Length } from 'class-validator';
+import { IsBoolean, IsNumberString, IsOptional, IsString, Length } from 'class-validator';
 
 export class CreateWarehouseDto {
   @ApiProperty({ example: 'WH-01', description: 'Unique warehouse/van number' })
@@ -12,6 +12,12 @@ export class CreateWarehouseDto {
   @Length(2, 200)
   whName!: string;
 
+  @ApiPropertyOptional({ example: 'Amman, Jordan', description: 'Store address' })
+  @IsOptional()
+  @IsString()
+  @Length(0, 512)
+  whAddress?: string;
+
   @ApiPropertyOptional({ default: '0' })
   @IsOptional()
   @IsNumberString()
@@ -21,4 +27,12 @@ export class CreateWarehouseDto {
   @IsOptional()
   @IsNumberString()
   whDebitBox?: string;
+
+  @ApiPropertyOptional({
+    default: false,
+    description: 'Store type — true = van store (cart/SALE/RETURN/ORDER), false = normal depot.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  isVan?: boolean;
 }
