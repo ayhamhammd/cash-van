@@ -319,6 +319,79 @@ describe('OffersEngineService', () => {
     expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(250);
   });
 
+  it('ITEM_AMOUNT_DISCOUNT takes a flat amount off EACH UNIT of the selected items, above minQty', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: { kind: 'ITEM_AMOUNT_DISCOUNT', minQty: 12, baseAmountFils: 200, mode: 'STATIC' },
+    };
+    // 12× A → 200 off each unit → 2400; B untouched.
+    const res = await makeEngine([offer]).evaluate([
+      { itemNumber: 'A', qty: 12 },
+      { itemNumber: 'B', qty: 5 },
+    ]);
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(2400);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(0);
+    // 11× A → below minQty → nothing.
+    expect(
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 11 }])).appliedOffers,
+    ).toHaveLength(0);
+  });
+
+  it('ITEM_AMOUNT_DISCOUNT clamps the per-line discount to the line gross', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      // 2000 off each unit, but A is only 1000 → never below zero.
+      reward: { kind: 'ITEM_AMOUNT_DISCOUNT', minQty: 1, baseAmountFils: 2000, mode: 'STATIC' },
+    };
+    const res = await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 3 }]);
+    expect(res.lines[0].lineDiscountFils).toBe(3000); // gross, not 6000
+    expect(res.lines[0].lineNetFils).toBe(0);
+  });
+
+  it('ITEM_AMOUNT_DISCOUNT DYNAMIC steps the per-unit amount and caps at maxAmountFils', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: {
+        kind: 'ITEM_AMOUNT_DISCOUNT',
+        minQty: 12,
+        baseAmountFils: 100,
+        mode: 'DYNAMIC',
+        multiplier: 0.5,
+        itemsPerStep: 6,
+        maxAmountFils: 250,
+      },
+    };
+    const disc = async (q: number) =>
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: q }])).lines[0]?.lineDiscountFils ?? 0;
+    expect(await disc(12)).toBe(1200); // threshold → 100/unit × 12
+    expect(await disc(18)).toBe(2700); // 1 step → 150/unit × 18
+    expect(await disc(60)).toBe(15000); // 8 steps → 500 capped at 250/unit × 60
+  });
+
+  it('an amount and a percent item offer on the same item → the higher fils wins', async () => {
+    const engine = makeEngine([
+      {
+        id: 'amt',
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['A'] },
+        reward: { kind: 'ITEM_AMOUNT_DISCOUNT', minQty: 1, baseAmountFils: 300, mode: 'STATIC' },
+      },
+      {
+        id: 'pct',
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['A'] },
+        reward: { kind: 'ITEM_PERCENT_DISCOUNT', minQty: 1, basePercent: 10, mode: 'STATIC' },
+      },
+    ]);
+    // A = 1000: 300/unit (amount) beats 100/unit (10%).
+    const res = await engine.evaluate([{ itemNumber: 'A', qty: 4 }]);
+    expect(res.lines[0].lineDiscountFils).toBe(1200); // 300 × 4
+    expect(res.appliedOffers.map((o) => o.offerId)).toEqual(['amt']);
+  });
+
   /* ---------------- conflict resolution (max within, sum across) ---------- */
 
   it('two payment-method offers conflict → only the HIGHEST % applies', async () => {

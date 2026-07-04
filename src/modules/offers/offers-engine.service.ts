@@ -18,6 +18,7 @@ import type {
   FreeItemSpec,
   FreeLine,
   GiftReward,
+  ItemAmountDiscountReward,
   ItemPercentDiscountReward,
   ItemSetTrigger,
   LineOfferRef,
@@ -126,6 +127,8 @@ export class OffersEngineService {
     interface Disc {
       offer: Offer;
       pct: number;
+      /** Amount-off per unit (fils) for ITEM_AMOUNT_DISCOUNT; undefined = percent. */
+      amountPerUnitFils?: number;
       items: Set<string> | null; // null = applies to every line (payment-method)
     }
     const payOffers: Disc[] = [];
@@ -171,6 +174,19 @@ export class OffersEngineService {
             const pct = this.effectivePercent(reward, qty, reward.minQty ?? 0);
             if (pct > 0) itemOffers.push({ offer, pct, items: new Set(items) });
           }
+        } else if (reward?.kind === 'ITEM_AMOUNT_DISCOUNT') {
+          if (qty >= reward.minQty) {
+            // Same stepping as the percent twin, but the base is fils-per-unit.
+            const amt = this.effectiveAmount(reward, qty, reward.minQty ?? 0);
+            if (amt > 0) {
+              itemOffers.push({
+                offer,
+                pct: 0,
+                amountPerUnitFils: amt,
+                items: new Set(items),
+              });
+            }
+          }
         }
       }
     }
@@ -187,14 +203,24 @@ export class OffersEngineService {
     for (const [itemNumber, l] of work) {
       const gross = roundFils(l.qty * l.unitPriceFils);
       if (gross <= 0) continue;
+      // A candidate's discount for this line: percent → % of gross; amount →
+      // per-unit fils × line qty. The highest fils wins (mixing kinds is fine).
+      const discFor = (c: Disc): number =>
+        c.amountPerUnitFils != null
+          ? roundFils(l.qty * c.amountPerUnitFils)
+          : roundFils((gross * c.pct) / 100);
       let bestItem: Disc | null = null;
+      let bestItemFils = 0;
       for (const c of itemOffers) {
-        if (c.items!.has(itemNumber) && (!bestItem || c.pct > bestItem.pct)) {
+        if (!c.items!.has(itemNumber)) continue;
+        const d = discFor(c);
+        if (!bestItem || d > bestItemFils) {
           bestItem = c;
+          bestItemFils = d;
         }
       }
       let payFils = bestPay ? roundFils((gross * bestPay.pct) / 100) : 0;
-      let itemFils = bestItem ? roundFils((gross * bestItem.pct) / 100) : 0;
+      let itemFils = bestItem ? bestItemFils : 0;
       if (payFils > gross) payFils = gross;
       if (payFils + itemFils > gross) itemFils = gross - payFils; // never below 0
       l.discountFils = payFils + itemFils;
@@ -351,6 +377,30 @@ export class OffersEngineService {
     return Math.max(0, Math.min(pct, cap));
   }
 
+  /**
+   * The effective per-unit amount (fils) for an amount-off reward — the fils twin
+   * of {@link effectivePercent}. Base applies at `minQty`; each full `itemsPerStep`
+   * above it adds one multiplier step. STATIC ignores the multiplier. Capped at
+   * `maxAmountFils` (no natural upper bound otherwise); the per-line clamp to the
+   * line gross still prevents a negative net.
+   */
+  private effectiveAmount(
+    reward: Pick<
+      ItemAmountDiscountReward,
+      'baseAmountFils' | 'mode' | 'multiplier' | 'itemsPerStep' | 'maxAmountFils'
+    >,
+    count: number,
+    anchor = 0,
+  ): number {
+    const steps =
+      reward.mode === 'DYNAMIC' && reward.itemsPerStep
+        ? Math.floor(Math.max(0, count - anchor) / reward.itemsPerStep)
+        : 0;
+    const amt = reward.baseAmountFils * (1 + (reward.multiplier ?? 0) * steps);
+    const cap = reward.maxAmountFils ?? Number.POSITIVE_INFINITY;
+    return Math.max(0, Math.min(amt, cap));
+  }
+
   // ---- gating ----
 
   private isWithinSchedule(offer: Offer, at: Date): boolean {
@@ -497,6 +547,14 @@ export class OffersEngineService {
             ? `${r.basePercent}%→${r.maxPercent ?? r.basePercent}% dynamic`
             : `${r.basePercent}%`;
         return `Buy ${r.minQty}× ${on} → ${base} off those items`;
+      }
+      if (r?.kind === 'ITEM_AMOUNT_DISCOUNT') {
+        const jod = (fils: number): string => (fils / 1000).toFixed(3);
+        const base =
+          r.mode === 'DYNAMIC'
+            ? `${jod(r.baseAmountFils)}→${jod(r.maxAmountFils ?? r.baseAmountFils)} JOD dynamic`
+            : `${jod(r.baseAmountFils)} JOD`;
+        return `Buy ${r.minQty}× ${on} → ${base} off each unit`;
       }
       return offer.name;
     }
