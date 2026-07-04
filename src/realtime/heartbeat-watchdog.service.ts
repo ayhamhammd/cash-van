@@ -5,7 +5,6 @@ import { Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ConfigService } from '@nestjs/config';
 
-import { Rep } from '../modules/reps/entities/rep.entity';
 import { RepStatus } from '../modules/reps/entities/rep-status.entity';
 
 /**
@@ -23,7 +22,6 @@ export class HeartbeatWatchdogService {
   private readonly thresholdMs: number;
 
   constructor(
-    @InjectRepository(Rep) private readonly reps: Repository<Rep>,
     @InjectRepository(RepStatus)
     private readonly statuses: Repository<RepStatus>,
     private readonly bus: EventEmitter2,
