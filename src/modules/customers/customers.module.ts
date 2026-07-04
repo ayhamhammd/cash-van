@@ -5,10 +5,12 @@ import { Customer } from './entities/customer.entity';
 import { CustomerAiProfile } from './entities/customer-ai-profile.entity';
 import { CustomerVisit } from './entities/customer-visit.entity';
 import { CustomerAttachment } from './entities/customer-attachment.entity';
+import { User } from '../users/entities/user.entity';
 import {
   AI_PROFILE_REFRESH_QUEUE,
   CustomersService,
 } from './customers.service';
+import { CustomerProximityService } from './customer-proximity.service';
 import { CustomersController } from './customers.controller';
 import { JobsService } from '../../common/jobs/jobs.service';
 
@@ -19,11 +21,12 @@ import { JobsService } from '../../common/jobs/jobs.service';
       CustomerAiProfile,
       CustomerVisit,
       CustomerAttachment,
+      User,
     ]),
   ],
   controllers: [CustomersController],
-  providers: [CustomersService],
-  exports: [CustomersService, TypeOrmModule],
+  providers: [CustomersService, CustomerProximityService],
+  exports: [CustomersService, CustomerProximityService, TypeOrmModule],
 })
 export class CustomersModule implements OnApplicationBootstrap {
   private readonly logger = new Logger(CustomersModule.name);

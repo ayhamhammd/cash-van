@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Brackets, Repository } from 'typeorm';
+import { Brackets, IsNull, Repository } from 'typeorm';
 import { parse } from 'csv-parse/sync';
 
 import { Customer } from './entities/customer.entity';
@@ -108,6 +108,43 @@ export class CustomersService {
       creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
     });
     return saved;
+  }
+
+  /**
+   * Seed a customer's GPS location ONCE. Writes only while `latitude` is still
+   * null, so a location-locked rep can bootstrap a store that has no pin yet but
+   * can never move an established one; if an admin later clears the pin (PATCH),
+   * seeding re-opens. Returns the customer (updated when it took effect).
+   */
+  async seedLocation(id: string, lat: number, lng: number): Promise<Customer> {
+    if (
+      !Number.isFinite(lat) ||
+      lat < -90 ||
+      lat > 90 ||
+      !Number.isFinite(lng) ||
+      lng < -180 ||
+      lng > 180
+    ) {
+      throw new BadRequestException('Invalid coordinates');
+    }
+    const res = await this.customers.update(
+      { id, latitude: IsNull() },
+      { latitude: lat.toFixed(6), longitude: lng.toFixed(6) },
+    );
+    const customer = await this.findOneOrThrow(id);
+    if (res.affected) {
+      // Mirror to the ERP like update() (no-op when ERP off).
+      this.events.emit('erp.customer.updated', {
+        code: customer.customerNumber,
+        name: customer.customerName,
+        phone: customer.phone ?? null,
+        email: customer.email ?? null,
+        taxNumber: customer.tin ?? null,
+        creditLimit:
+          customer.creditLimit != null ? Number(customer.creditLimit) : null,
+      });
+    }
+    return customer;
   }
 
   async findOneOrThrow(id: string): Promise<Customer> {

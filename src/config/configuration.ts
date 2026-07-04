@@ -40,6 +40,12 @@ export default () => ({
       10,
     ),
   },
+  // Location-lock geofence: how close (metres) a restricted rep must be to a
+  // customer's saved location to sell / act on that customer. An area, not an
+  // exact point — default ~1 km.
+  geofence: {
+    radiusM: parseInt(process.env.CUSTOMER_PROXIMITY_RADIUS_M ?? '1000', 10),
+  },
   jofotara: {
     // Mock the ISTD HTTP call until real sandbox credentials + contract exist.
     mock: process.env.JOFOTARA_MOCK !== 'false',

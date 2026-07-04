@@ -34,6 +34,7 @@ import { CustomersService } from './customers.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
+import { SeedLocationDto } from './dto/seed-location.dto';
 import { ListCustomersQuery } from './dto/list-customers.query';
 import { CreateVisitDto } from './dto/create-visit.dto';
 import { ReassignCustomerDto } from './dto/reassign-customer.dto';
@@ -106,6 +107,23 @@ export class CustomersController {
   @ApiOkResponse({ description: 'Updated customer' })
   update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateCustomerDto) {
     return this.customers.update(id, dto);
+  }
+
+  @Post(':id/location')
+  @ApiOperation({
+    summary: 'Seed customer location',
+    description:
+      "Set a customer's GPS location if it has none yet (seed-once — only fills " +
+      'an empty pin, never moves an existing one). Used by location-locked reps ' +
+      'to bootstrap a store that has no coordinates. Admins edit/remove via PATCH.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
+  @ApiCreatedResponse({ description: 'The customer (with location if it took effect)' })
+  seedLocation(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SeedLocationDto,
+  ) {
+    return this.customers.seedLocation(id, dto.lat, dto.lng);
   }
 
   @Post(':id/reassign')

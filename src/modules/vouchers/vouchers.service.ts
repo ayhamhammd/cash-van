@@ -28,6 +28,7 @@ import {
 } from './dto/create-voucher.dto';
 import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
 import { UserContextService } from '../../common/context/user-context.service';
+import { CustomerProximityService } from '../customers/customer-proximity.service';
 import { OffersService } from '../offers/offers.service';
 import { OffersEngineService } from '../offers/offers-engine.service';
 import { SettingsService } from '../settings/settings.service';
@@ -151,6 +152,7 @@ export class VouchersService implements OnModuleInit {
     @InjectRepository(PaymentCheque)
     private readonly chequesRepo: Repository<PaymentCheque>,
     private readonly userCtx: UserContextService,
+    private readonly proximity: CustomerProximityService,
     private readonly events: EventEmitter2,
     private readonly offers: OffersService,
     private readonly offersEngine: OffersEngineService,
@@ -187,6 +189,15 @@ export class VouchersService implements OnModuleInit {
     // (the approving manager re-runs create() under their own role). Runs BEFORE
     // offers so system-granted offer discounts bypass the manual-discount gate.
     await this.enforceSalesmanPolicy(dto);
+    // Location lock: a rep flagged customers.requireProximity may only act on a
+    // customer while within the geofence of its saved location (and seeds a
+    // missing one from repLat/repLng). No-op for everyone else. Runs before any
+    // stock/offer work so an out-of-range action never mutates anything.
+    await this.proximity.enforce({
+      customerNumber: dto.customerNumber,
+      repLat: dto.repLat,
+      repLng: dto.repLng,
+    });
     // Server-authoritative offers: bake per-line discounts and gift free-lines
     // into the dto BEFORE the voucher is built, so gifts post as real lines and
     // their stock moves. MUST run before createUnchecked (was previously dead

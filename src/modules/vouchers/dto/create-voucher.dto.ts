@@ -7,10 +7,12 @@ import {
   IsDateString,
   IsIn,
   IsInt,
+  IsNumber,
   IsNumberString,
   IsOptional,
   IsString,
   Length,
+  Max,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -165,6 +167,25 @@ export class CreateVoucherDto {
   @IsOptional()
   @IsString()
   customerNumber?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Rep's GPS latitude at the moment of sale. Used to enforce the per-rep " +
+      'location lock (customers.requireProximity) and to seed a missing customer ' +
+      'location. Ignored for unrestricted reps.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  repLat?: number;
+
+  @ApiPropertyOptional({ description: "Rep's GPS longitude at the moment of sale (see repLat)." })
+  @IsOptional()
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  repLng?: number;
 
   @ApiPropertyOptional()
   @IsOptional()

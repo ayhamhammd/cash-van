@@ -5,6 +5,7 @@ import { Collection } from './entities/collection.entity';
 import { Cheque } from './entities/cheque.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
+import { CustomersModule } from '../customers/customers.module';
 
 import { CollectionsService } from './collections.service';
 import { ChequesService } from './cheques.service';
@@ -13,7 +14,10 @@ import { ChequesController } from './cheques.controller';
 import { ReferenceController } from './reference.controller';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Collection, Cheque, Rep, Customer])],
+  imports: [
+    TypeOrmModule.forFeature([Collection, Cheque, Rep, Customer]),
+    CustomersModule,
+  ],
   controllers: [CollectionsController, ChequesController, ReferenceController],
   providers: [CollectionsService, ChequesService],
   exports: [CollectionsService, ChequesService],
