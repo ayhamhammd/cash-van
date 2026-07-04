@@ -1,0 +1,17 @@
+# Client-server override — production image, API exposed on the LAN, and
+# migrations + seed run automatically on first boot (start:deploy).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.client.yml up -d --build
+#
+# The base file already provides the Postgres service, the 3000:3000 port, the
+# .env file, volumes and the network — this only hardens the `app` service.
+services:
+  app:
+    build:
+      target: production
+    image: cashvan-api:prod
+    environment:
+      - NODE_ENV=production
+    # migrate → seed (idempotent) → start. No manual migration step needed.
+    command: ["npm", "run", "start:deploy"]
+    restart: always
