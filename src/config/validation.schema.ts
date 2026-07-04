@@ -33,6 +33,10 @@ export const envValidationSchema = Joi.object({
   // Rep-offline watchdog threshold (minutes of silence before alerting).
   REP_OFFLINE_THRESHOLD_MINUTES: Joi.number().min(2).default(10),
 
+  // Location-lock geofence radius in metres (restricted reps must be within
+  // this distance of the customer's saved location to sell / act).
+  CUSTOMER_PROXIMITY_RADIUS_M: Joi.number().min(100).default(1000),
+
   // 32-byte hex (64 chars). Required in production; dev fallback in code.
   JOFOTARA_KMS_KEY: Joi.string()
     .pattern(/^[0-9a-fA-F]{64}$/)

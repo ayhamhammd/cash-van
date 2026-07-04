@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
+import { AppSettings } from '../settings/entities/app-settings.entity';
 import { Offer } from './entities/offer.entity';
 import { OfferRedemption } from './entities/offer-redemption.entity';
 import { OffersController } from './offers.controller';
@@ -24,6 +25,7 @@ import { OffersEngineService } from './offers-engine.service';
       ItemCart,
       Customer,
       VoucherHeader,
+      AppSettings,
     ]),
   ],
   controllers: [OffersController],

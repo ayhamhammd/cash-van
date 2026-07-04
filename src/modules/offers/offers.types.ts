@@ -7,8 +7,8 @@
  * legality per `type` is enforced in OffersService.validateConfig().
  *
  * Money: all amounts in this module are INTEGER fils (1 JOD = 1000 fils), the
- * project's canonical unit (see src/common/utils/currency.util.ts). Discounts in
- * this iteration are PERCENT only (0–100); amount-off rewards are out of scope.
+ * project's canonical unit (see src/common/utils/currency.util.ts). Item discounts
+ * come in two flavours: PERCENT (0–100) and a fixed AMOUNT-off per unit (fils).
  */
 
 export type OfferType = 'PAYMENT_METHOD_DISCOUNT' | 'ITEM_QTY_REWARD';
@@ -38,7 +38,8 @@ export const DISCOUNT_MODES: DiscountMode[] = ['STATIC', 'DYNAMIC'];
 export type RewardKind =
   | 'LINE_PERCENT_DISCOUNT'
   | 'GIFT'
-  | 'ITEM_PERCENT_DISCOUNT';
+  | 'ITEM_PERCENT_DISCOUNT'
+  | 'ITEM_AMOUNT_DISCOUNT';
 export type CustomerScope = 'ALL' | 'SEGMENT' | 'SPECIFIC' | 'NEW_ONLY';
 
 // ---- trigger configs ----
@@ -126,10 +127,34 @@ export interface ItemPercentDiscountReward {
   maxPercent?: number;
 }
 
+/**
+ * ITEM_QTY_REWARD discount: once the combined selected-item qty reaches `minQty`,
+ * a fixed amount (fils) comes off EACH UNIT of the selected items — the amount-off
+ * twin of ItemPercentDiscountReward. STATIC = flat baseAmountFils per unit;
+ * DYNAMIC = baseAmountFils × (1 + multiplier × floor((qty − minQty) / itemsPerStep))
+ * capped at `maxAmountFils`. The per-line discount is amount × line qty, clamped to
+ * the line gross so it can never drive the line below zero.
+ */
+export interface ItemAmountDiscountReward {
+  kind: 'ITEM_AMOUNT_DISCOUNT';
+  /** Threshold on the combined selected-item qty. */
+  minQty: number;
+  /** Amount off per unit, in fils. */
+  baseAmountFils: number;
+  mode: DiscountMode;
+  /** DYNAMIC only: fraction of base added per step, e.g. 0.5. */
+  multiplier?: number;
+  /** DYNAMIC only: items per multiplication step, e.g. 6. */
+  itemsPerStep?: number;
+  /** DYNAMIC only: cap on the effective per-unit amount, in fils. */
+  maxAmountFils?: number;
+}
+
 export type OfferRewardConfig =
   | LinePercentDiscountReward
   | GiftReward
-  | ItemPercentDiscountReward;
+  | ItemPercentDiscountReward
+  | ItemAmountDiscountReward;
 
 // ---- eligibility / targeting ----
 

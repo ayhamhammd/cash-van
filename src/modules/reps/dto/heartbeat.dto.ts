@@ -7,14 +7,15 @@ export class HeartbeatDto {
   gpsEnabled!: boolean;
 
   @ApiPropertyOptional({
-    enum: ['active', 'signed_out'],
+    enum: ['active', 'signed_out', 'closed'],
     default: 'active',
     description:
-      "'signed_out' is the final heartbeat sent on day-close/logout — it suppresses offline alerts.",
+      "'signed_out' is the final heartbeat on day-close/logout (suppresses offline alerts); " +
+      "'closed' is sent when the rep swipes the app away (fires an app-closed alert).",
   })
   @IsOptional()
-  @IsIn(['active', 'signed_out'])
-  appState?: 'active' | 'signed_out';
+  @IsIn(['active', 'signed_out', 'closed'])
+  appState?: 'active' | 'signed_out' | 'closed';
 
   @ApiPropertyOptional({ minimum: 0, maximum: 100, description: 'Battery percentage' })
   @IsOptional()

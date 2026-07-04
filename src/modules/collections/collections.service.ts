@@ -19,6 +19,7 @@ import { Collection } from './entities/collection.entity';
 import { Cheque } from './entities/cheque.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
+import { CustomerProximityService } from '../customers/customer-proximity.service';
 import { CreateCollectionDto } from './dto/create-collection.dto';
 import { UpdateCollectionDto } from './dto/update-collection.dto';
 import { ListCollectionsQuery } from './dto/query.dto';
@@ -54,6 +55,7 @@ export class CollectionsService {
     @InjectRepository(Cheque) private readonly cheques: Repository<Cheque>,
     @InjectRepository(Rep) private readonly reps: Repository<Rep>,
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
+    private readonly proximity: CustomerProximityService,
     private readonly events: EventEmitter2,
   ) {}
 
@@ -133,6 +135,14 @@ export class CollectionsService {
     if (!(await this.customers.exist({ where: { id: dto.customerId } }))) {
       throw new BadRequestException(`Customer ${dto.customerId} not found`);
     }
+    // Location lock: a restricted rep can only record a collection while within
+    // the customer's geofence (seeds a missing pin from repLat/repLng). No-op
+    // for unrestricted reps / admins.
+    await this.proximity.enforce({
+      customerId: dto.customerId,
+      repLat: dto.repLat,
+      repLng: dto.repLng,
+    });
     // Resolve the receipt amount: cash uses the sent amount; cheque derives it
     // from the sum of the cheques (each cheque carries its own amount).
     let amount: number;

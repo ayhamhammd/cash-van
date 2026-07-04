@@ -23,6 +23,7 @@ const REWARD_KINDS: RewardKind[] = [
   'LINE_PERCENT_DISCOUNT',
   'GIFT',
   'ITEM_PERCENT_DISCOUNT',
+  'ITEM_AMOUNT_DISCOUNT',
 ];
 const CUSTOMER_SCOPES: CustomerScope[] = ['ALL', 'SEGMENT', 'SPECIFIC', 'NEW_ONLY'];
 
@@ -105,12 +106,25 @@ export class OfferRewardDto {
   @Max(100)
   maxPercent?: number;
 
-  // ---- ITEM_PERCENT_DISCOUNT ----
-  @ApiPropertyOptional({ description: 'ITEM_PERCENT_DISCOUNT: threshold on combined selected-item qty.' })
+  // ---- ITEM_PERCENT_DISCOUNT / ITEM_AMOUNT_DISCOUNT ----
+  @ApiPropertyOptional({ description: 'ITEM_PERCENT_DISCOUNT/ITEM_AMOUNT_DISCOUNT: threshold on combined selected-item qty.' })
   @IsOptional()
   @IsInt()
   @Min(1)
   minQty?: number;
+
+  // ---- ITEM_AMOUNT_DISCOUNT ----
+  @ApiPropertyOptional({ description: 'ITEM_AMOUNT_DISCOUNT: amount off per unit, in fils.' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  baseAmountFils?: number;
+
+  @ApiPropertyOptional({ description: 'ITEM_AMOUNT_DISCOUNT DYNAMIC only: cap on the effective per-unit amount, in fils.' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  maxAmountFils?: number;
 
   // ---- GIFT ----
   @ApiPropertyOptional({ type: [String], description: 'GIFT: pool the rep picks free items from.' })

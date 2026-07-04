@@ -91,6 +91,24 @@ export class CreateCollectionDto {
 
   @ApiPropertyOptional({
     description:
+      "Rep's GPS latitude when recording. Enforces the per-rep location lock " +
+      '(customers.requireProximity); ignored for unrestricted reps.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  repLat?: number;
+
+  @ApiPropertyOptional({ description: "Rep's GPS longitude when recording (see repLat)." })
+  @IsOptional()
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  repLng?: number;
+
+  @ApiPropertyOptional({
+    description:
       'Amount in fils. Required for cash. For cheque it is derived from Σ cheques[].amount (ignored if sent).',
     minimum: 1,
   })

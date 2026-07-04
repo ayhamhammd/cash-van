@@ -385,10 +385,44 @@ export class OffersService {
     } else if (reward?.kind === 'ITEM_PERCENT_DISCOUNT') {
       this.req(reward.minQty, 'ITEM_PERCENT_DISCOUNT requires reward.minQty');
       this.assertPercentFields(reward);
+    } else if (reward?.kind === 'ITEM_AMOUNT_DISCOUNT') {
+      this.req(reward.minQty, 'ITEM_AMOUNT_DISCOUNT requires reward.minQty');
+      this.assertAmountFields(reward);
     } else {
       throw new BadRequestException(
-        'ITEM_QTY_REWARD requires a GIFT or ITEM_PERCENT_DISCOUNT reward',
+        'ITEM_QTY_REWARD requires a GIFT, ITEM_PERCENT_DISCOUNT or ITEM_AMOUNT_DISCOUNT reward',
       );
+    }
+  }
+
+  /** Validation for the amount-off fields (base/mode/dynamic), mirroring the
+   *  percentage rules but in fils. */
+  private assertAmountFields(reward: OfferRewardDto): void {
+    if (reward.baseAmountFils == null || reward.baseAmountFils < 0) {
+      throw new BadRequestException('reward.baseAmountFils must be ≥ 0 (fils)');
+    }
+    if (reward.mode !== 'STATIC' && reward.mode !== 'DYNAMIC') {
+      throw new BadRequestException('reward.mode must be STATIC or DYNAMIC');
+    }
+    if (reward.mode === 'DYNAMIC') {
+      if (reward.multiplier == null || reward.multiplier <= 0) {
+        throw new BadRequestException(
+          'DYNAMIC reward requires reward.multiplier > 0',
+        );
+      }
+      if (reward.itemsPerStep == null || reward.itemsPerStep < 1) {
+        throw new BadRequestException(
+          'DYNAMIC reward requires reward.itemsPerStep ≥ 1',
+        );
+      }
+      if (
+        reward.maxAmountFils != null &&
+        reward.maxAmountFils < reward.baseAmountFils
+      ) {
+        throw new BadRequestException(
+          'reward.maxAmountFils must be ≥ baseAmountFils (fils)',
+        );
+      }
     }
   }
 

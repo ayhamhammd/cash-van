@@ -83,6 +83,11 @@ export class EventBridgeService {
     this.gateway.broadcast('rep.gps_on', { rep_id: p.repId, ts: p.at });
   }
 
+  @OnEvent('rep.app_closed')
+  onRepAppClosed(p: { repId: string; at: Date }): void {
+    this.gateway.broadcast('rep.app_closed', { rep_id: p.repId, ts: p.at });
+  }
+
   // Reserved for plan 08:
   @OnEvent('anomaly.flagged')
   onAnomaly(p: Record<string, unknown>): void {
