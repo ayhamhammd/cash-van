@@ -373,7 +373,7 @@ export class SettingsService {
         partnerId: row.hubPartnerId ?? null,
         syncSecretLast4: row.hubSyncSecretLast4 ?? null,
         webhookSecretLast4: row.hubWebhookSecretLast4 ?? null,
-        isConfigured: !!row.hubBaseUrl && !!row.hubPartnerId && !!row.hubSyncSecretLast4,
+        isConfigured: !!row.hubBaseUrl && !!row.hubSyncSecretLast4,
       },
       updatedAt: row.updatedAt,
       updatedBy: row.updatedBy ?? null,
@@ -528,7 +528,7 @@ export class SettingsService {
       partnerId: row.hubPartnerId ?? null,
       syncSecretLast4: row.hubSyncSecretLast4 ?? null,
       webhookSecretLast4: row.hubWebhookSecretLast4 ?? null,
-      isConfigured: !!row.hubBaseUrl && !!row.hubPartnerId && !!row.hubSyncSecretLast4,
+      isConfigured: !!row.hubBaseUrl && !!row.hubSyncSecretLast4,
     };
   }
 
@@ -567,6 +567,37 @@ export class SettingsService {
         return { ok: false, message: `Health check failed (HTTP ${health.status})` };
       }
       return { ok: true, message: 'Connected to the Integration Hub successfully' };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : 'Hub unreachable' };
+    }
+  }
+
+  /**
+   * Verify the Hub connection AS the Van Sales client: GET {hub}/api/client/profile
+   * with the stored sync secret. Confirms the token is accepted and returns the
+   * partner's public profile (partnerId, van/warehouse/salesman codes, status) —
+   * the token identifies the partner, so no partnerId is sent.
+   */
+  async verifyHubClient(): Promise<{ ok: boolean; message: string; profile?: unknown }> {
+    const cfg = await this.getHubConfig();
+    if (!cfg.baseUrl || !cfg.syncSecret) {
+      return { ok: false, message: 'Hub base URL or sync secret is not configured' };
+    }
+    const base = cfg.baseUrl.replace(/\/+$/, '');
+    try {
+      const res = await fetch(`${base}/api/client/profile`, {
+        headers: { Authorization: `Bearer ${cfg.syncSecret}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      const json: unknown = await res.json().catch(() => null);
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, message: 'Sync secret rejected by the Hub (check the token)' };
+      }
+      if (!res.ok) {
+        return { ok: false, message: `Verify failed (HTTP ${res.status})` };
+      }
+      const profile = (json as { data?: unknown } | null)?.data ?? null;
+      return { ok: true, message: 'Verified — the Hub recognized this Van Sales client', profile };
     } catch (e) {
       return { ok: false, message: e instanceof Error ? e.message : 'Hub unreachable' };
     }

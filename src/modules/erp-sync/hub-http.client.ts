@@ -37,13 +37,15 @@ export class HubHttpClient {
     if (!cfg.enabled) {
       return { ok: false, duplicate: false, data: null, status: 0, error: 'hub_disabled' };
     }
-    if (!cfg.baseUrl || !cfg.partnerId || !cfg.syncSecret) {
+    if (!cfg.baseUrl || !cfg.syncSecret) {
       return { ok: false, duplicate: false, data: null, status: 0, error: 'hub_not_configured' };
     }
 
     const base = cfg.baseUrl.replace(/\/+$/, '');
     const url = `${base}/api/sync/${path}`;
-    const payload = { partnerId: cfg.partnerId, ...body };
+    // The Hub identifies the partner from the bearer token; only include a
+    // partnerId when one is configured (legacy Hubs that still require it).
+    const payload = cfg.partnerId ? { partnerId: cfg.partnerId, ...body } : { ...body };
 
     let res: Response;
     try {

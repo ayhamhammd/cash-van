@@ -155,7 +155,7 @@ export class SettingsController {
   @ApiOperation({
     summary: 'Configure the ERP Integration Hub connection',
     description:
-      'Set the Hub base URL, partner id, sync + webhook secrets (encrypted), and the enabled toggle. Omit a secret to keep the current one. Admin only.',
+      'Set the Hub base URL, sync + webhook secrets (encrypted), and the enabled toggle. Partner id is optional — the Hub identifies the partner from the sync token. Omit a secret to keep the current one. Admin only.',
   })
   @ApiOkResponse({ description: 'Hub settings (secrets masked)' })
   updateHub(@Body() dto: UpdateHubDto) {
@@ -170,5 +170,16 @@ export class SettingsController {
   @ApiOkResponse({ description: '{ ok, message }' })
   testHub() {
     return this.settings.testHub();
+  }
+
+  @Post('hub/verify')
+  @ApiOperation({
+    summary: 'Verify the Hub recognizes this Van Sales client',
+    description:
+      "Calls GET {hubBaseUrl}/api/client/profile with the stored sync token. Confirms the token is accepted and returns the partner's public profile (no secrets). Admin only.",
+  })
+  @ApiOkResponse({ description: '{ ok, message, profile? }' })
+  verifyHub() {
+    return this.settings.verifyHubClient();
   }
 }
