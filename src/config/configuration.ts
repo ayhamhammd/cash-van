@@ -32,6 +32,14 @@ export default () => ({
   jobs: {
     enabled: process.env.JOBS_ENABLED !== 'false',
   },
+  // Rep-offline watchdog: minutes of silence (no heartbeat/ping) before an
+  // active rep is alerted as offline.
+  heartbeat: {
+    offlineThresholdMin: parseInt(
+      process.env.REP_OFFLINE_THRESHOLD_MINUTES ?? '10',
+      10,
+    ),
+  },
   jofotara: {
     // Mock the ISTD HTTP call until real sandbox credentials + contract exist.
     mock: process.env.JOFOTARA_MOCK !== 'false',

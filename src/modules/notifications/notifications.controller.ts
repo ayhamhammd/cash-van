@@ -38,6 +38,7 @@ export class NotificationsController {
       q.unread === true,
       q.offset ?? 0,
       q.limit ?? 25,
+      { refType: q.refType, refId: q.refId },
     );
   }
 

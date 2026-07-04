@@ -68,6 +68,21 @@ export class EventBridgeService {
     });
   }
 
+  @OnEvent('rep.online')
+  onRepOnline(p: { repId: string; at: Date }): void {
+    this.gateway.broadcast('rep.online', { rep_id: p.repId, ts: p.at });
+  }
+
+  @OnEvent('rep.gps_off')
+  onRepGpsOff(p: { repId: string; at: Date }): void {
+    this.gateway.broadcast('rep.gps_off', { rep_id: p.repId, ts: p.at });
+  }
+
+  @OnEvent('rep.gps_on')
+  onRepGpsOn(p: { repId: string; at: Date }): void {
+    this.gateway.broadcast('rep.gps_on', { rep_id: p.repId, ts: p.at });
+  }
+
   // Reserved for plan 08:
   @OnEvent('anomaly.flagged')
   onAnomaly(p: Record<string, unknown>): void {

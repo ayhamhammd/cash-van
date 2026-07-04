@@ -1,6 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
-import { IsBoolean, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class ListNotificationsQueryDto {
   @ApiPropertyOptional({ description: 'Only unread items', default: false })
@@ -8,6 +8,16 @@ export class ListNotificationsQueryDto {
   @Transform(({ value }) => value === true || value === 'true')
   @IsBoolean()
   unread?: boolean;
+
+  @ApiPropertyOptional({ description: "Filter by linked record type, e.g. 'rep'" })
+  @IsOptional()
+  @IsString()
+  refType?: string;
+
+  @ApiPropertyOptional({ description: 'Filter by linked record id (use with refType)' })
+  @IsOptional()
+  @IsString()
+  refId?: string;
 
   @ApiPropertyOptional({ minimum: 0, default: 0 })
   @IsOptional()

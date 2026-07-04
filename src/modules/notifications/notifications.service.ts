@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Repository } from 'typeorm';
+import { FindOptionsWhere, In, IsNull, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 
 import { AppNotification } from './entities/notification.entity';
@@ -66,10 +66,12 @@ export class NotificationsService {
     unreadOnly: boolean,
     offset = 0,
     limit = 25,
+    filter?: { refType?: string; refId?: string },
   ): Promise<{ items: AppNotification[]; total: number; unread: number }> {
-    const where = unreadOnly
-      ? { userId, readAt: IsNull() }
-      : { userId };
+    const where: FindOptionsWhere<AppNotification> = { userId };
+    if (filter?.refType) where.refType = filter.refType;
+    if (filter?.refId) where.refId = filter.refId;
+    if (unreadOnly) where.readAt = IsNull();
     const [items, total] = await this.repo.findAndCount({
       where,
       order: { createdAt: 'DESC' },
