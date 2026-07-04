@@ -67,6 +67,27 @@ export class RepStatusAlertsListener {
     }
   }
 
+  @OnEvent('rep.gps_on')
+  async onGpsOn(p: { repId: string; at: Date }): Promise<void> {
+    try {
+      const rep = await this.reps.findOne({ where: { id: p.repId } });
+      if (!rep) return;
+      const nameAr = rep.nameAr;
+      const nameEn = rep.nameEn ?? rep.nameAr;
+      await this.notifications.notifyManagers({
+        kind: 'rep.gps_on',
+        titleAr: `تم إعادة تشغيل تحديد المواقع (GPS): ${nameAr}`,
+        titleEn: `GPS turned back on: ${nameEn}`,
+        bodyAr: `أعاد المندوب ${nameAr} تشغيل خدمة الموقع.`,
+        bodyEn: `${nameEn} re-enabled location services.`,
+        refType: 'rep',
+        refId: p.repId,
+      });
+    } catch (err) {
+      this.logger.error(`onGpsOn(${p.repId}) failed: ${(err as Error).message}`);
+    }
+  }
+
   @OnEvent('rep.online')
   async onOnline(p: { repId: string; at: Date }): Promise<void> {
     try {
