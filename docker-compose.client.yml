@@ -1,0 +1,67 @@
+# Self-contained on-prem deployment for a single client device.
+#
+# Runs the VanFlow API + its own PostgreSQL, exposes the API on the LAN so the
+# vans' phones and the dashboard can reach it, and initialises a fresh database
+# (schema migrations + default admin seed) automatically on first start.
+#
+# The API image (cashvan-api:prod) must exist on the device first — either
+# built there (`docker build -t cashvan-api:prod --target production .`) or
+# loaded from an offline bundle (see scripts/build-onprem-bundle.sh).
+#
+# Usage on the device:
+#   docker compose -f docker-compose.client.yml up -d
+#   docker compose -f docker-compose.client.yml logs -f app     # watch boot
+#   docker compose -f docker-compose.client.yml down            # stop (keeps data)
+
+services:
+  app:
+    image: cashvan-api:prod
+    container_name: cashvan-api
+    init: true
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - DB_HOST=db
+    # Migrate + seed (idempotent) then start. A brand-new DB gets its schema and
+    # the default admin (admin / admin1234 — change the password after first login).
+    command: ["npm", "run", "start:deploy"]
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # 0.0.0.0:3000 → reachable from other devices on the same network.
+      # Point the mobile app's "server address" at  http://<device-ip>:3000/api/v1
+      - "3000:3000"
+    volumes:
+      - cashvan_storage:/app/storage
+    networks:
+      - cashvan-net
+    restart: always
+
+  db:
+    image: postgres:16.4-alpine
+    container_name: cashvan-db
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-cashvan}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:-cashvan}
+    volumes:
+      - cashvan_pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-cashvan} -d ${DB_NAME:-cashvan}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - cashvan-net
+    restart: always
+
+volumes:
+  cashvan_pgdata:      # the database lives here — survives restarts/upgrades
+  cashvan_storage:     # uploaded files (cheque images, voice clips)
+
+networks:
+  cashvan-net:
+    driver: bridge
