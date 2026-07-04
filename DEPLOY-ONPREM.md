@@ -3,8 +3,9 @@
 Run the VanFlow API + its own PostgreSQL on one machine at the client's site.
 The vans' phones and the dashboard reach it over the local network.
 
-**Files:** `docker-compose.client.yml` (runtime) · `.env.client.example` (config)
-· `scripts/build-onprem-bundle.sh` (offline bundle) · `scripts/init-db.sql` (DB extensions).
+**Files:** `docker-compose.yml` (base services) + `docker-compose.client.yml` (production
+override) — the client stack layers them · `.env.client.example` (config) ·
+`scripts/build-onprem-bundle.sh` (offline bundle) · `scripts/init-db.sql` (DB extensions).
 
 The device just needs **Docker** (Docker Desktop on Windows/Mac, Docker Engine on Linux).
 Postgres is bundled — don't install it separately.
@@ -16,9 +17,9 @@ Postgres is bundled — don't install it separately.
 ```bash
 # copy this repo to the device, then:
 cp .env.client.example .env          # then edit .env, replace every CHANGE_ME
-docker build -t cashvan-api:prod --target production .
-docker compose -f docker-compose.client.yml up -d
-docker compose -f docker-compose.client.yml logs -f app   # watch first boot
+# --build builds the production image from source; the override + base do the rest.
+docker compose -f docker-compose.yml -f docker-compose.client.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.client.yml logs -f app   # watch first boot
 ```
 
 ## Option B — device is offline (carry a pre-built bundle)
@@ -34,7 +35,7 @@ Copy the `dist-onprem/` folder to the device (USB / share), then on the device:
 ```bash
 docker load < cashvan-images.tar.gz
 cp .env.example .env                 # then edit .env, replace every CHANGE_ME
-docker compose -f docker-compose.client.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.client.yml up -d
 ```
 
 ---
@@ -69,10 +70,10 @@ First login: **admin / admin1234** — change the password after logging in.
 ## Operate
 
 ```bash
-docker compose -f docker-compose.client.yml logs -f app     # logs
-docker compose -f docker-compose.client.yml restart app     # restart API only
-docker compose -f docker-compose.client.yml down            # stop (DATA KEPT)
-docker compose -f docker-compose.client.yml down -v         # stop + WIPE the DB
+docker compose -f docker-compose.yml -f docker-compose.client.yml logs -f app     # logs
+docker compose -f docker-compose.yml -f docker-compose.client.yml restart app     # restart API only
+docker compose -f docker-compose.yml -f docker-compose.client.yml down            # stop (DATA KEPT)
+docker compose -f docker-compose.yml -f docker-compose.client.yml down -v         # stop + WIPE the DB
 ```
 
 - **Data** lives in the `cashvan_pgdata` volume and survives restarts/upgrades.
