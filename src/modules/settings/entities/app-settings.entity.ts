@@ -135,6 +135,33 @@ export class AppSettings {
   @Column({ name: 'ai_capabilities', type: 'jsonb', default: {} })
   aiCapabilities!: Record<string, boolean>;
 
+  // ── ERP Integration Hub (Van → Hub → ERP middleware) ──────────────────────
+  /** When on, documents push to the ERP THROUGH the Integration Hub (not directly). */
+  @Column({ name: 'hub_enabled', type: 'boolean', default: false })
+  hubEnabled!: boolean;
+
+  /** Hub origin, e.g. https://hub.example.com (the /api/... paths are appended). */
+  @Column({ name: 'hub_base_url', type: 'text', nullable: true })
+  hubBaseUrl?: string | null;
+
+  /** The partner UUID the Hub provisioned for this company. Sent in every sync body. */
+  @Column({ name: 'hub_partner_id', type: 'text', nullable: true })
+  hubPartnerId?: string | null;
+
+  /** Bearer secret we present on POST /api/sync/* (= the partner's VAN_SALES webhook secret). */
+  @Column({ name: 'hub_sync_secret_encrypted', type: 'text', nullable: true, select: false })
+  hubSyncSecretEncrypted?: string | null;
+
+  @Column({ name: 'hub_sync_secret_last4', type: 'text', nullable: true })
+  hubSyncSecretLast4?: string | null;
+
+  /** Secret used to verify inbound X-Hub-Signature on Hub → Van webhooks. */
+  @Column({ name: 'hub_webhook_secret_encrypted', type: 'text', nullable: true, select: false })
+  hubWebhookSecretEncrypted?: string | null;
+
+  @Column({ name: 'hub_webhook_secret_last4', type: 'text', nullable: true })
+  hubWebhookSecretLast4?: string | null;
+
   // ── Voucher (receipt) print template ──────────────────────────────────────
   /**
    * Company overrides for the printed voucher template, stored as the delta from

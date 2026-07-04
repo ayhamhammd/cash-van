@@ -26,6 +26,7 @@ import { UpdateAppSettingsDto } from './dto/update-settings.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
 import { UpdateAiDto } from './dto/update-ai.dto';
+import { UpdateHubDto } from './dto/update-hub.dto';
 import { SetTobaccoTaxDto } from './dto/set-tobacco-tax.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -148,5 +149,26 @@ export class SettingsController {
   @ApiOkResponse({ description: 'AI settings (key masked)' })
   updateAi(@Body() dto: UpdateAiDto) {
     return this.settings.updateAi(dto);
+  }
+
+  @Patch('hub')
+  @ApiOperation({
+    summary: 'Configure the ERP Integration Hub connection',
+    description:
+      'Set the Hub base URL, partner id, sync + webhook secrets (encrypted), and the enabled toggle. Omit a secret to keep the current one. Admin only.',
+  })
+  @ApiOkResponse({ description: 'Hub settings (secrets masked)' })
+  updateHub(@Body() dto: UpdateHubDto) {
+    return this.settings.updateHub(dto);
+  }
+
+  @Post('hub/test')
+  @ApiOperation({
+    summary: 'Test the Integration Hub connection',
+    description: 'Probes GET {hubBaseUrl}/api/health with the stored config. Admin only.',
+  })
+  @ApiOkResponse({ description: '{ ok, message }' })
+  testHub() {
+    return this.settings.testHub();
   }
 }

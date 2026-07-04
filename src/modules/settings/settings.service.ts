@@ -8,6 +8,7 @@ import { UpdateAppSettingsDto } from './dto/update-settings.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
 import { UpdateAiDto } from './dto/update-ai.dto';
+import { UpdateHubDto } from './dto/update-hub.dto';
 import {
   BASE_VOUCHER_TEMPLATE,
   VoucherTemplate,
@@ -61,12 +62,21 @@ export interface AppSettingsView {
     language: string;
     capabilities: Record<string, boolean>;
   };
+  hub: {
+    enabled: boolean;
+    baseUrl: string | null;
+    partnerId: string | null;
+    syncSecretLast4: string | null;
+    webhookSecretLast4: string | null;
+    isConfigured: boolean;
+  };
   updatedAt: Date;
   updatedBy: string | null;
 }
 
 export type ErpView = AppSettingsView['erp'];
 export type AiView = AppSettingsView['ai'];
+export type HubView = AppSettingsView['hub'];
 
 export interface JoFotaraUpdateView {
   clientId: string;
@@ -357,6 +367,14 @@ export class SettingsService {
         language: row.aiLanguage ?? 'auto',
         capabilities: row.aiCapabilities ?? {},
       },
+      hub: {
+        enabled: row.hubEnabled,
+        baseUrl: row.hubBaseUrl ?? null,
+        partnerId: row.hubPartnerId ?? null,
+        syncSecretLast4: row.hubSyncSecretLast4 ?? null,
+        webhookSecretLast4: row.hubWebhookSecretLast4 ?? null,
+        isConfigured: !!row.hubBaseUrl && !!row.hubPartnerId && !!row.hubSyncSecretLast4,
+      },
       updatedAt: row.updatedAt,
       updatedBy: row.updatedBy ?? null,
     };
@@ -484,6 +502,74 @@ export class SettingsService {
       language: row.aiLanguage ?? 'auto',
       capabilities: row.aiCapabilities ?? {},
     };
+  }
+
+  /** Configure the Integration Hub connection. Secrets encrypted; omit to keep the current one. */
+  async updateHub(dto: UpdateHubDto): Promise<HubView> {
+    const row = await this.requireRow();
+    row.hubEnabled = dto.enabled;
+    if (dto.baseUrl !== undefined) {
+      row.hubBaseUrl = dto.baseUrl.trim().replace(/\/+$/, '') || null;
+    }
+    if (dto.partnerId !== undefined) row.hubPartnerId = dto.partnerId.trim() || null;
+    if (dto.syncSecret) {
+      row.hubSyncSecretEncrypted = encryptSecret(dto.syncSecret);
+      row.hubSyncSecretLast4 = maskSecret(dto.syncSecret).slice(-4);
+    }
+    if (dto.webhookSecret) {
+      row.hubWebhookSecretEncrypted = encryptSecret(dto.webhookSecret);
+      row.hubWebhookSecretLast4 = maskSecret(dto.webhookSecret).slice(-4);
+    }
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return {
+      enabled: row.hubEnabled,
+      baseUrl: row.hubBaseUrl ?? null,
+      partnerId: row.hubPartnerId ?? null,
+      syncSecretLast4: row.hubSyncSecretLast4 ?? null,
+      webhookSecretLast4: row.hubWebhookSecretLast4 ?? null,
+      isConfigured: !!row.hubBaseUrl && !!row.hubPartnerId && !!row.hubSyncSecretLast4,
+    };
+  }
+
+  /** Internal: decrypted Hub connection for the hub-sync engine + webhook receiver. */
+  async getHubConfig(): Promise<{
+    enabled: boolean;
+    baseUrl: string | null;
+    partnerId: string | null;
+    syncSecret: string | null;
+    webhookSecret: string | null;
+  }> {
+    const row = await this.repo
+      .createQueryBuilder('s')
+      .addSelect('s.hubSyncSecretEncrypted')
+      .addSelect('s.hubWebhookSecretEncrypted')
+      .where('s.id = 1')
+      .getOne();
+    if (!row) throw new NotFoundException('app_settings row missing — re-run migrations');
+    return {
+      enabled: row.hubEnabled,
+      baseUrl: row.hubBaseUrl ?? null,
+      partnerId: row.hubPartnerId ?? null,
+      syncSecret: row.hubSyncSecretEncrypted ? decryptSecret(row.hubSyncSecretEncrypted) : null,
+      webhookSecret: row.hubWebhookSecretEncrypted ? decryptSecret(row.hubWebhookSecretEncrypted) : null,
+    };
+  }
+
+  /** Probe the Integration Hub: GET {hubBaseUrl}/api/health. */
+  async testHub(): Promise<{ ok: boolean; message: string }> {
+    const cfg = await this.getHubConfig();
+    if (!cfg.baseUrl) return { ok: false, message: 'Hub base URL is not configured' };
+    const base = cfg.baseUrl.replace(/\/+$/, '');
+    try {
+      const health = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(8000) });
+      if (!health.ok) {
+        return { ok: false, message: `Health check failed (HTTP ${health.status})` };
+      }
+      return { ok: true, message: 'Connected to the Integration Hub successfully' };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : 'Hub unreachable' };
+    }
   }
 
   /** Probe the ERP with the stored credentials (health + a 1-row catalog read). */

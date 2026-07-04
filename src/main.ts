@@ -54,7 +54,10 @@ function applyStandardErrorResponses(doc: OpenAPIObject): void {
 }
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  // rawBody: keeps the exact request bytes on req.rawBody (alongside parsed body)
+  // so HMAC webhook signatures (e.g. the Integration Hub's X-Hub-Signature) can be
+  // verified over the original payload.
+  const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
   const config = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
 
