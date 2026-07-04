@@ -37,6 +37,7 @@ export const DISCOUNT_MODES: DiscountMode[] = ['STATIC', 'DYNAMIC'];
 
 export type RewardKind =
   | 'LINE_PERCENT_DISCOUNT'
+  | 'LINE_AMOUNT_DISCOUNT'
   | 'GIFT'
   | 'ITEM_PERCENT_DISCOUNT'
   | 'ITEM_AMOUNT_DISCOUNT';
@@ -89,6 +90,28 @@ export interface LinePercentDiscountReward {
   itemsPerStep?: number;
   /** DYNAMIC only: cap on the effective percent, 0–100. */
   maxPercent?: number;
+}
+
+/**
+ * A fixed amount (fils) off EVERY line of the order — the amount-off twin of
+ * LinePercentDiscountReward, for a PAYMENT_METHOD_DISCOUNT. Each qualifying line
+ * gets `baseAmountFils` off (a flat amount per line, independent of the line qty),
+ * clamped to the line gross. STATIC keeps it fixed; DYNAMIC scales it with the
+ * order's item count the same way the percent reward does:
+ *   effectiveAmount = baseAmountFils × (1 + multiplier × floor((count − anchor) / itemsPerStep))
+ * capped at `maxAmountFils`.
+ */
+export interface LineAmountDiscountReward {
+  kind: 'LINE_AMOUNT_DISCOUNT';
+  /** Amount off each line, in fils. */
+  baseAmountFils: number;
+  mode: DiscountMode;
+  /** DYNAMIC only: fraction of base added per step, e.g. 0.5. */
+  multiplier?: number;
+  /** DYNAMIC only: items per multiplication step, e.g. 6. */
+  itemsPerStep?: number;
+  /** DYNAMIC only: cap on the per-line amount, in fils. */
+  maxAmountFils?: number;
 }
 
 /**
@@ -152,6 +175,7 @@ export interface ItemAmountDiscountReward {
 
 export type OfferRewardConfig =
   | LinePercentDiscountReward
+  | LineAmountDiscountReward
   | GiftReward
   | ItemPercentDiscountReward
   | ItemAmountDiscountReward;

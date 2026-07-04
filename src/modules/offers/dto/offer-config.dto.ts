@@ -21,6 +21,7 @@ import {
 
 const REWARD_KINDS: RewardKind[] = [
   'LINE_PERCENT_DISCOUNT',
+  'LINE_AMOUNT_DISCOUNT',
   'GIFT',
   'ITEM_PERCENT_DISCOUNT',
   'ITEM_AMOUNT_DISCOUNT',
@@ -113,14 +114,14 @@ export class OfferRewardDto {
   @Min(1)
   minQty?: number;
 
-  // ---- ITEM_AMOUNT_DISCOUNT ----
-  @ApiPropertyOptional({ description: 'ITEM_AMOUNT_DISCOUNT: amount off per unit, in fils.' })
+  // ---- LINE_AMOUNT_DISCOUNT / ITEM_AMOUNT_DISCOUNT ----
+  @ApiPropertyOptional({ description: 'Amount-off rewards: base amount in fils (per line for LINE_AMOUNT_DISCOUNT, per unit for ITEM_AMOUNT_DISCOUNT).' })
   @IsOptional()
   @IsInt()
   @Min(0)
   baseAmountFils?: number;
 
-  @ApiPropertyOptional({ description: 'ITEM_AMOUNT_DISCOUNT DYNAMIC only: cap on the effective per-unit amount, in fils.' })
+  @ApiPropertyOptional({ description: 'Amount-off rewards, DYNAMIC only: cap on the effective amount, in fils.' })
   @IsOptional()
   @IsInt()
   @Min(0)

@@ -347,7 +347,7 @@ export class OffersService {
         if (t.minItemCount != null && t.minItemCount < 1) {
           throw new BadRequestException('trigger.minItemCount must be ≥ 1');
         }
-        this.assertLinePercent(reward);
+        this.assertLineReward(reward);
         break;
       case 'ITEM_QTY_REWARD':
         this.req(
@@ -361,13 +361,16 @@ export class OffersService {
     }
   }
 
-  private assertLinePercent(reward: OfferRewardDto): void {
-    if (reward?.kind !== 'LINE_PERCENT_DISCOUNT') {
+  private assertLineReward(reward: OfferRewardDto): void {
+    if (reward?.kind === 'LINE_PERCENT_DISCOUNT') {
+      this.assertPercentFields(reward);
+    } else if (reward?.kind === 'LINE_AMOUNT_DISCOUNT') {
+      this.assertAmountFields(reward);
+    } else {
       throw new BadRequestException(
-        'This offer type requires a LINE_PERCENT_DISCOUNT reward',
+        'PAYMENT_METHOD_DISCOUNT requires a LINE_PERCENT_DISCOUNT or LINE_AMOUNT_DISCOUNT reward',
       );
     }
-    this.assertPercentFields(reward);
   }
 
   private assertItemReward(reward: OfferRewardDto): void {

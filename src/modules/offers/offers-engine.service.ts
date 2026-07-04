@@ -21,6 +21,7 @@ import type {
   ItemAmountDiscountReward,
   ItemPercentDiscountReward,
   ItemSetTrigger,
+  LineAmountDiscountReward,
   LineOfferRef,
   LinePercentDiscountReward,
   OfferEligibility,
@@ -129,6 +130,8 @@ export class OffersEngineService {
       pct: number;
       /** Amount-off per unit (fils) for ITEM_AMOUNT_DISCOUNT; undefined = percent. */
       amountPerUnitFils?: number;
+      /** Flat amount-off per line (fils) for LINE_AMOUNT_DISCOUNT; undefined = percent. */
+      amountPerLineFils?: number;
       items: Set<string> | null; // null = applies to every line (payment-method)
     }
     const payOffers: Disc[] = [];
@@ -151,14 +154,21 @@ export class OffersEngineService {
 
       if (offer.type === 'PAYMENT_METHOD_DISCOUNT') {
         const t = offer.trigger as PaymentMethodTrigger;
-        const reward = offer.reward as LinePercentDiscountReward;
+        const reward = offer.reward;
         const payOk = t.paymentCondition === 'CREDIT' ? isCredit : !isCredit;
         const totalOk = t.minOrderTotal == null || subtotalFils >= t.minOrderTotal;
         const countOk = t.minItemCount == null || itemCount >= t.minItemCount;
-        if (payOk && totalOk && countOk && reward?.kind === 'LINE_PERCENT_DISCOUNT') {
+        if (payOk && totalOk && countOk) {
           // Base applies at minItemCount; steps accrue per itemsPerStep above it.
-          const pct = this.effectivePercent(reward, itemCount, t.minItemCount ?? 0);
-          if (pct > 0) payOffers.push({ offer, pct, items: null });
+          if (reward?.kind === 'LINE_PERCENT_DISCOUNT') {
+            const pct = this.effectivePercent(reward, itemCount, t.minItemCount ?? 0);
+            if (pct > 0) payOffers.push({ offer, pct, items: null });
+          } else if (reward?.kind === 'LINE_AMOUNT_DISCOUNT') {
+            const amt = this.effectiveAmount(reward, itemCount, t.minItemCount ?? 0);
+            if (amt > 0) {
+              payOffers.push({ offer, pct: 0, amountPerLineFils: amt, items: null });
+            }
+          }
         }
       } else if (offer.type === 'ITEM_QTY_REWARD') {
         const t = offer.trigger as ItemSetTrigger;
@@ -191,24 +201,31 @@ export class OffersEngineService {
       }
     }
 
-    // Highest payment-method offer — its % is the same on every line, so a single
-    // global winner serves all lines.
-    const bestPay = payOffers.reduce<Disc | null>(
-      (b, c) => (!b || c.pct > b.pct ? c : b),
-      null,
-    );
-
-    // ── Per line: (best payment % + best item % for that line), clamped ────────
+    // ── Per line: (best payment + best item discount for that line), clamped ───
+    // A payment offer's % is the same rate on every line, but a flat LINE_AMOUNT
+    // is a fixed fils/line — so the winner is picked PER LINE by actual fils (a
+    // percent and an amount payment offer compare correctly, same as items).
     const contrib = new Map<string, number>(); // offerId → discount fils contributed
     for (const [itemNumber, l] of work) {
       const gross = roundFils(l.qty * l.unitPriceFils);
       if (gross <= 0) continue;
-      // A candidate's discount for this line: percent → % of gross; amount →
-      // per-unit fils × line qty. The highest fils wins (mixing kinds is fine).
+      // A candidate's discount for this line: percent → % of gross; per-unit
+      // amount → fils × line qty; per-line amount → flat fils. Highest fils wins.
       const discFor = (c: Disc): number =>
         c.amountPerUnitFils != null
           ? roundFils(l.qty * c.amountPerUnitFils)
-          : roundFils((gross * c.pct) / 100);
+          : c.amountPerLineFils != null
+            ? c.amountPerLineFils
+            : roundFils((gross * c.pct) / 100);
+      let bestPay: Disc | null = null;
+      let bestPayFils = 0;
+      for (const c of payOffers) {
+        const d = discFor(c);
+        if (!bestPay || d > bestPayFils) {
+          bestPay = c;
+          bestPayFils = d;
+        }
+      }
       let bestItem: Disc | null = null;
       let bestItemFils = 0;
       for (const c of itemOffers) {
@@ -219,7 +236,7 @@ export class OffersEngineService {
           bestItemFils = d;
         }
       }
-      let payFils = bestPay ? roundFils((gross * bestPay.pct) / 100) : 0;
+      let payFils = bestPay ? bestPayFils : 0;
       let itemFils = bestItem ? bestItemFils : 0;
       if (payFils > gross) payFils = gross;
       if (payFils + itemFils > gross) itemFils = gross - payFils; // never below 0
@@ -378,15 +395,16 @@ export class OffersEngineService {
   }
 
   /**
-   * The effective per-unit amount (fils) for an amount-off reward — the fils twin
-   * of {@link effectivePercent}. Base applies at `minQty`; each full `itemsPerStep`
-   * above it adds one multiplier step. STATIC ignores the multiplier. Capped at
-   * `maxAmountFils` (no natural upper bound otherwise); the per-line clamp to the
-   * line gross still prevents a negative net.
+   * The effective amount (fils) for an amount-off reward — the fils twin of
+   * {@link effectivePercent}, shared by LINE_AMOUNT_DISCOUNT (per line) and
+   * ITEM_AMOUNT_DISCOUNT (per unit). Base applies at the anchor (minItemCount or
+   * minQty); each full `itemsPerStep` above it adds one multiplier step. STATIC
+   * ignores the multiplier. Capped at `maxAmountFils` (no natural upper bound
+   * otherwise); the per-line clamp to the line gross still prevents a negative net.
    */
   private effectiveAmount(
     reward: Pick<
-      ItemAmountDiscountReward,
+      LineAmountDiscountReward | ItemAmountDiscountReward,
       'baseAmountFils' | 'mode' | 'multiplier' | 'itemsPerStep' | 'maxAmountFils'
     >,
     count: number,
@@ -559,18 +577,29 @@ export class OffersEngineService {
       return offer.name;
     }
     const t = offer.trigger as PaymentMethodTrigger;
-    const r = offer.reward as LinePercentDiscountReward;
+    const r = offer.reward;
     const cond = t.paymentCondition === 'CREDIT' ? 'Credit' : 'Cash';
     const mins: string[] = [];
     if (t.minOrderTotal) mins.push(`≥ ${(t.minOrderTotal / 1000).toFixed(3)} JOD`);
     if (t.minItemCount) mins.push(`≥ ${t.minItemCount} items`);
     const suffix = mins.length ? ` (${mins.join(', ')})` : '';
-    if (r?.mode === 'DYNAMIC') {
-      const cap = r.maxPercent != null ? ` up to ${r.maxPercent}%` : '';
-      return `${cond} · ${r.basePercent}% per line, ×${r.multiplier ?? 0} per ${
-        r.itemsPerStep ?? '?'
+    if (r?.kind === 'LINE_AMOUNT_DISCOUNT') {
+      const jod = (fils: number): string => (fils / 1000).toFixed(3);
+      if (r.mode === 'DYNAMIC') {
+        const cap = r.maxAmountFils != null ? ` up to ${jod(r.maxAmountFils)} JOD` : '';
+        return `${cond} · ${jod(r.baseAmountFils)} JOD per line, ×${r.multiplier ?? 0} per ${
+          r.itemsPerStep ?? '?'
+        } items${cap}${suffix}`;
+      }
+      return `${cond} · ${jod(r.baseAmountFils)} JOD off each line${suffix}`;
+    }
+    const rp = r as LinePercentDiscountReward;
+    if (rp?.mode === 'DYNAMIC') {
+      const cap = rp.maxPercent != null ? ` up to ${rp.maxPercent}%` : '';
+      return `${cond} · ${rp.basePercent}% per line, ×${rp.multiplier ?? 0} per ${
+        rp.itemsPerStep ?? '?'
       } items${cap}${suffix}`;
     }
-    return `${cond} · ${r?.basePercent ?? 0}% off each line${suffix}`;
+    return `${cond} · ${rp?.basePercent ?? 0}% off each line${suffix}`;
   }
 }

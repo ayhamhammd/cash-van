@@ -392,6 +392,100 @@ describe('OffersEngineService', () => {
     expect(res.appliedOffers.map((o) => o.offerId)).toEqual(['amt']);
   });
 
+  /* ------------------- PAYMENT_METHOD_DISCOUNT (amount) ------------------ */
+
+  it('LINE_AMOUNT_DISCOUNT takes a flat amount off EACH line for a matching CASH payment', async () => {
+    const engine = makeEngine([
+      {
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH' },
+        reward: { kind: 'LINE_AMOUNT_DISCOUNT', baseAmountFils: 300, mode: 'STATIC' },
+      },
+    ]);
+    // Flat 300 off EACH line, regardless of that line's qty.
+    const res = await engine.evaluate(
+      [
+        { itemNumber: 'A', qty: 4 },
+        { itemNumber: 'B', qty: 2 },
+      ],
+      { paymentMethod: 'CASH' },
+    );
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(300);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(300);
+    expect(res.totals.lineDiscountFils).toBe(600);
+  });
+
+  it('LINE_AMOUNT_DISCOUNT clamps the per-line discount to the line gross', async () => {
+    const engine = makeEngine([
+      {
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH' },
+        reward: { kind: 'LINE_AMOUNT_DISCOUNT', baseAmountFils: 2000, mode: 'STATIC' },
+      },
+    ]);
+    // B line gross = 500 → clamped; A line gross = 1000 → clamped.
+    const res = await engine.evaluate(
+      [
+        { itemNumber: 'A', qty: 1 },
+        { itemNumber: 'B', qty: 1 },
+      ],
+      { paymentMethod: 'CASH' },
+    );
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(1000);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(500);
+  });
+
+  it('LINE_AMOUNT_DISCOUNT DYNAMIC steps the per-line amount and caps at maxAmountFils', async () => {
+    const engine = makeEngine([
+      {
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH', minItemCount: 6 },
+        reward: {
+          kind: 'LINE_AMOUNT_DISCOUNT',
+          baseAmountFils: 100,
+          mode: 'DYNAMIC',
+          multiplier: 0.5,
+          itemsPerStep: 6,
+          maxAmountFils: 250,
+        },
+      },
+    ]);
+    const disc = async (q: number) =>
+      (await engine.evaluate([{ itemNumber: 'A', qty: q }], { paymentMethod: 'CASH' }))
+        .lines[0]?.lineDiscountFils ?? 0;
+    expect(await disc(6)).toBe(100); // threshold → 100/line
+    expect(await disc(12)).toBe(150); // 1 step → 150/line
+    expect(await disc(60)).toBe(250); // capped at 250/line
+  });
+
+  it('per line, the higher fils wins between a percent and a flat-amount payment offer', async () => {
+    const engine = makeEngine([
+      {
+        id: 'pct10',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH' },
+        reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 10, mode: 'STATIC' },
+      },
+      {
+        id: 'flat300',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH' },
+        reward: { kind: 'LINE_AMOUNT_DISCOUNT', baseAmountFils: 300, mode: 'STATIC' },
+      },
+    ]);
+    // A gross 4000: 10% = 400 beats flat 300. B gross 500: flat 300 beats 10% = 50.
+    const res = await engine.evaluate(
+      [
+        { itemNumber: 'A', qty: 4 },
+        { itemNumber: 'B', qty: 1 },
+      ],
+      { paymentMethod: 'CASH' },
+    );
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(400);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(300);
+    expect(res.appliedOffers.map((o) => o.offerId).sort()).toEqual(['flat300', 'pct10']);
+  });
+
   /* ---------------- conflict resolution (max within, sum across) ---------- */
 
   it('two payment-method offers conflict → only the HIGHEST % applies', async () => {
