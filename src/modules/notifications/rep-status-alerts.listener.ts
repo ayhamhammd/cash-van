@@ -88,6 +88,28 @@ export class RepStatusAlertsListener {
     }
   }
 
+  @OnEvent('rep.app_closed')
+  async onAppClosed(p: { repId: string; at: Date }): Promise<void> {
+    try {
+      const rep = await this.reps.findOne({ where: { id: p.repId } });
+      if (!rep) return;
+      const nameAr = rep.nameAr;
+      const nameEn = rep.nameEn ?? rep.nameAr;
+      const phone = rep.phone ?? '—';
+      await this.notifications.notifyManagers({
+        kind: 'rep.app_closed',
+        titleAr: `أغلق المندوب التطبيق: ${nameAr}`,
+        titleEn: `Rep closed the app: ${nameEn}`,
+        bodyAr: `أغلق المندوب ${nameAr} التطبيق. قد يتوقف التتبع. الرجاء الاتصال به: ${phone}`,
+        bodyEn: `${nameEn} closed the app; tracking may stop. Call: ${phone}`,
+        refType: 'rep',
+        refId: p.repId,
+      });
+    } catch (err) {
+      this.logger.error(`onAppClosed(${p.repId}) failed: ${(err as Error).message}`);
+    }
+  }
+
   @OnEvent('rep.online')
   async onOnline(p: { repId: string; at: Date }): Promise<void> {
     try {

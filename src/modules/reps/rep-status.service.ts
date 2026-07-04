@@ -53,10 +53,11 @@ export class RepStatusService {
     const appState = dto.appState ?? 'active';
     const now = new Date();
 
-    // Capture the prior GPS state + alert timestamp BEFORE mutating `next` —
-    // when `prev` exists, `next` is the same object reference, so writing
-    // `next.gpsEnabled` below would otherwise overwrite what we compare against.
+    // Capture the prior GPS + app state BEFORE mutating `next` — when `prev`
+    // exists, `next` is the same object reference, so writing `next.gpsEnabled` /
+    // `next.lastAppState` below would otherwise overwrite what we compare against.
     const prevGps: boolean | null = prev?.gpsEnabled ?? null;
+    const prevAppState: string | null = prev?.lastAppState ?? null;
     const prevGpsAlertedMs = prev?.gpsAlertedAt
       ? new Date(prev.gpsAlertedAt).getTime()
       : 0;
@@ -73,8 +74,14 @@ export class RepStatusService {
     next.lastAppState = appState;
     next.batteryPct = dto.batteryPct ?? null;
 
-    // GPS transitions are only meaningful for a working rep, not a sign-out.
-    if (appState !== 'signed_out') {
+    // App swiped away: fire once per close (transition into 'closed').
+    if (appState === 'closed' && prevAppState !== 'closed') {
+      this.bus.emit('rep.app_closed', { repId, at: now });
+      this.logger.log(`rep.app_closed rep=${repId}`);
+    }
+
+    // GPS transitions only matter while the app is actively running.
+    if (appState === 'active') {
       if (prevGps === true && dto.gpsEnabled === false) {
         if (now.getTime() - prevGpsAlertedMs > GPS_ALERT_COOLDOWN_MS) {
           next.gpsAlertedAt = now;
