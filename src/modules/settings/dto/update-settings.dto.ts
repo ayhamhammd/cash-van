@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 import type { TaxCalcMethod } from '../entities/app-settings.entity';
 
 const TAX_CALC_METHODS: TaxCalcMethod[] = ['INCLUSIVE', 'EXCLUSIVE'];
@@ -86,4 +86,13 @@ export class UpdateAppSettingsDto {
   @IsInt()
   @Min(0)
   aiInferQuota?: number;
+
+  @ApiPropertyOptional({
+    example: false,
+    description:
+      'Master toggle for tobacco ("smoke") tax. OFF (default) ⇒ tobacco items taxed as normal GST.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  tobaccoTaxEnabled?: boolean;
 }

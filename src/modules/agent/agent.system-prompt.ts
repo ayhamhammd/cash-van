@@ -5,7 +5,24 @@ import { REPORT_FORMATS } from './agent.types';
  * column-level schema is fetched on demand via the get_schema tool to keep this
  * prompt small; only the table list is injected here as a hint.
  */
-export function buildSystemPrompt(tableNames: string[]): string {
+/** Maps the Settings assistant-language choice to a prompt directive. */
+export function languageDirective(language: string | undefined): string {
+  switch ((language ?? 'auto').toLowerCase()) {
+    case 'ar':
+      return 'Always reply in Arabic (العربية), regardless of the language of the question.';
+    case 'en':
+      return 'Always reply in English, regardless of the language of the question.';
+    case 'bilingual':
+      return 'Reply bilingually: first in Arabic (العربية), then the same answer in English, separated by a divider line.';
+    default:
+      return "Reply in the same language the user used (Arabic or English). Match their script and dialect.";
+  }
+}
+
+export function buildSystemPrompt(
+  tableNames: string[],
+  language?: string,
+): string {
   const tables = tableNames.length
     ? tableNames.join(', ')
     : '(call get_schema to discover tables)';
@@ -40,6 +57,9 @@ export function buildSystemPrompt(tableNames: string[]): string {
     '- If the user asks for ANY other format (csv, pdf, docx, google sheet, image, etc.), do NOT call a tool for it. Reply in text that that format is not supported yet, and offer the supported ones.',
     '',
     'STYLE',
-    "- Be concise and businesslike. Use the user's language. Never invent column or table names — verify with get_schema. If a request is ambiguous, ask one short clarifying question.",
+    '- Be concise and businesslike. Never invent column or table names — verify with get_schema. If a request is ambiguous, ask one short clarifying question.',
+    '',
+    'LANGUAGE',
+    `- ${languageDirective(language)}`,
   ].join('\n');
 }

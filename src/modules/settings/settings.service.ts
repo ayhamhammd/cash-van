@@ -7,6 +7,17 @@ import { AppSettings, TaxCalcMethod } from './entities/app-settings.entity';
 import { UpdateAppSettingsDto } from './dto/update-settings.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
+import { UpdateAiDto } from './dto/update-ai.dto';
+import {
+  BASE_VOUCHER_TEMPLATE,
+  VoucherTemplate,
+  VoucherTemplateDto,
+} from './dto/voucher-template.dto';
+import {
+  DEFAULT_VOUCHER_REPORT,
+  VoucherReport,
+  VoucherReportDto,
+} from './dto/voucher-report.dto';
 import { decryptSecret, encryptSecret, maskSecret } from '../../common/crypto/secret.util';
 import { UserContextService } from '../../common/context/user-context.service';
 
@@ -24,6 +35,7 @@ export interface AppSettingsView {
   locale: string;
   aiChatQuota: number;
   aiInferQuota: number;
+  tobaccoTaxEnabled: boolean;
   jofotara: {
     clientId: string | null;
     secretLast4: string | null;
@@ -39,11 +51,22 @@ export interface AppSettingsView {
     vanStore: string | null;
     directExport: boolean;
   };
+  ai: {
+    enabled: boolean;
+    provider: string;
+    model: string | null;
+    apiKeyLast4: string | null;
+    isConfigured: boolean;
+    confidenceThreshold: number;
+    language: string;
+    capabilities: Record<string, boolean>;
+  };
   updatedAt: Date;
   updatedBy: string | null;
 }
 
 export type ErpView = AppSettingsView['erp'];
+export type AiView = AppSettingsView['ai'];
 
 export interface JoFotaraUpdateView {
   clientId: string;
@@ -218,6 +241,75 @@ export class SettingsService {
     };
   }
 
+  /**
+   * Resolved voucher (receipt) v2 template = base DEEP-merged with the company's
+   * stored override delta. Always a complete, base-shaped object (legacy/unknown
+   * override keys are ignored) so the app/admin never has to merge. Reachable by
+   * any authenticated user (the app fetches it).
+   */
+  async getVoucherTemplate(): Promise<VoucherTemplate> {
+    const row = await this.requireRow();
+    return deepResolve(BASE_VOUCHER_TEMPLATE, row.voucherTemplateOverrides ?? {}) as VoucherTemplate;
+  }
+
+  /**
+   * Upsert the v2 voucher template. The DTO arrives complete (ValidationPipe fills
+   * defaults), so we persist only the DEEP delta — leaves that differ from
+   * BASE_VOUCHER_TEMPLATE — keeping storage minimal and letting a future base
+   * change reach uncustomized fields. A `PUT {}` resets to base. Admin only.
+   */
+  async upsertVoucherTemplate(dto: VoucherTemplateDto): Promise<VoucherTemplate> {
+    const row = await this.requireRow();
+    const plain = JSON.parse(JSON.stringify(dto)) as Record<string, unknown>;
+    const overrides = (deepDiff(BASE_VOUCHER_TEMPLATE as unknown as Record<string, unknown>, plain) ??
+      {}) as Record<string, unknown>;
+    row.voucherTemplateOverrides = overrides;
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return deepResolve(BASE_VOUCHER_TEMPLATE, overrides) as VoucherTemplate;
+  }
+
+  /**
+   * Resolved banded voucher report (the "Voucher Designer" document). Returns
+   * the company's stored layout, or DEFAULT_VOUCHER_REPORT when none is set.
+   * Reachable by any authenticated user (the app renders receipts from it).
+   */
+  async getVoucherReport(): Promise<VoucherReport> {
+    const row = await this.requireRow();
+    return (row.voucherReport as VoucherReport | null) ?? DEFAULT_VOUCHER_REPORT;
+  }
+
+  /** Upsert the whole banded voucher report (validated by the DTO). Admin only. */
+  async upsertVoucherReport(dto: VoucherReportDto): Promise<VoucherReport> {
+    const row = await this.requireRow();
+    row.voucherReport = dto as unknown as Record<string, unknown>;
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return dto as unknown as VoucherReport;
+  }
+
+  /** Reset the voucher report back to the Jordan default layout. Admin only. */
+  async resetVoucherReport(): Promise<VoucherReport> {
+    const row = await this.requireRow();
+    row.voucherReport = null;
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return DEFAULT_VOUCHER_REPORT;
+  }
+
+  /**
+   * Toggle the tobacco tax feature (a local FlowVan feature flag, independent of
+   * ERP-managed data). Deliberately NOT ERP-read-only: FlowVan applies tobacco
+   * tax locally (offline sales) even when the ERP owns the profiles. Admin only.
+   */
+  async setTobaccoTaxEnabled(enabled: boolean): Promise<{ tobaccoTaxEnabled: boolean }> {
+    const row = await this.requireRow();
+    row.tobaccoTaxEnabled = enabled;
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return { tobaccoTaxEnabled: row.tobaccoTaxEnabled };
+  }
+
   private async requireRow(): Promise<AppSettings> {
     const row = await this.repo.findOne({ where: { id: 1 } });
     if (!row) throw new NotFoundException('app_settings row missing — re-run migrations');
@@ -239,6 +331,7 @@ export class SettingsService {
       locale: row.locale,
       aiChatQuota: row.aiChatQuota,
       aiInferQuota: row.aiInferQuota,
+      tobaccoTaxEnabled: row.tobaccoTaxEnabled,
       jofotara: {
         clientId: row.jofotaraClientId ?? null,
         secretLast4: row.jofotaraSecretLast4 ?? null,
@@ -253,6 +346,16 @@ export class SettingsService {
         lastSyncAt: row.erpLastSyncAt ?? null,
         vanStore: row.erpVanStore ?? null,
         directExport: row.erpDirectExport ?? true,
+      },
+      ai: {
+        enabled: row.aiEnabled,
+        provider: row.aiProvider ?? 'anthropic',
+        model: row.aiModel ?? null,
+        apiKeyLast4: row.aiApiKeyLast4 ?? null,
+        isConfigured: !!row.aiApiKeyLast4,
+        confidenceThreshold: row.aiConfidenceThreshold ?? 75,
+        language: row.aiLanguage ?? 'auto',
+        capabilities: row.aiCapabilities ?? {},
       },
       updatedAt: row.updatedAt,
       updatedBy: row.updatedBy ?? null,
@@ -328,6 +431,61 @@ export class SettingsService {
     };
   }
 
+  /** Set the AI provider + toggle. The API key is encrypted; omit it to keep the current one. */
+  async updateAi(dto: UpdateAiDto): Promise<AiView> {
+    const row = await this.requireRow();
+    row.aiEnabled = dto.enabled;
+    if (dto.provider !== undefined) row.aiProvider = dto.provider;
+    if (dto.model !== undefined) row.aiModel = dto.model.trim() || null;
+    if (dto.apiKey) {
+      row.aiApiKeyEncrypted = encryptSecret(dto.apiKey);
+      row.aiApiKeyLast4 = maskSecret(dto.apiKey).slice(-4);
+    }
+    if (dto.confidenceThreshold !== undefined)
+      row.aiConfidenceThreshold = dto.confidenceThreshold;
+    if (dto.language !== undefined) row.aiLanguage = dto.language;
+    if (dto.capabilities !== undefined) row.aiCapabilities = dto.capabilities;
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return {
+      enabled: row.aiEnabled,
+      provider: row.aiProvider ?? 'anthropic',
+      model: row.aiModel ?? null,
+      apiKeyLast4: row.aiApiKeyLast4 ?? null,
+      isConfigured: !!row.aiApiKeyLast4,
+      confidenceThreshold: row.aiConfidenceThreshold ?? 75,
+      language: row.aiLanguage ?? 'auto',
+      capabilities: row.aiCapabilities ?? {},
+    };
+  }
+
+  /** Internal: decrypted AI provider + key for the assistant. Null key ⇒ not set here. */
+  async getAiConfig(): Promise<{
+    enabled: boolean;
+    provider: string;
+    model: string | null;
+    apiKey: string | null;
+    confidenceThreshold: number;
+    language: string;
+    capabilities: Record<string, boolean>;
+  }> {
+    const row = await this.repo
+      .createQueryBuilder('s')
+      .addSelect('s.aiApiKeyEncrypted')
+      .where('s.id = 1')
+      .getOne();
+    if (!row) throw new NotFoundException('app_settings row missing — re-run migrations');
+    return {
+      enabled: row.aiEnabled,
+      provider: row.aiProvider ?? 'anthropic',
+      model: row.aiModel ?? null,
+      apiKey: row.aiApiKeyEncrypted ? decryptSecret(row.aiApiKeyEncrypted) : null,
+      confidenceThreshold: row.aiConfidenceThreshold ?? 75,
+      language: row.aiLanguage ?? 'auto',
+      capabilities: row.aiCapabilities ?? {},
+    };
+  }
+
   /** Probe the ERP with the stored credentials (health + a 1-row catalog read). */
   async testErp(): Promise<{ ok: boolean; message: string }> {
     const cfg = await this.getErpConfig();
@@ -357,4 +515,47 @@ export class SettingsService {
       return { ok: false, message: e instanceof Error ? e.message : 'ERP unreachable' };
     }
   }
+}
+
+/* ───────────────────────── deep merge / diff (voucher template v2) ─────────── */
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Resolve `base` ⊕ `overrides`, emitting ONLY base-shaped keys (legacy/unknown
+ * override keys are dropped) so the GET payload always matches the current
+ * schema. Arrays and scalars are taken from the override when present.
+ */
+function deepResolve<T>(base: T, overrides: unknown): T {
+  if (isPlainObject(base)) {
+    const ov = isPlainObject(overrides) ? overrides : {};
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(base)) {
+      out[key] = key in ov ? deepResolve((base as Record<string, unknown>)[key], ov[key]) : (base as Record<string, unknown>)[key];
+    }
+    return out as T;
+  }
+  return (overrides === undefined ? base : (overrides as T));
+}
+
+/**
+ * Deep delta of `value` vs `base` — returns only the leaves that differ (arrays
+ * and scalars compared by value), or `undefined` when identical. Used to store a
+ * minimal override so future base changes reach uncustomized fields.
+ */
+function deepDiff(base: Record<string, unknown>, value: Record<string, unknown>): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(base)) {
+    const b = base[key];
+    const v = value[key];
+    if (isPlainObject(b) && isPlainObject(v)) {
+      const d = deepDiff(b, v);
+      if (d !== undefined) out[key] = d;
+    } else if (JSON.stringify(b) !== JSON.stringify(v) && v !== undefined) {
+      out[key] = v;
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
 }

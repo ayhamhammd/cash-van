@@ -120,4 +120,62 @@ export class VoucherTransaction extends BaseEntity {
 
   @Column({ name: 'net_total', type: 'numeric', precision: 14, scale: 3, default: 0 })
   netTotal!: string;
+
+  // ── Tobacco tax snapshot (frozen at sale time; mirrors the ERP invoice line) ─
+  /** True when this line's tax is tobacco tax (GST bypassed). */
+  @Column({ name: 'is_tobacco_line', type: 'boolean', default: false })
+  isTobaccoLine!: boolean;
+
+  @Column({ name: 'tobacco_tax_profile_id', type: 'text', nullable: true })
+  tobaccoTaxProfileId?: string | null;
+
+  /** Consumer price per base piece, integer fils. */
+  @Column({ name: 'consumer_price_fils', type: 'integer', nullable: true })
+  consumerPriceFils?: number | null;
+
+  /** consumerPrice × base qty, integer fils. */
+  @Column({ name: 'consumer_value_fils', type: 'integer', nullable: true })
+  consumerValueFils?: number | null;
+
+  @Column({ name: 'tobacco_tax_base_fils', type: 'integer', nullable: true })
+  tobaccoTaxBaseFils?: number | null;
+
+  @Column({ name: 'tobacco_sales_tax_rate', type: 'integer', nullable: true })
+  tobaccoSalesTaxRate?: number | null;
+
+  @Column({ name: 'tobacco_sales_tax_fils', type: 'integer', default: 0 })
+  tobaccoSalesTaxFils!: number;
+
+  @Column({ name: 'tobacco_special_tax_calc_type', type: 'text', nullable: true })
+  tobaccoSpecialTaxCalcType?: string | null;
+
+  @Column({ name: 'tobacco_special_tax_rate', type: 'integer', nullable: true })
+  tobaccoSpecialTaxRate?: number | null;
+
+  @Column({ name: 'tobacco_special_tax_fixed_fils', type: 'integer', nullable: true })
+  tobaccoSpecialTaxFixedFils?: number | null;
+
+  @Column({ name: 'tobacco_special_tax_fils', type: 'integer', default: 0 })
+  tobaccoSpecialTaxFils!: number;
+
+  @Column({ name: 'tobacco_withheld_tax_calc_type', type: 'text', nullable: true })
+  tobaccoWithheldTaxCalcType?: string | null;
+
+  @Column({ name: 'tobacco_withheld_tax_rate', type: 'integer', nullable: true })
+  tobaccoWithheldTaxRate?: number | null;
+
+  @Column({ name: 'tobacco_withheld_tax_fixed_fils', type: 'integer', nullable: true })
+  tobaccoWithheldTaxFixedFils?: number | null;
+
+  @Column({ name: 'tobacco_withheld_tax_fils', type: 'integer', default: 0 })
+  tobaccoWithheldTaxFils!: number;
+
+  @Column({ name: 'tobacco_gross_tax_fils', type: 'integer', default: 0 })
+  tobaccoGrossTaxFils!: number;
+
+  @Column({ name: 'tobacco_net_tax_fils', type: 'integer', default: 0 })
+  tobaccoNetTaxFils!: number;
+
+  @Column({ name: 'tobacco_calc_details', type: 'jsonb', nullable: true })
+  tobaccoCalcDetails?: Record<string, unknown> | null;
 }

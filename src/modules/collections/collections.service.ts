@@ -24,6 +24,14 @@ import { UpdateCollectionDto } from './dto/update-collection.dto';
 import { ListCollectionsQuery } from './dto/query.dto';
 import { BatchDepositDto } from './dto/collection-actions.dto';
 
+/** A collection list row enriched with the customer + salesman display names. */
+export type CollectionListItem = Collection & {
+  customerName: string | null;
+  customerNumber: string | null;
+  repName: string | null;
+  repCode: string | null;
+};
+
 export interface CollectionsSummary {
   date: string;
   totalCollectedFils: number;
@@ -49,7 +57,7 @@ export class CollectionsService {
     private readonly events: EventEmitter2,
   ) {}
 
-  async list(q: ListCollectionsQuery): Promise<{ items: Collection[]; total: number }> {
+  async list(q: ListCollectionsQuery): Promise<{ items: CollectionListItem[]; total: number }> {
     const where: Record<string, unknown> = {};
     if (q.repId) where.repId = q.repId;
     if (q.customerId) where.customerId = q.customerId;
@@ -59,12 +67,33 @@ export class CollectionsService {
     else if (q.from) where.collectedAt = MoreThanOrEqual(new Date(q.from));
     else if (q.to) where.collectedAt = LessThanOrEqual(new Date(q.to));
 
-    const [items, total] = await this.collections.findAndCount({
+    const [rows, total] = await this.collections.findAndCount({
       where,
-      relations: { cheque: true },
+      relations: { cheques: true },
       order: { collectedAt: 'DESC' },
       take: q.limit ?? 25,
       skip: q.offset ?? 0,
+    });
+
+    // Batch-load the page's customer + salesman names (one query each).
+    const repIds = [...new Set(rows.map((r) => r.repId))];
+    const custIds = [...new Set(rows.map((r) => r.customerId))];
+    const [reps, custs] = await Promise.all([
+      repIds.length ? this.reps.find({ where: { id: In(repIds) } }) : Promise.resolve([]),
+      custIds.length ? this.customers.find({ where: { id: In(custIds) } }) : Promise.resolve([]),
+    ]);
+    const repMap = new Map(reps.map((r) => [r.id, r]));
+    const custMap = new Map(custs.map((c) => [c.id, c]));
+
+    const items = rows.map((r): CollectionListItem => {
+      const rep = repMap.get(r.repId);
+      const cust = custMap.get(r.customerId);
+      return Object.assign(r, {
+        repName: rep?.nameAr || rep?.nameEn || rep?.code || null,
+        repCode: rep?.code ?? null,
+        customerName: cust?.nameAr || cust?.customerName || cust?.customerNumber || null,
+        customerNumber: cust?.customerNumber ?? null,
+      });
     });
     return { items, total };
   }
@@ -72,7 +101,7 @@ export class CollectionsService {
   async findOne(id: string): Promise<Collection> {
     const c = await this.collections.findOne({
       where: { id },
-      relations: { cheque: true },
+      relations: { cheques: true },
     });
     if (!c) throw new NotFoundException(`Collection ${id} not found`);
     return c;
@@ -104,17 +133,28 @@ export class CollectionsService {
     if (!(await this.customers.exist({ where: { id: dto.customerId } }))) {
       throw new BadRequestException(`Customer ${dto.customerId} not found`);
     }
-    if (dto.method === 'cheque' && !dto.cheque) {
-      throw new BadRequestException('cheque details are required when method=cheque');
+    // Resolve the receipt amount: cash uses the sent amount; cheque derives it
+    // from the sum of the cheques (each cheque carries its own amount).
+    let amount: number;
+    if (dto.method === 'cheque') {
+      if (!dto.cheques || dto.cheques.length === 0) {
+        throw new BadRequestException('at least one cheque is required when method=cheque');
+      }
+      amount = dto.cheques.reduce((s, c) => s + c.amount, 0);
+    } else {
+      if (!dto.amount || dto.amount < 1) {
+        throw new BadRequestException('amount is required when method=cash');
+      }
+      amount = dto.amount;
     }
 
     // Collections are confirmed on creation (both cash-van app and dashboard),
     // so a recorded payment immediately counts and queues to the ERP. The only
     // exception is a cheque whose amount-in-words doesn't match — that must be
-    // reconciled first, so it stays 'pending' for the reconcile queue.
-    const isMismatchCheque =
-      dto.method === 'cheque' && dto.cheque?.wordsMatch === false;
-    const initialStatus = isMismatchCheque ? 'pending' : 'confirmed';
+    // reconciled first, so the whole receipt stays 'pending' for the queue.
+    const hasMismatch =
+      dto.method === 'cheque' && (dto.cheques ?? []).some((c) => c.wordsMatch === false);
+    const initialStatus = hasMismatch ? 'pending' : 'confirmed';
 
     const created = await this.collections.manager.transaction(async (em) => {
       // Per-warehouse payment (C) number, keyed off the rep's van store.
@@ -125,7 +165,7 @@ export class CollectionsService {
           customerId: dto.customerId,
           collectionNumber,
           invoiceId: dto.invoiceId ?? null,
-          amount: dto.amount,
+          amount,
           method: dto.method,
           status: initialStatus,
           confirmedAt: initialStatus === 'confirmed' ? new Date() : null,
@@ -134,29 +174,31 @@ export class CollectionsService {
         }),
       );
 
-      if (dto.method === 'cheque' && dto.cheque) {
-        const c = dto.cheque;
-        await em.getRepository(Cheque).save(
-          em.getRepository(Cheque).create({
-            collectionId: collection.id,
-            bankName: c.bankName ?? null,
-            chequeNumber: c.chequeNumber ?? null,
-            payee: c.payee ?? null,
-            amount: dto.amount,
-            amountWords: c.amountWords ?? null,
-            dueDate: c.dueDate ?? null,
-            ocrConfidence: c.ocrConfidence ?? null,
-            wordsMatch: c.wordsMatch ?? true,
-            scanSource: c.scanSource ?? 'server',
-            imagePath: c.imagePath ?? null,
-            scannedAt: c.imagePath ? new Date() : null,
-            status: 'pending',
-          }),
+      if (dto.method === 'cheque' && dto.cheques) {
+        const repo = em.getRepository(Cheque);
+        await repo.save(
+          dto.cheques.map((c) =>
+            repo.create({
+              collectionId: collection.id,
+              bankName: c.bankName ?? null,
+              chequeNumber: c.chequeNumber ?? null,
+              payee: c.payee ?? null,
+              amount: c.amount,
+              amountWords: c.amountWords ?? null,
+              dueDate: c.dueDate ?? null,
+              ocrConfidence: c.ocrConfidence ?? null,
+              wordsMatch: c.wordsMatch ?? true,
+              scanSource: c.scanSource ?? 'server',
+              imagePath: c.imagePath ?? null,
+              scannedAt: c.imagePath ? new Date() : null,
+              status: 'pending',
+            }),
+          ),
         );
       }
       return em.getRepository(Collection).findOneOrFail({
         where: { id: collection.id },
-        relations: { cheque: true },
+        relations: { cheques: true },
       });
     });
 
@@ -172,12 +214,12 @@ export class CollectionsService {
     if (collection.status !== 'pending') {
       throw new ConflictException(`Cannot confirm a collection in status '${collection.status}'`);
     }
-    // Block confirm on an unreconciled words-mismatch cheque.
-    if (collection.method === 'cheque' && collection.cheque) {
-      const ch = collection.cheque;
-      if (!ch.wordsMatch && !ch.reconciledAt) {
+    // Block confirm while ANY cheque has an unreconciled words-mismatch.
+    if (collection.method === 'cheque') {
+      const blocked = (collection.cheques ?? []).some((ch) => !ch.wordsMatch && !ch.reconciledAt);
+      if (blocked) {
         throw new ConflictException(
-          'Cheque amount-in-words mismatch must be reconciled before confirming',
+          'A cheque amount-in-words mismatch must be reconciled before confirming',
         );
       }
     }
@@ -205,37 +247,48 @@ export class CollectionsService {
       throw new BadRequestException(`Customer ${dto.customerId} not found`);
     }
     const method = dto.method ?? collection.method;
-    if (method === 'cheque' && !collection.cheque && !dto.cheque) {
+    const hasExistingCheques = (collection.cheques ?? []).length > 0;
+    if (method === 'cheque' && !hasExistingCheques && !dto.cheques) {
       throw new BadRequestException('cheque details are required when method=cheque');
     }
 
     return this.collections.manager.transaction(async (em) => {
+      const chequeRepo = em.getRepository(Cheque);
+
+      // Replace the whole cheque set when `cheques` is provided (simplest, avoids
+      // per-row diffing); the receipt amount then follows Σ cheque amounts.
+      let amount = dto.amount ?? collection.amount;
+      if (dto.cheques) {
+        await chequeRepo.delete({ collectionId: id });
+        await chequeRepo.save(
+          dto.cheques.map((c) =>
+            chequeRepo.create({
+              collectionId: id,
+              bankName: c.bankName ?? null,
+              chequeNumber: c.chequeNumber ?? null,
+              payee: c.payee ?? null,
+              amount: c.amount,
+              amountWords: c.amountWords ?? null,
+              dueDate: c.dueDate ?? null,
+              wordsMatch: c.wordsMatch ?? true,
+              status: 'pending',
+            }),
+          ),
+        );
+        amount = dto.cheques.reduce((s, c) => s + c.amount, 0);
+      }
+
       if (dto.customerId !== undefined) collection.customerId = dto.customerId;
       if (dto.invoiceId !== undefined) collection.invoiceId = dto.invoiceId ?? null;
-      if (dto.amount !== undefined) collection.amount = dto.amount;
       if (dto.method !== undefined) collection.method = dto.method;
       if (dto.collectedAt !== undefined) collection.collectedAt = new Date(dto.collectedAt);
       if (dto.note !== undefined) collection.note = dto.note ?? null;
+      collection.amount = amount;
       await em.getRepository(Collection).save(collection);
-
-      if (dto.cheque) {
-        const repo = em.getRepository(Cheque);
-        const existing = await repo.findOne({ where: { collectionId: id } });
-        const c = dto.cheque;
-        const row = existing ?? repo.create({ collectionId: id, status: 'pending' });
-        if (c.bankName !== undefined) row.bankName = c.bankName ?? null;
-        if (c.chequeNumber !== undefined) row.chequeNumber = c.chequeNumber ?? null;
-        if (c.payee !== undefined) row.payee = c.payee ?? null;
-        if (c.amountWords !== undefined) row.amountWords = c.amountWords ?? null;
-        if (c.dueDate !== undefined) row.dueDate = c.dueDate ?? null;
-        if (c.wordsMatch !== undefined) row.wordsMatch = c.wordsMatch;
-        row.amount = dto.amount ?? collection.amount;
-        await repo.save(row);
-      }
 
       return em.getRepository(Collection).findOneOrFail({
         where: { id },
-        relations: { cheque: true },
+        relations: { cheques: true },
       });
     });
   }

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { Warehouse } from '../warehouses/entities/warehouse.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
@@ -27,6 +28,7 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
   imports: [
     TypeOrmModule.forFeature([
       ItemCart,
+      TobaccoTaxProfile,
       Warehouse,
       Rep,
       Customer,

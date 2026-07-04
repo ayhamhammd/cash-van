@@ -46,6 +46,7 @@ import { ErpSyncModule } from './modules/erp-sync/erp-sync.module';
 import { ApprovalsModule } from './modules/approvals/approvals.module';
 import { AgentModule } from './modules/agent/agent.module';
 import { OffersModule } from './modules/offers/offers.module';
+import { AiInsightsModule } from './modules/ai-insights/ai-insights.module';
 
 @Module({
   imports: [
@@ -103,6 +104,7 @@ import { OffersModule } from './modules/offers/offers.module';
     ErpSyncModule,
     AgentModule,
     OffersModule,
+    AiInsightsModule,
   ],
   controllers: [HealthController],
   providers: [

@@ -18,6 +18,7 @@ import { PaymentCheque } from './entities/payment-cheque.entity';
 import { TransactionKind } from './entities/transaction-kind.entity';
 import { VanStock } from '../products/entities/van-stock.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { User } from '../users/entities/user.entity';
 import { Rep } from '../reps/entities/rep.entity';
 
@@ -31,7 +32,35 @@ import { OffersService } from '../offers/offers.service';
 import { OffersEngineService } from '../offers/offers-engine.service';
 import { SettingsService } from '../settings/settings.service';
 import { calcVoucher, toFils, filsToJod, type TaxMode } from './voucher-calc';
+import { calculateTobaccoTax, type TobaccoTaxProfileData } from './tobacco-tax-calc';
 import type { EvaluationResult } from '../offers/offers.types';
+
+/** Resolved tobacco context for one voucher line (null = not a tobacco line). */
+interface TobaccoLineCtx {
+  profile: TobaccoTaxProfileData;
+  /** Consumer price per BASE piece, integer fils. */
+  consumerPerPieceFils: number;
+}
+
+/** Map a stored tobacco profile row to the pure engine's profile shape. */
+function toEngineProfile(p: TobaccoTaxProfile): TobaccoTaxProfileData {
+  return {
+    id: p.id,
+    taxBase: p.taxBase,
+    salesTaxEnabled: p.salesTaxEnabled,
+    salesTaxRate: p.salesTaxRate,
+    specialTaxEnabled: p.specialTaxEnabled,
+    specialTaxCalculationType: p.specialTaxCalculationType,
+    specialTaxBase: p.specialTaxBase,
+    specialTaxRate: p.specialTaxRate ?? null,
+    specialTaxFixedAmount: p.specialTaxFixedAmount ?? null,
+    withheldTaxEnabled: p.withheldTaxEnabled,
+    withheldTaxCalculationType: p.withheldTaxCalculationType,
+    withheldTaxBase: p.withheldTaxBase,
+    withheldTaxAmount: p.withheldTaxAmount ?? null,
+    withheldTaxRate: p.withheldTaxRate ?? null,
+  };
+}
 
 /**
  * How each voucher kind moves the salesman's van stock when posted:
@@ -325,6 +354,65 @@ export class VouchersService implements OnModuleInit {
     }
   }
 
+  /**
+   * Resolve each voucher line's tobacco context (aligned 1:1 with dto.transactions).
+   * Returns all-null when the feature is off / not a SALE. A tobacco item that is
+   * missing its profile or consumer price fails fast (can't sell an unconfigured
+   * tobacco item). Only active profiles are honored.
+   */
+  private async resolveTobaccoLines(
+    em: EntityManager,
+    dto: CreateVoucherDto,
+    items: ItemCart[],
+    enabled: boolean,
+  ): Promise<(TobaccoLineCtx | null)[]> {
+    const empty = dto.transactions.map(() => null as TobaccoLineCtx | null);
+    if (!enabled) return empty;
+
+    const itemByNumber = new Map(items.map((i) => [i.itemNumber, i]));
+    const tobaccoItems = items.filter((i) => i.isTobaccoProduct);
+    if (tobaccoItems.length === 0) return empty;
+
+    const profileIds = [
+      ...new Set(
+        tobaccoItems
+          .map((i) => i.tobaccoTaxProfileId)
+          .filter((x): x is string => !!x),
+      ),
+    ];
+    const profiles = profileIds.length
+      ? await em.getRepository(TobaccoTaxProfile).find({
+          where: { id: In(profileIds), isActive: true },
+        })
+      : [];
+    const profileById = new Map(profiles.map((p) => [p.id, p]));
+
+    return dto.transactions.map((line) => {
+      const item = itemByNumber.get(line.itemNumber);
+      if (!item || !item.isTobaccoProduct) return null;
+      if (!item.tobaccoTaxProfileId) {
+        throw new BadRequestException(
+          `Tobacco item ${item.itemNumber} has no tobacco tax profile assigned`,
+        );
+      }
+      const profileRow = profileById.get(item.tobaccoTaxProfileId);
+      if (!profileRow) {
+        throw new BadRequestException(
+          `Tobacco item ${item.itemNumber}: tax profile is missing or inactive`,
+        );
+      }
+      if (item.consumerPriceFils == null) {
+        throw new BadRequestException(
+          `Tobacco item ${item.itemNumber} has no consumer price set`,
+        );
+      }
+      return {
+        profile: toEngineProfile(profileRow),
+        consumerPerPieceFils: item.consumerPriceFils,
+      };
+    });
+  }
+
   private async createUnchecked(dto: CreateVoucherDto): Promise<VoucherHeader> {
     return this.dataSource.transaction(async (em) => {
       const tk = await this.loadTransKind(em, dto.transKind);
@@ -397,8 +485,9 @@ export class VouchersService implements OnModuleInit {
       // Tax is ALWAYS taken from the item record (DB), never trusted from the
       // client — overwrite each line's taxPercentage with the item's own rate.
       const itemNumbers = [...new Set(dto.transactions.map((l) => l.itemNumber))];
+      let items: ItemCart[] = [];
       if (itemNumbers.length) {
-        const items = await em.getRepository(ItemCart).find({
+        items = await em.getRepository(ItemCart).find({
           where: { itemNumber: In(itemNumbers) },
         });
         const taxByItem = new Map(items.map((i) => [i.itemNumber, i.taxPercentage]));
@@ -408,26 +497,52 @@ export class VouchersService implements OnModuleInit {
         }
       }
 
-      // Canonical money engine (voucher-calc.ts) — fils-integer tax + discount in
-      // the seller's INCLUSIVE/EXCLUSIVE mode. Line discount = % + value (stacked);
-      // ONE header discount (% or value) distributed across lines PRE-tax. This is
-      // the single spec the app + ERP conform to (docs/VOUCHER-CALC-SPEC.md).
       this.validateLines(dto.transactions);
       const settingsView = await this.settings.get().catch(() => null);
       const taxMode: TaxMode =
         settingsView?.taxCalcMethod === 'INCLUSIVE' ? 'INCLUSIVE' : 'EXCLUSIVE';
+
+      // ── Tobacco tax resolution (SALE only, when the master toggle is ON) ──────
+      // For a tobacco line, normal GST is BYPASSED (calc runs it at 0%) and the
+      // tobacco NET tax is added on top afterwards. Resolve each line's profile
+      // now so an unconfigured tobacco item fails fast. Aligned 1:1 with lines.
+      const tobaccoEnabled = settingsView?.tobaccoTaxEnabled === true && dto.transKind === 'SALE';
+      const tobaccoLines = await this.resolveTobaccoLines(em, dto, items, tobaccoEnabled);
+
+      // Canonical money engine (voucher-calc.ts) — fils-integer tax + discount in
+      // the seller's INCLUSIVE/EXCLUSIVE mode. Line discount = % + value (stacked);
+      // ONE header discount (% or value) distributed across lines PRE-tax. This is
+      // the single spec the app + ERP conform to (docs/VOUCHER-CALC-SPEC.md).
       const calc = calcVoucher({
         taxMode,
         headerDiscountPct: Number(dto.totalDiscountPercentage ?? 0) || 0,
         headerDiscountFils: toFils(dto.totalDiscountValue ?? 0),
-        lines: dto.transactions.map((l) => ({
+        lines: dto.transactions.map((l, i) => ({
           unitPriceFils: toFils(l.unitPrice),
           qty: Number(l.itemQty) || 0,
           lineDiscountPct: Number(l.discountPercentage ?? 0) || 0,
           lineDiscountFils: toFils(l.discountValue ?? 0),
-          taxRatePct: Number(l.taxPercentage ?? 0) || 0,
+          // Tobacco lines: GST bypassed (net tobacco tax replaces it, added on top).
+          taxRatePct: tobaccoLines[i] ? 0 : Number(l.taxPercentage ?? 0) || 0,
         })),
       });
+
+      // Per-line tobacco tax (fils). Computed on base pieces so per-piece excise
+      // is correct; base = qtyOfUnit × unitBaseQty, unit/consumer prices per piece.
+      const tobaccoResults = dto.transactions.map((line, i) => {
+        const ctx = tobaccoLines[i];
+        if (!ctx) return null;
+        const unitFactor = line.unitBaseQty && line.unitBaseQty > 0 ? line.unitBaseQty : 1;
+        const baseQty = (Number(line.itemQty) || 0) * unitFactor;
+        return calculateTobaccoTax({
+          quantity: baseQty,
+          unitPrice: Math.round(toFils(line.unitPrice) / unitFactor),
+          consumerPrice: ctx.consumerPerPieceFils,
+          profile: ctx.profile,
+        });
+      });
+      const tobaccoTaxTotalFils = tobaccoResults.reduce((s, r) => s + (r?.netTaxAmount ?? 0), 0);
+
       // Per-line results aligned 1:1 with dto.transactions.
       const computed = dto.transactions.map((line, i) => ({ line, res: calc.lines[i] }));
 
@@ -440,8 +555,8 @@ export class VouchersService implements OnModuleInit {
         referenceVoucherNumber,
         inDate: dto.inDate ? new Date(dto.inDate) : new Date(),
         total: filsToJod(calc.totalNetFils), // net (tax base)
-        totalTax: filsToJod(calc.totalTaxFils),
-        netTotal: filsToJod(calc.grandTotalFils), // grand total (with tax)
+        totalTax: filsToJod(calc.totalTaxFils + tobaccoTaxTotalFils), // GST + tobacco net
+        netTotal: filsToJod(calc.grandTotalFils + tobaccoTaxTotalFils), // grand total (with tax)
         totalDiscountValue: filsToJod(calc.headerDiscountFils),
         totalDiscountPercentage: (dto.totalDiscountPercentage ?? '0').toString(),
         appliedOfferIds: dto.appliedOfferIds ?? [],
@@ -493,8 +608,10 @@ export class VouchersService implements OnModuleInit {
         }
       }
 
-      const txEntities = prepared.map((p) =>
-        em.getRepository(VoucherTransaction).create({
+      const txEntities = prepared.map((p, i) => {
+        const tob = tobaccoResults[i];
+        const ctx = tobaccoLines[i];
+        return em.getRepository(VoucherTransaction).create({
           voucherNumber: dto.voucherNumber,
           itemNumber: p.line.itemNumber,
           itemName: p.line.itemName,
@@ -502,7 +619,8 @@ export class VouchersService implements OnModuleInit {
           storeNumber: p.move.storeNumber,
           fromStoreNumber: p.move.fromStoreNumber,
           toStoreNumber: p.move.toStoreNumber,
-          taxPercentage: p.line.taxPercentage ?? '0',
+          // Tobacco lines carry NO GST rate (the tobacco rate lives in the snapshot).
+          taxPercentage: tob ? '0' : p.line.taxPercentage ?? '0',
           discountPercentage: p.line.discountPercentage ?? '0',
           // RESOLVED total line discount = own line discount + its share of the
           // header discount (fils). This is exactly what the ERP push needs.
@@ -515,9 +633,32 @@ export class VouchersService implements OnModuleInit {
           unitBaseQty: p.unitFactor,
           signedQty: p.move.signedQty.toString(),
           total: filsToJod(p.res.netFils), // line net (tax base, post-discount)
-          netTotal: filsToJod(p.res.totalFils), // line total (with tax)
-        }),
-      );
+          // Tobacco line total = discounted net + tobacco NET tax (added on top);
+          // otherwise the GST-inclusive line total from the money engine.
+          netTotal: filsToJod(tob ? p.res.netFils + tob.netTaxAmount : p.res.totalFils),
+          // ── Tobacco snapshot (frozen at sale time) ──────────────────────────
+          isTobaccoLine: tob !== null,
+          tobaccoTaxProfileId: ctx?.profile.id ?? null,
+          consumerPriceFils: tob ? ctx!.consumerPerPieceFils : null,
+          consumerValueFils: tob?.consumerValue ?? null,
+          tobaccoTaxBaseFils: tob?.taxBaseAmount ?? null,
+          tobaccoSalesTaxRate: ctx?.profile.salesTaxRate ?? null,
+          tobaccoSalesTaxFils: tob?.salesTaxAmount ?? 0,
+          tobaccoSpecialTaxCalcType: ctx?.profile.specialTaxCalculationType ?? null,
+          tobaccoSpecialTaxRate: ctx?.profile.specialTaxRate ?? null,
+          tobaccoSpecialTaxFixedFils: ctx?.profile.specialTaxFixedAmount ?? null,
+          tobaccoSpecialTaxFils: tob?.specialTaxAmount ?? 0,
+          tobaccoWithheldTaxCalcType: ctx?.profile.withheldTaxCalculationType ?? null,
+          tobaccoWithheldTaxRate: ctx?.profile.withheldTaxRate ?? null,
+          tobaccoWithheldTaxFixedFils: ctx?.profile.withheldTaxAmount ?? null,
+          tobaccoWithheldTaxFils: tob?.withheldTaxAmount ?? 0,
+          tobaccoGrossTaxFils: tob?.grossTaxAmount ?? 0,
+          tobaccoNetTaxFils: tob?.netTaxAmount ?? 0,
+          tobaccoCalcDetails: tob
+            ? (tob.calculationDetails as unknown as Record<string, unknown>)
+            : null,
+        });
+      });
       await em.getRepository(VoucherTransaction).save(txEntities);
 
       if (dto.payments?.length) {

@@ -1,6 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMinSize,
+  IsArray,
   IsDateString,
   IsIn,
   IsInt,
@@ -48,9 +50,11 @@ export class UpdateCollectionDto {
   @Length(0, 500)
   note?: string;
 
-  @ApiPropertyOptional({ type: ChequeInputDto })
+  @ApiPropertyOptional({ type: [ChequeInputDto], description: 'Replaces the cheque set when provided.' })
   @IsOptional()
-  @ValidateNested()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
   @Type(() => ChequeInputDto)
-  cheque?: ChequeInputDto;
+  cheques?: ChequeInputDto[];
 }

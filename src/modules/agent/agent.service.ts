@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import {
@@ -9,12 +9,9 @@ import { AgentStoreService } from './store/agent-store.service';
 import { ReadonlyDbService } from './db/readonly-db.service';
 import { AGENT_TOOL_DEFS } from './tools/tool-definitions';
 import { buildSystemPrompt } from './agent.system-prompt';
-import {
-  LLM_PROVIDER,
-  type LlmMessage,
-  type LlmProvider,
-  type LlmToolResult,
-} from './llm/llm.types';
+import { AiProviderResolver } from './llm/ai-provider.resolver';
+import { SettingsService } from '../settings/settings.service';
+import { type LlmMessage, type LlmToolResult } from './llm/llm.types';
 import type { AgentEvent, StoredMessage } from './agent.types';
 
 export interface ChatRequest {
@@ -31,10 +28,11 @@ export class AgentService {
 
   constructor(
     private readonly config: ConfigService,
-    @Inject(LLM_PROVIDER) private readonly provider: LlmProvider,
+    private readonly providerResolver: AiProviderResolver,
     private readonly tools: AgentToolsService,
     private readonly store: AgentStoreService,
     private readonly db: ReadonlyDbService,
+    private readonly settings: SettingsService,
   ) {
     this.maxIterations = this.config.get<number>('agent.maxIterations', 8);
   }
@@ -42,17 +40,18 @@ export class AgentService {
   /**
    * Run one chat turn, yielding SSE events as the model streams text, calls
    * tools, and produces reports. Provider-agnostic: the loop talks to the
-   * configured LlmProvider (Claude or Gemini).
+   * resolved LlmProvider (Claude / ChatGPT / Gemini, per the Settings AI config).
    */
   async *runChat(
     req: ChatRequest,
     signal: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
-    if (!this.provider.isConfigured()) {
+    const provider = await this.providerResolver.resolve();
+    if (!provider.isConfigured()) {
       yield {
         type: 'error',
         data: {
-          message: `AI agent is not configured (${this.provider.apiKeyEnvVar} is missing).`,
+          message: `AI assistant is not configured — set a provider + API key in Settings → AI (or ${provider.apiKeyEnvVar}).`,
         },
       };
       return;
@@ -67,12 +66,16 @@ export class AgentService {
       ...convo.messages,
       { role: 'user', text: req.prompt },
     ];
-    const system = buildSystemPrompt(await this.getTableNames());
+    const aiLanguage = await this.settings
+      .getAiConfig()
+      .then((c) => c.language)
+      .catch(() => 'auto');
+    const system = buildSystemPrompt(await this.getTableNames(), aiLanguage);
     const reportIds: string[] = [];
     let stopReason = 'end_turn';
 
     for (let i = 0; i < this.maxIterations; i++) {
-      const turn = this.provider.streamTurn(
+      const turn = provider.streamTurn(
         { system, tools: AGENT_TOOL_DEFS, messages },
         signal,
       );

@@ -54,6 +54,12 @@ export default () => ({
     apiKey: process.env.GEMINI_API_KEY ?? '',
     model: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash',
   },
+  // OpenAI (ChatGPT) settings (used when LLM_PROVIDER=openai). Preferred config
+  // is the Settings → AI panel; these are the env fallback.
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY ?? '',
+    model: process.env.OPENAI_MODEL ?? 'gpt-4o',
+  },
   agent: {
     apiKey: process.env.ANTHROPIC_API_KEY ?? '',
     model: process.env.AGENT_MODEL ?? 'claude-sonnet-4-6',
