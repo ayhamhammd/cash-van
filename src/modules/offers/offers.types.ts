@@ -93,24 +93,25 @@ export interface LinePercentDiscountReward {
 }
 
 /**
- * A fixed amount (fils) off EVERY line of the order — the amount-off twin of
- * LinePercentDiscountReward, for a PAYMENT_METHOD_DISCOUNT. Each qualifying line
- * gets `baseAmountFils` off (a flat amount per line, independent of the line qty),
- * clamped to the line gross. STATIC keeps it fixed; DYNAMIC scales it with the
- * order's item count the same way the percent reward does:
+ * A fixed amount (fils) off EACH UNIT, on every line of the order — the amount-off
+ * twin of LinePercentDiscountReward, for a PAYMENT_METHOD_DISCOUNT. Each qualifying
+ * line gets `baseAmountFils × line qty` off (so 10 units × 50 fils = 500 fils),
+ * clamped to the line gross. STATIC keeps the per-unit amount fixed; DYNAMIC scales
+ * it with the order's item count the same way the percent reward does:
  *   effectiveAmount = baseAmountFils × (1 + multiplier × floor((count − anchor) / itemsPerStep))
- * capped at `maxAmountFils`.
+ * capped at `maxAmountFils`. (Per-unit like ITEM_AMOUNT_DISCOUNT, but applied to
+ * every line rather than only the selected items.)
  */
 export interface LineAmountDiscountReward {
   kind: 'LINE_AMOUNT_DISCOUNT';
-  /** Amount off each line, in fils. */
+  /** Amount off each unit, in fils. */
   baseAmountFils: number;
   mode: DiscountMode;
   /** DYNAMIC only: fraction of base added per step, e.g. 0.5. */
   multiplier?: number;
   /** DYNAMIC only: items per multiplication step, e.g. 6. */
   itemsPerStep?: number;
-  /** DYNAMIC only: cap on the per-line amount, in fils. */
+  /** DYNAMIC only: cap on the per-unit amount, in fils. */
   maxAmountFils?: number;
 }
 

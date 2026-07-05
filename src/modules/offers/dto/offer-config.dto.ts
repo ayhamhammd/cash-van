@@ -115,7 +115,7 @@ export class OfferRewardDto {
   minQty?: number;
 
   // ---- LINE_AMOUNT_DISCOUNT / ITEM_AMOUNT_DISCOUNT ----
-  @ApiPropertyOptional({ description: 'Amount-off rewards: base amount in fils (per line for LINE_AMOUNT_DISCOUNT, per unit for ITEM_AMOUNT_DISCOUNT).' })
+  @ApiPropertyOptional({ description: 'Amount-off rewards: base amount in fils, off each UNIT (× line qty) for both LINE_AMOUNT_DISCOUNT and ITEM_AMOUNT_DISCOUNT.' })
   @IsOptional()
   @IsInt()
   @Min(0)
