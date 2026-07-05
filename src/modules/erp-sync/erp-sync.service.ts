@@ -880,16 +880,27 @@ export class ErpSyncService {
     const custs = await this.customers.find({ where: { isActive: true } });
     let processed = 0;
     for (const cust of custs) {
-      const code = cust.customerNumber;
-      if (!code || code.startsWith('ERP-')) continue; // need a real ERP customer code
+      // Identify the customer to the ERP. Customers created in the ERP UI have a
+      // NULL code — FlowVan shows them as `ERP-<id>` — so CODE alone can't reach
+      // them. The id-map always holds the ERP customer id (`erpId`); prefer that
+      // (`/prices?customerId=`). Fall back to a real code, else skip FlowVan-only
+      // customers the ERP has never heard of.
+      const idmap = await this.idmap.findOne({
+        where: { entity: 'customer', localId: cust.customerNumber },
+      });
+      const idQuery: { customerId?: string; customerCode?: string } = {};
+      if (idmap?.erpId) idQuery.customerId = idmap.erpId;
+      else if (idmap?.erpCode) idQuery.customerCode = idmap.erpCode;
+      else if (cust.customerNumber && !cust.customerNumber.startsWith('ERP-'))
+        idQuery.customerCode = cust.customerNumber;
+      if (!idQuery.customerId && !idQuery.customerCode) continue;
       try {
-        processed += await this.syncCustomerPricesFor(cust, code);
+        processed += await this.syncCustomerPricesFor(cust, idQuery);
       } catch (e) {
         // One customer failing must NOT abort the whole pull. The ERP returns
-        // HTTP 400 CUSTOMER_NOT_FOUND for a code it doesn't have (e.g. a
-        // FlowVan-only customer) — skip it and keep syncing the rest.
+        // HTTP 400 CUSTOMER_NOT_FOUND for an id/code it doesn't have — skip + continue.
         this.logger.warn(
-          `customer-price pull skipped ${code}: ${e instanceof Error ? e.message : e}`,
+          `customer-price pull skipped ${cust.customerNumber}: ${e instanceof Error ? e.message : e}`,
         );
       }
     }
@@ -897,7 +908,10 @@ export class ErpSyncService {
   }
 
   /** Pull + cache ONE customer's resolved ERP prices. Returns rows upserted. */
-  private async syncCustomerPricesFor(cust: Customer, code: string): Promise<number> {
+  private async syncCustomerPricesFor(
+    cust: Customer,
+    idQuery: { customerId?: string; customerCode?: string },
+  ): Promise<number> {
     let processed = 0;
     // Fetch all resolved prices for this customer (paginated).
     const rows: ErpPrice[] = [];
@@ -905,7 +919,7 @@ export class ErpSyncService {
     let total = Number.POSITIVE_INFINITY;
     while (rows.length < total) {
       const { data, total: t } = await this.erp.list<ErpPrice>('prices', {
-        customerCode: code,
+        ...idQuery,
         page,
         pageSize: 200,
       });
