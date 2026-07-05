@@ -240,6 +240,33 @@ export class ErpSyncService {
     return this.cursors.find();
   }
 
+  /**
+   * Seed every stock-movement cursor to "now" so the next pull skips all history.
+   * Run this ONCE right after switching the ERP API key to a dedicated integration
+   * user: without it, the first pull (cursor still null → full pull) would re-mirror
+   * past movements — including cash-van's own pushes that were recorded under the
+   * OLD admin key — and double-count stock. Future movements sync normally. Admin only.
+   */
+  async catchUpMovements(): Promise<{ seeded: string[]; at: string }> {
+    const now = new Date();
+    const entities = new Set(
+      (await this.allStoreCodes()).map((s) => `movements:${s}`),
+    );
+    // Include any existing movements:* cursors too (e.g. stale/old store codes).
+    for (const c of await this.cursors.find()) {
+      if (c.entity.startsWith('movements:')) entities.add(c.entity);
+    }
+    for (const entity of entities) {
+      const c =
+        (await this.cursors.findOne({ where: { entity } })) ??
+        this.cursors.create({ entity });
+      c.updatedSince = now;
+      c.lastError = null;
+      await this.cursors.save(c);
+    }
+    return { seeded: [...entities], at: now.toISOString() };
+  }
+
   /** Passthrough: list ERP categories (for the item form). [] when ERP off. */
   async listErpCategories(): Promise<unknown[]> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
