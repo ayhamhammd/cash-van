@@ -660,8 +660,7 @@ export class ErpSyncService {
   /**
    * Mirror the ERP stock-movement ledger for every store into cash-van (the
    * per-store cursor + `movement` id-map make it idempotent). Runs inside
-   * `syncNow` (5-min) and in real time on the Integration Hub
-   * `inventory.stock_changed` webhook — see onHubStockChanged.
+   * `syncNow` (5-min).
    */
   async pullAllMovements(): Promise<SyncEntityResult[]> {
     const cfg = await this.settings.getErpConfig();
@@ -673,45 +672,6 @@ export class ErpSyncService {
       );
     }
     return results;
-  }
-
-  // ── Real-time stock via the Integration Hub webhook ─────────────────────────
-  private hubStockSyncPending = false;
-  private hubStockSyncRunning = false;
-
-  /**
-   * The Hub relayed an ERP `inventory.stock_changed` event (payload:
-   * `{ skuId, warehouseId, quantityChanged, newStockLevel }`). Rather than trust
-   * a single delta (ERP uuids we'd have to map, and risk of double-count vs. the
-   * polling mirror), we pull the ERP movement ledger — which is idempotent — so
-   * cash-van stock catches up immediately instead of waiting for the 5-min cycle.
-   * Bursts of events coalesce into a single drain.
-   */
-  @OnEvent('hub.inventory.stock_changed')
-  onHubStockChanged(): void {
-    this.hubStockSyncPending = true;
-    void this.drainHubStockSync();
-  }
-
-  private async drainHubStockSync(): Promise<void> {
-    if (this.hubStockSyncRunning) return;
-    this.hubStockSyncRunning = true;
-    try {
-      while (this.hubStockSyncPending) {
-        this.hubStockSyncPending = false;
-        try {
-          const res = await this.pullAllMovements();
-          const n = res.reduce((s, r) => s + (r.count ?? 0), 0);
-          if (n > 0) this.logger.log(`hub stock_changed → mirrored ${n} ERP movement(s)`);
-        } catch (e) {
-          this.logger.warn(
-            `hub stock_changed sync failed: ${e instanceof Error ? e.message : String(e)}`,
-          );
-        }
-      }
-    } finally {
-      this.hubStockSyncRunning = false;
-    }
   }
 
   /**

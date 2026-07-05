@@ -11,21 +11,12 @@ import { Customer } from '../customers/entities/customer.entity';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { SettingsService } from '../settings/settings.service';
 import { ErpHttpClient } from './erp-http.client';
-import { HubHttpClient } from './hub-http.client';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import {
   ErpOutbox,
   ErpOutboxKind,
   ErpOutboxStatus,
 } from './entities/erp-outbox.entity';
-
-/** Document kinds the Integration Hub has a sync endpoint for (see SPEC-integration-hub). */
-const HUB_KINDS: ReadonlySet<ErpOutboxKind> = new Set<ErpOutboxKind>([
-  'SALE_INVOICE',
-  'SALES_RETURN',
-  'PAYMENT',
-  'STOCK_TRANSFER',
-]);
 
 const MAX_ATTEMPTS = 6;
 const BATCH = 20;
@@ -37,7 +28,6 @@ export class ErpOutboxService {
 
   constructor(
     private readonly erp: ErpHttpClient,
-    private readonly hub: HubHttpClient,
     private readonly settings: SettingsService,
     @InjectRepository(ErpOutbox) private readonly outbox: Repository<ErpOutbox>,
     @InjectRepository(ErpIdMap) private readonly idmap: Repository<ErpIdMap>,
@@ -103,10 +93,7 @@ export class ErpOutboxService {
 
   private async pushOne(row: ErpOutbox): Promise<void> {
     try {
-      // Route through the Integration Hub when it's enabled + configured and the
-      // doc kind has a Hub sync endpoint; otherwise push directly to the ERP.
-      const useHub = HUB_KINDS.has(row.kind) && (await this.hub.isActive());
-      const calls = await this.buildCalls(row, useHub);
+      const calls = await this.buildCalls(row);
       if (!calls || calls.length === 0) {
         return this.fail(row, 'payload could not be built (source missing)');
       }
@@ -114,11 +101,9 @@ export class ErpOutboxService {
       // retry replays them idempotently. (Most kinds are a single call.)
       let lastData: unknown = null;
       for (const c of calls) {
-        const res = useHub
-          ? await this.hub.postSync(c.path, c.body)
-          : await this.erp.post(c.path, c.body, c.idem ?? row.ref);
+        const res = await this.erp.post(c.path, c.body, c.idem ?? row.ref);
         if (!res.ok) {
-          return this.fail(row, res.error ?? `${useHub ? 'Hub' : 'ERP'} rejected the document`);
+          return this.fail(row, res.error ?? 'ERP rejected the document');
         }
         lastData = res.data;
       }
@@ -135,79 +120,18 @@ export class ErpOutboxService {
   }
 
   /**
-   * Resolve a queued document to the call(s) needed to mirror it. When `useHub`,
-   * targets the Hub `/api/sync/*` shape (single stock-transfers doc, invoice-level
-   * payment); otherwise the direct-ERP shape (two stock-adjustments, receipt).
+   * Resolve a queued document to the call(s) needed to mirror it, using the
+   * direct-ERP shape (two stock-adjustments for a transfer, receipt for a payment).
    */
   private async buildCalls(
     row: ErpOutbox,
-    useHub: boolean,
   ): Promise<Array<{ path: string; body: Record<string, unknown>; idem?: string }> | null> {
-    if (useHub) {
-      if (row.kind === 'STOCK_TRANSFER') {
-        const t = await this.buildHubTransfer(row.ref);
-        return t ? [t] : null;
-      }
-      if (row.kind === 'PAYMENT') {
-        const p = await this.buildHubPayment(row.ref);
-        return p ? [p] : null;
-      }
-      // SALE_INVOICE + SALES_RETURN reuse the direct builders — their bodies +
-      // path segments ('sales-invoices' / 'sales-returns') match the Hub sync API.
-      const one = await this.buildPayload(row);
-      return one ? [one] : null;
-    }
-    // ── Direct ERP ────────────────────────────────────────────────────────────
     // A TRANSFER becomes TWO immediate stock-adjustments (OUT source + IN dest)
     // so ERP stock moves RIGHT AWAY — the ERP `stock-transfers` document instead
     // sits PENDING_DISPATCH and doesn't touch stock until dispatch+receive.
     if (row.kind === 'STOCK_TRANSFER') return this.buildTransferCalls(row.ref);
     const one = await this.buildPayload(row);
     return one ? [one] : null;
-  }
-
-  /** Hub payment (invoice-level) from a confirmed collection. See D7 in the spec. */
-  private async buildHubPayment(
-    collectionId: string,
-  ): Promise<{ path: string; body: Record<string, unknown> } | null> {
-    const col = await this.collections.findOne({ where: { id: collectionId } });
-    if (!col) return null;
-    return {
-      path: 'payments',
-      body: {
-        externalId: collectionId,
-        amount: col.amount / 1000, // fils → JOD major (ERP expects decimal)
-        paymentMethod: col.method === 'cheque' ? 'CHECK' : 'CASH',
-        notes: col.note ?? undefined,
-      },
-    };
-  }
-
-  /** Hub stock-transfer (one document with from/to warehouse codes + lines). */
-  private async buildHubTransfer(
-    voucherNumber: string,
-  ): Promise<{ path: string; body: Record<string, unknown> } | null> {
-    const header = await this.headers.findOne({ where: { voucherNumber } });
-    if (!header) return null;
-    const lines = await this.lines.find({ where: { voucherNumber } });
-    if (!lines.length) return null;
-    const from = lines.find((l) => l.fromStoreNumber)?.fromStoreNumber;
-    const to = lines.find((l) => l.toStoreNumber)?.toStoreNumber;
-    if (!from || !to) return null; // a transfer needs both endpoints
-    return {
-      path: 'stock-transfers',
-      body: {
-        externalId: voucherNumber,
-        deviceId: header.userCode,
-        fromWarehouseCode: from,
-        toWarehouseCode: to,
-        date: header.inDate,
-        lines: lines.map((l) => ({
-          skuCode: l.itemNumber,
-          quantity: Math.round(Number(l.itemQty) || 0),
-        })),
-      },
-    };
   }
 
   private async fail(row: ErpOutbox, error: string): Promise<void> {
@@ -528,9 +452,7 @@ export class ErpOutboxService {
   private extractResultRef(data: unknown): string | null {
     if (data && typeof data === 'object') {
       const top = data as Record<string, unknown>;
-      // Hub replay: { duplicate: true, targetDocumentNumber }.
-      if (typeof top.targetDocumentNumber === 'string') return top.targetDocumentNumber;
-      // Success: the ERP document, wrapped as { data: {...} } (ERP) or flat (Hub forward).
+      // Success: the ERP document, wrapped as { data: {...} }.
       const d = (top.data as Record<string, unknown> | undefined) ?? top;
       const num =
         d?.invoiceNumber ?? d?.returnNumber ?? d?.transferNumber ?? d?.paymentId;

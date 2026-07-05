@@ -13,9 +13,7 @@ import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swa
 
 import { ErpSyncService } from './erp-sync.service';
 import { ErpOutboxService } from './erp-outbox.service';
-import { HubWebhookService } from './hub-webhook.service';
 import { ErpOutboxStatus } from './entities/erp-outbox.entity';
-import { HubWebhookStatus } from './entities/hub-webhook-event.entity';
 import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -29,7 +27,6 @@ export class ErpSyncController {
   constructor(
     private readonly sync: ErpSyncService,
     private readonly outbox: ErpOutboxService,
-    private readonly hubWebhooks: HubWebhookService,
   ) {}
 
   @Post('sync/now')
@@ -136,25 +133,5 @@ export class ErpSyncController {
   @ApiOkResponse({ description: 'The updated outbox row' })
   outboxRetry(@Param('id', ParseUUIDPipe) id: string) {
     return this.outbox.retry(id);
-  }
-
-  @Get('hub-webhooks')
-  @ApiOperation({
-    summary: 'Inbound Hub events',
-    description: 'Recent Integration Hub webhooks received (Hub → Van), for the ops log. Admin only.',
-  })
-  @ApiOkResponse({ description: 'Inbound event rows' })
-  hubWebhookList(@Query('status') status?: HubWebhookStatus) {
-    return this.hubWebhooks.list(status);
-  }
-
-  @Post('hub-webhooks/:id/reprocess')
-  @ApiOperation({
-    summary: 'Reprocess an inbound Hub event',
-    description: 'Re-run the dispatch for one stored event (recover an errored/ignored one). Admin only.',
-  })
-  @ApiOkResponse({ description: 'The updated event row' })
-  hubWebhookReprocess(@Param('id', ParseUUIDPipe) id: string) {
-    return this.hubWebhooks.reprocess(id);
   }
 }
