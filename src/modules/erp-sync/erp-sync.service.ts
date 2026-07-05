@@ -918,7 +918,11 @@ export class ErpSyncService {
         let row = await this.customerPrices.findOne({
           where: { customerId: cust.id, erpSku: sku },
         });
+        // A dashboard-authored (local) override is sticky — the ERP sync must
+        // never overwrite it (the ERP has no API to receive it back).
+        if (row && row.origin === 'local') continue;
         if (!row) row = this.customerPrices.create({ customerId: cust.id, erpSku: sku });
+        row.origin = 'erp';
         row.itemId = item?.id ?? null;
         row.itemUnitId = itemUnitId;
         row.barcode = r.barcode ?? null;
@@ -929,9 +933,10 @@ export class ErpSyncService {
         await this.customerPrices.save(row);
         processed += 1;
       }
-      // Prune overrides that no longer apply for this customer.
+      // Prune ERP-owned overrides that no longer apply; keep local (dashboard) ones.
       const existing = await this.customerPrices.find({ where: { customerId: cust.id } });
       for (const e of existing) {
+        if (e.origin === 'local') continue;
         if (!keptSkus.has(e.erpSku)) await this.customerPrices.delete(e.id);
       }
     }

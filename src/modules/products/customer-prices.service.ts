@@ -1,9 +1,13 @@
-import { Injectable } from '@nestjs/common';
-import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
 
-/** One customer's contract/list price for a product (unit), mirrored from the ERP. */
+import { ItemCart } from '../items/entities/item-cart.entity';
+import { CustomerPrice } from './entities/customer-price.entity';
+
+/** One customer's contract/list price for a product (unit). */
 export interface CustomerPriceRow {
+  id: string;
   customerId: string;
   customerNumber: string;
   itemId: string | null;
@@ -12,18 +16,30 @@ export interface CustomerPriceRow {
   barcode: string | null;
   unitPrice: number; // fils
   priceSource: string | null;
+  origin: string; // 'erp' (mirrored) | 'local' (dashboard-authored)
   allowManualPriceEdit: boolean;
   erpPriceListName: string | null;
 }
 
+/** Create/update a dashboard-authored (local) customer price. */
+export interface UpsertCustomerPriceInput {
+  customerId: string;
+  itemId: string;
+  unitPrice: number; // fils
+}
+
 @Injectable()
 export class CustomerPricesService {
-  constructor(@InjectDataSource() private readonly ds: DataSource) {}
+  constructor(
+    @InjectDataSource() private readonly ds: DataSource,
+    @InjectRepository(CustomerPrice) private readonly prices: Repository<CustomerPrice>,
+    @InjectRepository(ItemCart) private readonly items: Repository<ItemCart>,
+  ) {}
 
   /**
    * Customer contract prices (optionally for one customer), offset-paginated.
-   * Read-only mirror of the ERP; consumed by the mobile app (offline cache) and
-   * the dashboard customer profile.
+   * Union of ERP-mirrored rows and dashboard-authored ('local') overrides;
+   * consumed by the mobile app (offline cache) and the dashboard customer profile.
    */
   async list(opts: {
     customerId?: string;
@@ -51,7 +67,8 @@ export class CustomerPricesService {
 
     const rows: Array<Record<string, unknown>> = await this.ds.query(
       `
-      SELECT cp.customer_id                     AS "customerId",
+      SELECT cp.id                              AS "id",
+             cp.customer_id                     AS "customerId",
              c.customer_number                  AS "customerNumber",
              cp.item_id                         AS "itemId",
              ic.item_number                     AS "itemNumber",
@@ -59,6 +76,7 @@ export class CustomerPricesService {
              cp.barcode                         AS "barcode",
              cp.unit_price                      AS "unitPrice",
              cp.price_source                    AS "priceSource",
+             cp.origin                          AS "origin",
              c.allow_manual_price_edit          AS "allowManualPriceEdit",
              c.erp_price_list_name              AS "erpPriceListName"
       FROM customer_prices cp
@@ -73,6 +91,7 @@ export class CustomerPricesService {
 
     return {
       items: rows.map((r) => ({
+        id: r.id as string,
         customerId: r.customerId as string,
         customerNumber: (r.customerNumber as string) ?? '',
         itemId: (r.itemId as string) ?? null,
@@ -81,10 +100,46 @@ export class CustomerPricesService {
         barcode: (r.barcode as string) ?? null,
         unitPrice: Number(r.unitPrice ?? 0),
         priceSource: (r.priceSource as string) ?? null,
+        origin: (r.origin as string) ?? 'erp',
         allowManualPriceEdit: (r.allowManualPriceEdit as boolean) ?? true,
         erpPriceListName: (r.erpPriceListName as string) ?? null,
       })),
       total,
     };
+  }
+
+  /**
+   * Create or update a dashboard-authored contract price for (customer, item).
+   * Stored as origin='local' so the ERP sync never overwrites or prunes it — it
+   * wins over any mirrored price and the app reads it from the DB like any other.
+   */
+  async upsert(input: UpsertCustomerPriceInput): Promise<CustomerPrice> {
+    if (!Number.isInteger(input.unitPrice) || input.unitPrice < 0) {
+      throw new BadRequestException('unitPrice must be a non-negative integer (fils)');
+    }
+    const item = await this.items.findOne({ where: { id: input.itemId } });
+    if (!item) throw new NotFoundException(`Item ${input.itemId} not found`);
+
+    const erpSku = item.itemNumber; // one contract row per (customer, ERP sku)
+    let row = await this.prices.findOne({
+      where: { customerId: input.customerId, erpSku },
+    });
+    if (!row) row = this.prices.create({ customerId: input.customerId, erpSku });
+    row.origin = 'local';
+    row.itemId = item.id;
+    row.itemUnitId = null; // base unit
+    row.barcode = item.barcode ?? null;
+    row.unitPrice = input.unitPrice;
+    row.priceSource = 'CUSTOMER_PRICE';
+    row.syncedAt = new Date();
+    return this.prices.save(row);
+  }
+
+  /** Remove a customer price by id (hard delete — matches the sync's prune). */
+  async remove(id: string): Promise<{ deleted: boolean }> {
+    const row = await this.prices.findOne({ where: { id } });
+    if (!row) throw new NotFoundException(`Customer price ${id} not found`);
+    await this.prices.delete(id);
+    return { deleted: true };
   }
 }

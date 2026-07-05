@@ -44,4 +44,11 @@ export class CustomerPrice extends BaseEntity {
 
   @Column({ name: 'synced_at', type: 'timestamptz', nullable: true })
   syncedAt?: Date | null;
+
+  /**
+   * Row owner: 'erp' — mirrored from the ERP, rebuilt/pruned on each sync;
+   * 'local' — authored on the FlowVan dashboard, sticky (sync never touches it).
+   */
+  @Column({ type: 'text', default: 'erp' })
+  origin!: string;
 }
