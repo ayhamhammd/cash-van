@@ -133,6 +133,8 @@ export class OffersEngineService {
        * (all lines) and ITEM_AMOUNT_DISCOUNT (selected lines). undefined = percent.
        */
       amountPerUnitFils?: number;
+      /** Amount rewards only: cap the per-unit amount to this % of the line's unit price. */
+      maxPercentOfPrice?: number;
       items: Set<string> | null; // null = applies to every line (payment-method)
     }
     const payOffers: Disc[] = [];
@@ -169,7 +171,13 @@ export class OffersEngineService {
             // LINE_PERCENT_DISCOUNT (× line qty, like ITEM_AMOUNT_DISCOUNT).
             const amt = this.effectiveAmount(reward, itemCount, t.minItemCount ?? 0);
             if (amt > 0) {
-              payOffers.push({ offer, pct: 0, amountPerUnitFils: amt, items: null });
+              payOffers.push({
+                offer,
+                pct: 0,
+                amountPerUnitFils: amt,
+                maxPercentOfPrice: reward.maxPercentOfPrice,
+                items: null,
+              });
             }
           }
         }
@@ -196,6 +204,7 @@ export class OffersEngineService {
                 offer,
                 pct: 0,
                 amountPerUnitFils: amt,
+                maxPercentOfPrice: reward.maxPercentOfPrice,
                 items: new Set(items),
               });
             }
@@ -212,12 +221,20 @@ export class OffersEngineService {
     for (const [itemNumber, l] of work) {
       const gross = roundFils(l.qty * l.unitPriceFils);
       if (gross <= 0) continue;
-      // A candidate's discount for this line: per-unit amount → fils × line qty;
-      // percent → % of gross. Highest fils wins.
-      const discFor = (c: Disc): number =>
-        c.amountPerUnitFils != null
-          ? roundFils(l.qty * c.amountPerUnitFils)
-          : roundFils((gross * c.pct) / 100);
+      // A candidate's discount for this line: per-unit amount → fils × line qty
+      // (the per-unit amount first clamped to maxPercentOfPrice of THIS line's unit
+      // price, when set); percent → % of gross. Highest fils wins.
+      const discFor = (c: Disc): number => {
+        if (c.amountPerUnitFils != null) {
+          let perUnit = c.amountPerUnitFils;
+          if (c.maxPercentOfPrice != null) {
+            const cap = roundFils((l.unitPriceFils * c.maxPercentOfPrice) / 100);
+            if (cap < perUnit) perUnit = cap;
+          }
+          return roundFils(l.qty * perUnit);
+        }
+        return roundFils((gross * c.pct) / 100);
+      };
       let bestPay: Disc | null = null;
       let bestPayFils = 0;
       for (const c of payOffers) {

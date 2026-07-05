@@ -111,8 +111,14 @@ export interface LineAmountDiscountReward {
   multiplier?: number;
   /** DYNAMIC only: items per multiplication step, e.g. 6. */
   itemsPerStep?: number;
-  /** DYNAMIC only: cap on the per-unit amount, in fils. */
+  /** DYNAMIC only: cap on the per-unit amount, in fils (absolute cap). */
   maxAmountFils?: number;
+  /**
+   * Optional cap on the per-unit amount as a % of the LINE's unit price (0–100),
+   * applied per line (so it adapts to each item's price). Combined with
+   * `maxAmountFils` when both are set — the tighter cap wins.
+   */
+  maxPercentOfPrice?: number;
 }
 
 /**
@@ -170,8 +176,13 @@ export interface ItemAmountDiscountReward {
   multiplier?: number;
   /** DYNAMIC only: items per multiplication step, e.g. 6. */
   itemsPerStep?: number;
-  /** DYNAMIC only: cap on the effective per-unit amount, in fils. */
+  /** DYNAMIC only: cap on the effective per-unit amount, in fils (absolute cap). */
   maxAmountFils?: number;
+  /**
+   * Optional cap on the per-unit amount as a % of the item's unit price (0–100),
+   * applied per line. Combined with `maxAmountFils` when both are set — tighter wins.
+   */
+  maxPercentOfPrice?: number;
 }
 
 export type OfferRewardConfig =
