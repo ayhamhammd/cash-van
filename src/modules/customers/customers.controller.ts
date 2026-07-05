@@ -80,12 +80,15 @@ export class CustomersController {
     return this.customers.insights(id);
   }
 
+  // Allowed even when ERP mode is on — like Update below, a new customer saves
+  // locally AND pushes to the ERP (erp.customer.created → pushCustomer), so both
+  // sides stay in sync. Gated by the canAddCustomer permission (NOT ErpReadOnlyGuard).
   @Post()
-  @UseGuards(ErpReadOnlyGuard)
   @RequirePermissions('canAddCustomer')
   @ApiOperation({
     summary: 'Create customer',
-    description: 'Create a customer. Requires the canAddCustomer permission.',
+    description:
+      'Create a customer. Allowed even when ERP mode is on — the new customer is mirrored to the ERP. Requires the canAddCustomer permission.',
   })
   @ApiCreatedResponse({ description: 'Customer created' })
   create(@Body() dto: CreateCustomerDto) {
