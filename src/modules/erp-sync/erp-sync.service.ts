@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { OnEvent } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, IsNull, Not, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
@@ -657,6 +657,10 @@ export class ErpSyncService {
       await this.runEntity('tobacco_profile', () => this.pullTobaccoProfiles()),
       await this.runEntity('item', () => this.pullItems()),
       await this.runEntity('customer', () => this.pullCustomers()),
+      // Customer contract prices must reflect automatically (5-min poll + ERP
+      // webhook), not only on a manual "Refresh from ERP" — else an ERP price
+      // change never reaches the app.
+      await this.runEntity('customer_price', () => this.pullCustomerPrices()),
     ];
     // Mirror ERP stock movements for EVERY warehouse cash-van knows — vans AND
     // normal stores (Main Store …) — so ERP IN/OUT/TRANSFER affect cash-van
@@ -863,18 +867,17 @@ export class ErpSyncService {
   }
 
   /**
-   * Pull each price-listed customer's RESOLVED prices from the ERP
+   * Pull each active customer's RESOLVED prices from the ERP
    * (`GET /api/v1/prices?customerCode=`) and cache the real overrides into
-   * `customer_prices` (drops DEFAULT_PRICE rows). Only customers with an assigned
-   * ERP price list are queried, to bound the number of calls — special contract
-   * prices for list-less customers are a follow-up. Runs on the master-data
-   * refresh, not the frequent movement sync. Assumes `pullCustomers()` ran first
-   * (so `erp_price_list_id` is populated).
+   * `customer_prices` (drops DEFAULT_PRICE rows). ALL active customers are queried
+   * — the ERP resolver returns special contract prices even for customers with no
+   * assigned price list, so we must not filter on `erp_price_list_id`. One call
+   * per customer: fine at this scale; a bulk/changed-only endpoint is the scale
+   * follow-up. Dashboard-authored (origin='local') rows are left untouched.
+   * Assumes `pullCustomers()` ran first.
    */
   private async pullCustomerPrices(): Promise<number> {
-    const custs = await this.customers.find({
-      where: { isActive: true, erpPriceListId: Not(IsNull()) },
-    });
+    const custs = await this.customers.find({ where: { isActive: true } });
     let processed = 0;
     for (const cust of custs) {
       const code = cust.customerNumber;
