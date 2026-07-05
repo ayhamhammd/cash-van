@@ -14,6 +14,8 @@ import { Unit } from '../units/entities/unit.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { ProductCategory } from '../products/entities/product-category.entity';
 import { CustomerPrice } from '../products/entities/customer-price.entity';
+import { PriceList } from '../products/entities/price-list.entity';
+import { PriceListItem } from '../products/entities/price-list-item.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
@@ -156,6 +158,23 @@ interface ErpPrice {
   priceSource?: string | null;
 }
 
+/** A price list from the ERP `GET /api/v1/price-lists`. */
+interface ErpPriceList {
+  id: string;
+  code: string;
+  name: string;
+  isActive?: boolean;
+}
+
+/** `GET /api/v1/price-lists/{id}` → the list + its items. */
+interface ErpPriceListDetail extends ErpPriceList {
+  items?: Array<{
+    skuCode: string;
+    price: number | string; // ERP major units
+    minQty?: number | null;
+  }>;
+}
+
 /** Organization (company) settings from the ERP `GET /api/v1/organization`. */
 interface ErpOrg {
   name?: string | null;
@@ -192,6 +211,8 @@ export class ErpSyncService {
     @InjectRepository(Unit) private readonly units: Repository<Unit>,
     @InjectRepository(ItemUnit) private readonly itemUnits: Repository<ItemUnit>,
     @InjectRepository(CustomerPrice) private readonly customerPrices: Repository<CustomerPrice>,
+    @InjectRepository(PriceList) private readonly priceLists: Repository<PriceList>,
+    @InjectRepository(PriceListItem) private readonly priceListItems: Repository<PriceListItem>,
     @InjectRepository(ProductCategory) private readonly productCategories: Repository<ProductCategory>,
     @InjectRepository(Collection) private readonly collections: Repository<Collection>,
     @InjectRepository(VoucherHeader) private readonly headers: Repository<VoucherHeader>,
@@ -660,6 +681,7 @@ export class ErpSyncService {
       // Customer contract prices must reflect automatically (5-min poll + ERP
       // webhook), not only on a manual "Refresh from ERP" — else an ERP price
       // change never reaches the app.
+      await this.runEntity('price_list', () => this.pullPriceLists()),
       await this.runEntity('customer_price', () => this.pullCustomerPrices()),
     ];
     // Mirror ERP stock movements for EVERY warehouse cash-van knows — vans AND
@@ -725,6 +747,7 @@ export class ErpSyncService {
       await this.runEntity('tobacco_profile', () => this.pullTobaccoProfiles()),
       await this.runEntity('item', () => this.pullItems()),
       await this.runEntity('customer', () => this.pullCustomers()),
+      await this.runEntity('price_list', () => this.pullPriceLists()),
       await this.runEntity('customer_price', () => this.pullCustomerPrices()),
     ];
   }
@@ -862,6 +885,98 @@ export class ErpSyncService {
       processed += data.length;
       page += 1;
       if (page > 200) break; // safety cap (20k customers)
+    }
+    return processed;
+  }
+
+  /**
+   * Mirror ERP price lists (`GET /api/v1/price-lists` + `/{id}`) into local
+   * `price_lists` (origin='erp', rebuilt each sync) and map each customer's ERP
+   * price-list assignment → the local mirror (`customers.price_list_id`), so the
+   * price-list resolution + the app apply to ERP-assigned customers. Local
+   * (dashboard-authored) lists and manual assignments are left untouched.
+   */
+  private async pullPriceLists(): Promise<number> {
+    let processed = 0;
+    // 1) Pull the lists (paginated).
+    const lists: ErpPriceList[] = [];
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+    while (lists.length < total) {
+      const { data, total: t } = await this.erp.list<ErpPriceList>('price-lists', {
+        page,
+        pageSize: 200,
+      });
+      total = t;
+      if (data.length === 0) break;
+      lists.push(...data);
+      page += 1;
+      if (page > 100) break;
+    }
+    const keptErpIds = new Set<string>();
+    for (const l of lists) {
+      keptErpIds.add(l.id);
+      let local = await this.priceLists.findOne({ where: { erpId: l.id } });
+      if (!local) local = this.priceLists.create({ erpId: l.id, code: l.code, origin: 'erp' });
+      local.origin = 'erp';
+      local.code = l.code;
+      local.name = l.name ?? l.code;
+      local.isActive = l.isActive ?? true;
+      await this.priceLists.save(local);
+
+      // 2) Pull its items → map skuCode→item, keep the lowest (base) tier price.
+      const detail = await this.erp.getOne<ErpPriceListDetail>(`price-lists/${l.id}`);
+      const byItem = new Map<string, number>();
+      for (const it of detail?.items ?? []) {
+        if (!it.skuCode) continue;
+        const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: it.skuCode } });
+        const item = map?.localId
+          ? await this.items.findOne({ where: { itemNumber: map.localId } })
+          : null;
+        if (!item) continue;
+        const unitPrice = Math.round((Number(it.price) || 0) * 1000);
+        const prev = byItem.get(item.id);
+        if (prev === undefined || unitPrice < prev) byItem.set(item.id, unitPrice);
+      }
+      const keptItemIds = new Set<string>();
+      for (const [itemId, unitPrice] of byItem) {
+        keptItemIds.add(itemId);
+        let row = await this.priceListItems.findOne({
+          where: { priceListId: local.id, itemId },
+        });
+        if (!row) row = this.priceListItems.create({ priceListId: local.id, itemId });
+        row.unitPrice = unitPrice;
+        await this.priceListItems.save(row);
+        processed += 1;
+      }
+      for (const e of await this.priceListItems.find({ where: { priceListId: local.id } })) {
+        if (!keptItemIds.has(e.itemId)) await this.priceListItems.delete(e.id);
+      }
+    }
+
+    // 3) Drop ERP-origin lists that no longer exist upstream (keep local ones).
+    for (const l of await this.priceLists.find({ where: { origin: 'erp' } })) {
+      if (l.erpId && !keptErpIds.has(l.erpId)) {
+        await this.customers.update({ priceListId: l.id }, { priceListId: null });
+        await this.priceListItems.delete({ priceListId: l.id });
+        await this.priceLists.delete(l.id);
+      }
+    }
+
+    // 4) Map each customer's ERP assignment → the local mirror. Never override a
+    //    dashboard-set assignment to a LOCAL list.
+    for (const c of await this.customers.find({ where: { isActive: true } })) {
+      if (!c.erpPriceListId) continue;
+      const local = await this.priceLists.findOne({ where: { erpId: c.erpPriceListId } });
+      if (!local) continue;
+      if (c.priceListId) {
+        const current = await this.priceLists.findOne({ where: { id: c.priceListId } });
+        if (current && current.origin === 'local') continue; // keep manual/local assignment
+      }
+      if (c.priceListId !== local.id) {
+        c.priceListId = local.id;
+        await this.customers.save(c);
+      }
     }
     return processed;
   }

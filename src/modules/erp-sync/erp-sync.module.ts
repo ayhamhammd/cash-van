@@ -10,6 +10,8 @@ import { Unit } from '../units/entities/unit.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { ProductCategory } from '../products/entities/product-category.entity';
 import { CustomerPrice } from '../products/entities/customer-price.entity';
+import { PriceList } from '../products/entities/price-list.entity';
+import { PriceListItem } from '../products/entities/price-list-item.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
@@ -36,6 +38,8 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
       Unit,
       ItemUnit,
       CustomerPrice,
+      PriceList,
+      PriceListItem,
       ProductCategory,
       Collection,
       ErpIdMap,

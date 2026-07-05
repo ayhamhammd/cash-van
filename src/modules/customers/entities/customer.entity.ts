@@ -119,4 +119,9 @@ export class Customer extends BaseEntity {
   /** When false, the rep may NOT edit the contracted price in the app. */
   @Column({ name: 'allow_manual_price_edit', type: 'boolean', default: true })
   allowManualPriceEdit!: boolean;
+
+  /** Assigned price list (FK → price_lists.id; local or ERP-mirrored). Drives
+   * resolution: price-list item price applies unless a customer_prices override wins. */
+  @Column({ name: 'price_list_id', type: 'uuid', nullable: true })
+  priceListId?: string | null;
 }
