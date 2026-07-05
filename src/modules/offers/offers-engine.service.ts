@@ -128,10 +128,11 @@ export class OffersEngineService {
     interface Disc {
       offer: Offer;
       pct: number;
-      /** Amount-off per unit (fils) for ITEM_AMOUNT_DISCOUNT; undefined = percent. */
+      /**
+       * Amount-off per UNIT (fils) for the amount rewards — LINE_AMOUNT_DISCOUNT
+       * (all lines) and ITEM_AMOUNT_DISCOUNT (selected lines). undefined = percent.
+       */
       amountPerUnitFils?: number;
-      /** Flat amount-off per line (fils) for LINE_AMOUNT_DISCOUNT; undefined = percent. */
-      amountPerLineFils?: number;
       items: Set<string> | null; // null = applies to every line (payment-method)
     }
     const payOffers: Disc[] = [];
@@ -164,9 +165,11 @@ export class OffersEngineService {
             const pct = this.effectivePercent(reward, itemCount, t.minItemCount ?? 0);
             if (pct > 0) payOffers.push({ offer, pct, items: null });
           } else if (reward?.kind === 'LINE_AMOUNT_DISCOUNT') {
+            // Amount off PER UNIT, on every line — the amount-off twin of
+            // LINE_PERCENT_DISCOUNT (× line qty, like ITEM_AMOUNT_DISCOUNT).
             const amt = this.effectiveAmount(reward, itemCount, t.minItemCount ?? 0);
             if (amt > 0) {
-              payOffers.push({ offer, pct: 0, amountPerLineFils: amt, items: null });
+              payOffers.push({ offer, pct: 0, amountPerUnitFils: amt, items: null });
             }
           }
         }
@@ -202,21 +205,19 @@ export class OffersEngineService {
     }
 
     // ── Per line: (best payment + best item discount for that line), clamped ───
-    // A payment offer's % is the same rate on every line, but a flat LINE_AMOUNT
-    // is a fixed fils/line — so the winner is picked PER LINE by actual fils (a
-    // percent and an amount payment offer compare correctly, same as items).
+    // Discounts can be a percent or a per-unit amount, so the winner is picked PER
+    // LINE by the actual fils it yields (a percent and an amount offer compare
+    // correctly on the same line).
     const contrib = new Map<string, number>(); // offerId → discount fils contributed
     for (const [itemNumber, l] of work) {
       const gross = roundFils(l.qty * l.unitPriceFils);
       if (gross <= 0) continue;
-      // A candidate's discount for this line: percent → % of gross; per-unit
-      // amount → fils × line qty; per-line amount → flat fils. Highest fils wins.
+      // A candidate's discount for this line: per-unit amount → fils × line qty;
+      // percent → % of gross. Highest fils wins.
       const discFor = (c: Disc): number =>
         c.amountPerUnitFils != null
           ? roundFils(l.qty * c.amountPerUnitFils)
-          : c.amountPerLineFils != null
-            ? c.amountPerLineFils
-            : roundFils((gross * c.pct) / 100);
+          : roundFils((gross * c.pct) / 100);
       let bestPay: Disc | null = null;
       let bestPayFils = 0;
       for (const c of payOffers) {
@@ -395,9 +396,9 @@ export class OffersEngineService {
   }
 
   /**
-   * The effective amount (fils) for an amount-off reward — the fils twin of
-   * {@link effectivePercent}, shared by LINE_AMOUNT_DISCOUNT (per line) and
-   * ITEM_AMOUNT_DISCOUNT (per unit). Base applies at the anchor (minItemCount or
+   * The effective amount (fils) PER UNIT for an amount-off reward — the fils twin
+   * of {@link effectivePercent}, shared by LINE_AMOUNT_DISCOUNT (every line) and
+   * ITEM_AMOUNT_DISCOUNT (selected lines). Base applies at the anchor (minItemCount or
    * minQty); each full `itemsPerStep` above it adds one multiplier step. STATIC
    * ignores the multiplier. Capped at `maxAmountFils` (no natural upper bound
    * otherwise); the per-line clamp to the line gross still prevents a negative net.
@@ -587,11 +588,11 @@ export class OffersEngineService {
       const jod = (fils: number): string => (fils / 1000).toFixed(3);
       if (r.mode === 'DYNAMIC') {
         const cap = r.maxAmountFils != null ? ` up to ${jod(r.maxAmountFils)} JOD` : '';
-        return `${cond} · ${jod(r.baseAmountFils)} JOD per line, ×${r.multiplier ?? 0} per ${
+        return `${cond} · ${jod(r.baseAmountFils)} JOD per unit, ×${r.multiplier ?? 0} per ${
           r.itemsPerStep ?? '?'
         } items${cap}${suffix}`;
       }
-      return `${cond} · ${jod(r.baseAmountFils)} JOD off each line${suffix}`;
+      return `${cond} · ${jod(r.baseAmountFils)} JOD off each unit${suffix}`;
     }
     const rp = r as LinePercentDiscountReward;
     if (rp?.mode === 'DYNAMIC') {

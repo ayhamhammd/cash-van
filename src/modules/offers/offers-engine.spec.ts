@@ -394,7 +394,7 @@ describe('OffersEngineService', () => {
 
   /* ------------------- PAYMENT_METHOD_DISCOUNT (amount) ------------------ */
 
-  it('LINE_AMOUNT_DISCOUNT takes a flat amount off EACH line for a matching CASH payment', async () => {
+  it('LINE_AMOUNT_DISCOUNT takes a fixed amount off EACH UNIT on every line for a matching CASH payment', async () => {
     const engine = makeEngine([
       {
         type: 'PAYMENT_METHOD_DISCOUNT',
@@ -402,7 +402,7 @@ describe('OffersEngineService', () => {
         reward: { kind: 'LINE_AMOUNT_DISCOUNT', baseAmountFils: 300, mode: 'STATIC' },
       },
     ]);
-    // Flat 300 off EACH line, regardless of that line's qty.
+    // 300 off each UNIT → × line qty, on every line.
     const res = await engine.evaluate(
       [
         { itemNumber: 'A', qty: 4 },
@@ -410,9 +410,9 @@ describe('OffersEngineService', () => {
       ],
       { paymentMethod: 'CASH' },
     );
-    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(300);
-    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(300);
-    expect(res.totals.lineDiscountFils).toBe(600);
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(1200); // 300 × 4
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(600); // 300 × 2
+    expect(res.totals.lineDiscountFils).toBe(1800);
   });
 
   it('LINE_AMOUNT_DISCOUNT clamps the per-line discount to the line gross', async () => {
@@ -423,7 +423,7 @@ describe('OffersEngineService', () => {
         reward: { kind: 'LINE_AMOUNT_DISCOUNT', baseAmountFils: 2000, mode: 'STATIC' },
       },
     ]);
-    // B line gross = 500 → clamped; A line gross = 1000 → clamped.
+    // 2000/unit × 1 exceeds each line's gross → clamped. A gross = 1000, B gross = 500.
     const res = await engine.evaluate(
       [
         { itemNumber: 'A', qty: 1 },
@@ -435,7 +435,7 @@ describe('OffersEngineService', () => {
     expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(500);
   });
 
-  it('LINE_AMOUNT_DISCOUNT DYNAMIC steps the per-line amount and caps at maxAmountFils', async () => {
+  it('LINE_AMOUNT_DISCOUNT DYNAMIC steps the per-unit amount and caps at maxAmountFils', async () => {
     const engine = makeEngine([
       {
         type: 'PAYMENT_METHOD_DISCOUNT',
@@ -450,15 +450,16 @@ describe('OffersEngineService', () => {
         },
       },
     ]);
+    // Per-unit amount steps with item count, then × line qty (A unit = 1000, no clamp).
     const disc = async (q: number) =>
       (await engine.evaluate([{ itemNumber: 'A', qty: q }], { paymentMethod: 'CASH' }))
         .lines[0]?.lineDiscountFils ?? 0;
-    expect(await disc(6)).toBe(100); // threshold → 100/line
-    expect(await disc(12)).toBe(150); // 1 step → 150/line
-    expect(await disc(60)).toBe(250); // capped at 250/line
+    expect(await disc(6)).toBe(600); // per-unit 100 × 6 units
+    expect(await disc(12)).toBe(1800); // 1 step → per-unit 150 × 12 units
+    expect(await disc(60)).toBe(15000); // per-unit capped 250 × 60 units
   });
 
-  it('per line, the higher fils wins between a percent and a flat-amount payment offer', async () => {
+  it('per line, the higher fils wins between a percent and a per-unit amount payment offer', async () => {
     const engine = makeEngine([
       {
         id: 'pct10',
@@ -467,13 +468,13 @@ describe('OffersEngineService', () => {
         reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 10, mode: 'STATIC' },
       },
       {
-        id: 'flat300',
+        id: 'amt80',
         type: 'PAYMENT_METHOD_DISCOUNT',
         trigger: { paymentCondition: 'CASH' },
-        reward: { kind: 'LINE_AMOUNT_DISCOUNT', baseAmountFils: 300, mode: 'STATIC' },
+        reward: { kind: 'LINE_AMOUNT_DISCOUNT', baseAmountFils: 80, mode: 'STATIC' },
       },
     ]);
-    // A gross 4000: 10% = 400 beats flat 300. B gross 500: flat 300 beats 10% = 50.
+    // A qty4 gross 4000: 10% = 400 beats amount 80×4 = 320. B qty1 gross 500: amount 80 beats 10% = 50.
     const res = await engine.evaluate(
       [
         { itemNumber: 'A', qty: 4 },
@@ -482,8 +483,8 @@ describe('OffersEngineService', () => {
       { paymentMethod: 'CASH' },
     );
     expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(400);
-    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(300);
-    expect(res.appliedOffers.map((o) => o.offerId).sort()).toEqual(['flat300', 'pct10']);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(80);
+    expect(res.appliedOffers.map((o) => o.offerId).sort()).toEqual(['amt80', 'pct10']);
   });
 
   /* ---------------- conflict resolution (max within, sum across) ---------- */
