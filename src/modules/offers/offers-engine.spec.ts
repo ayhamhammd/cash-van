@@ -459,6 +459,32 @@ describe('OffersEngineService', () => {
     expect(await disc(60)).toBe(15000); // per-unit capped 250 × 60 units
   });
 
+  it('LINE_AMOUNT_DISCOUNT caps the per-unit amount at maxPercentOfPrice of each line price', async () => {
+    const engine = makeEngine([
+      {
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH' },
+        reward: {
+          kind: 'LINE_AMOUNT_DISCOUNT',
+          baseAmountFils: 500,
+          mode: 'STATIC',
+          maxPercentOfPrice: 20,
+        },
+      },
+    ]);
+    // Base 500/unit is capped per line at 20% of that line's unit price:
+    // A unit 1000 → cap 200/unit; B unit 500 → cap 100/unit.
+    const res = await engine.evaluate(
+      [
+        { itemNumber: 'A', qty: 3 },
+        { itemNumber: 'B', qty: 2 },
+      ],
+      { paymentMethod: 'CASH' },
+    );
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(600); // 200 × 3
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(200); // 100 × 2
+  });
+
   it('per line, the higher fils wins between a percent and a per-unit amount payment offer', async () => {
     const engine = makeEngine([
       {

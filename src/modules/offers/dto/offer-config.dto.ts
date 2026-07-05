@@ -121,11 +121,18 @@ export class OfferRewardDto {
   @Min(0)
   baseAmountFils?: number;
 
-  @ApiPropertyOptional({ description: 'Amount-off rewards, DYNAMIC only: cap on the effective amount, in fils.' })
+  @ApiPropertyOptional({ description: 'Amount-off rewards, DYNAMIC only: cap on the effective amount, in fils (absolute cap).' })
   @IsOptional()
   @IsInt()
   @Min(0)
   maxAmountFils?: number;
+
+  @ApiPropertyOptional({ description: 'Amount-off rewards: cap the per-unit amount to this % of the line unit price (0–100), applied per line. Combined with maxAmountFils — tighter wins.' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  maxPercentOfPrice?: number;
 
   // ---- GIFT ----
   @ApiPropertyOptional({ type: [String], description: 'GIFT: pool the rep picks free items from.' })
