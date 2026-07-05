@@ -882,66 +882,82 @@ export class ErpSyncService {
     for (const cust of custs) {
       const code = cust.customerNumber;
       if (!code || code.startsWith('ERP-')) continue; // need a real ERP customer code
-      // Fetch all resolved prices for this customer (paginated).
-      const rows: ErpPrice[] = [];
-      let page = 1;
-      let total = Number.POSITIVE_INFINITY;
-      while (rows.length < total) {
-        const { data, total: t } = await this.erp.list<ErpPrice>('prices', {
-          customerCode: code,
-          page,
-          pageSize: 200,
+      try {
+        processed += await this.syncCustomerPricesFor(cust, code);
+      } catch (e) {
+        // One customer failing must NOT abort the whole pull. The ERP returns
+        // HTTP 400 CUSTOMER_NOT_FOUND for a code it doesn't have (e.g. a
+        // FlowVan-only customer) — skip it and keep syncing the rest.
+        this.logger.warn(
+          `customer-price pull skipped ${code}: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+    return processed;
+  }
+
+  /** Pull + cache ONE customer's resolved ERP prices. Returns rows upserted. */
+  private async syncCustomerPricesFor(cust: Customer, code: string): Promise<number> {
+    let processed = 0;
+    // Fetch all resolved prices for this customer (paginated).
+    const rows: ErpPrice[] = [];
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+    while (rows.length < total) {
+      const { data, total: t } = await this.erp.list<ErpPrice>('prices', {
+        customerCode: code,
+        page,
+        pageSize: 200,
+      });
+      total = t;
+      if (data.length === 0) break;
+      rows.push(...data);
+      page += 1;
+      if (page > 100) break; // safety cap
+    }
+    // Keep only real overrides (skip the plain SKU default).
+    const overrides = rows.filter(
+      (r) => r.skuCode && (r.priceSource ?? '').toUpperCase() !== 'DEFAULT_PRICE',
+    );
+    const keptSkus = new Set<string>();
+    for (const r of overrides) {
+      const sku = r.skuCode;
+      keptSkus.add(sku);
+      // Resolve the cash-van item + specific unit for this ERP SKU.
+      const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: sku } });
+      const item = map?.localId
+        ? await this.items.findOne({ where: { itemNumber: map.localId } })
+        : null;
+      let itemUnitId: string | null = null;
+      if (item && r.barcode) {
+        const iu = await this.itemUnits.findOne({
+          where: { itemId: item.id, barcode: r.barcode },
         });
-        total = t;
-        if (data.length === 0) break;
-        rows.push(...data);
-        page += 1;
-        if (page > 100) break; // safety cap
+        itemUnitId = iu?.id ?? null;
       }
-      // Keep only real overrides (skip the plain SKU default).
-      const overrides = rows.filter(
-        (r) => r.skuCode && (r.priceSource ?? '').toUpperCase() !== 'DEFAULT_PRICE',
-      );
-      const keptSkus = new Set<string>();
-      for (const r of overrides) {
-        const sku = r.skuCode;
-        keptSkus.add(sku);
-        // Resolve the cash-van item + specific unit for this ERP SKU.
-        const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: sku } });
-        const item = map?.localId
-          ? await this.items.findOne({ where: { itemNumber: map.localId } })
-          : null;
-        let itemUnitId: string | null = null;
-        if (item && r.barcode) {
-          const iu = await this.itemUnits.findOne({
-            where: { itemId: item.id, barcode: r.barcode },
-          });
-          itemUnitId = iu?.id ?? null;
-        }
-        let row = await this.customerPrices.findOne({
-          where: { customerId: cust.id, erpSku: sku },
-        });
-        // A dashboard-authored (local) override is sticky — the ERP sync must
-        // never overwrite it (the ERP has no API to receive it back).
-        if (row && row.origin === 'local') continue;
-        if (!row) row = this.customerPrices.create({ customerId: cust.id, erpSku: sku });
-        row.origin = 'erp';
-        row.itemId = item?.id ?? null;
-        row.itemUnitId = itemUnitId;
-        row.barcode = r.barcode ?? null;
-        row.unitPrice = Math.round((Number(r.price) || 0) * 1000); // ERP major → fils
-        row.priceSource = r.priceSource ?? null;
-        row.erpPriceListId = cust.erpPriceListId ?? null;
-        row.syncedAt = new Date();
-        await this.customerPrices.save(row);
-        processed += 1;
-      }
-      // Prune ERP-owned overrides that no longer apply; keep local (dashboard) ones.
-      const existing = await this.customerPrices.find({ where: { customerId: cust.id } });
-      for (const e of existing) {
-        if (e.origin === 'local') continue;
-        if (!keptSkus.has(e.erpSku)) await this.customerPrices.delete(e.id);
-      }
+      let row = await this.customerPrices.findOne({
+        where: { customerId: cust.id, erpSku: sku },
+      });
+      // A dashboard-authored (local) override is sticky — the ERP sync must
+      // never overwrite it (the ERP has no API to receive it back).
+      if (row && row.origin === 'local') continue;
+      if (!row) row = this.customerPrices.create({ customerId: cust.id, erpSku: sku });
+      row.origin = 'erp';
+      row.itemId = item?.id ?? null;
+      row.itemUnitId = itemUnitId;
+      row.barcode = r.barcode ?? null;
+      row.unitPrice = Math.round((Number(r.price) || 0) * 1000); // ERP major → fils
+      row.priceSource = r.priceSource ?? null;
+      row.erpPriceListId = cust.erpPriceListId ?? null;
+      row.syncedAt = new Date();
+      await this.customerPrices.save(row);
+      processed += 1;
+    }
+    // Prune ERP-owned overrides that no longer apply; keep local (dashboard) ones.
+    const existing = await this.customerPrices.find({ where: { customerId: cust.id } });
+    for (const e of existing) {
+      if (e.origin === 'local') continue;
+      if (!keptSkus.has(e.erpSku)) await this.customerPrices.delete(e.id);
     }
     return processed;
   }
