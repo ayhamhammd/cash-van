@@ -284,13 +284,15 @@ export class ArService {
   }
 
   /**
-   * Local receivables from the dashboard's OWN data (not the ERP proxy):
-   *   outstanding(customer) = Σ credit SALE vouchers − Σ collections (cash + cheque)
-   * Collections pay down the credit vouchers oldest-first (FIFO), so every voucher that
-   * is still (partly) unpaid is listed — a customer shows up whenever they hold an
-   * unpaid credit voucher, even with no collection recorded. Optional date range
-   * (`from`/`to`, YYYY-MM-DD, applied to both sales and collections) and `customerNumber`
-   * filter. Only customers with a remaining balance are returned.
+   * Local receivables from the dashboard's OWN data (not the ERP proxy) — the full
+   * customer account (ذمم) ledger. Credit SALE vouchers are debits; collections (cash +
+   * cheque) and credit RETURN notes are credits:
+   *   outstanding(customer) = Σ credit SALE − (Σ collections + Σ credit RETURNs)
+   * The credits pay down the credit vouchers oldest-first (FIFO), so every voucher that
+   * is still (partly) unpaid is listed — a customer shows up whenever they hold an unpaid
+   * credit voucher, even with no collection recorded. Optional date range (`from`/`to`,
+   * YYYY-MM-DD, applied to sales, collections and returns) and `customerNumber` filter
+   * (number or name). Only customers with a remaining balance are returned.
    */
   async receivables(q: {
     from?: string;
@@ -338,8 +340,24 @@ export class ArService {
       params,
     );
 
+    // Credit RETURN notes per customer — also credit the account (reduce the debit).
+    const retRows: Array<{ customerNumber: string; returns: string }> = await this.ds.query(
+      `SELECT h.customer_number AS "customerNumber", COALESCE(SUM(p.amount), 0)::text AS returns
+         FROM payments p
+         JOIN voucher_headers h ON h.voucher_number = p.voucher_number
+         LEFT JOIN customers c ON c.customer_number = h.customer_number
+        WHERE p.payment_type = 'CREDIT' AND h.trans_kind = 'RETURN'
+          AND ($1::date IS NULL OR h.created_at >= $1::date)
+          AND ($2::date IS NULL OR h.created_at < ($2::date + 1))
+          AND ($3::text IS NULL OR h.customer_number = $3 OR c.customer_name ILIKE '%' || $3 || '%')
+        GROUP BY h.customer_number`,
+      params,
+    );
+
     const collectedByCustomer = new Map<string, number>();
     for (const r of collRows) collectedByCustomer.set(r.customerNumber, Number(r.paid));
+    const returnsByCustomer = new Map<string, number>();
+    for (const r of retRows) returnsByCustomer.set(r.customerNumber, Number(r.returns));
 
     const byCustomer = new Map<
       string,
@@ -356,8 +374,9 @@ export class ArService {
     for (const [customerNumber, e] of byCustomer) {
       const debit = e.vouchers.reduce((s, v) => s + v.amount, 0);
       const collected = collectedByCustomer.get(customerNumber) ?? 0;
-      // FIFO: collections pay off the oldest credit vouchers first.
-      let rem = collected;
+      const returns = returnsByCustomer.get(customerNumber) ?? 0;
+      // FIFO: collections + credit returns pay off the oldest credit vouchers first.
+      let rem = collected + returns;
       const unpaidVouchers: ReceivablesVoucher[] = [];
       for (const v of e.vouchers) {
         if (rem >= v.amount - 1e-9) { rem -= v.amount; continue; }
@@ -378,6 +397,7 @@ export class ArService {
         customerName: e.customerName,
         debit: Number(debit.toFixed(2)),
         collected: Number(collected.toFixed(2)),
+        returns: Number(returns.toFixed(2)),
         outstanding: Number(outstanding.toFixed(2)),
         unpaidVouchers,
       });
@@ -407,7 +427,8 @@ export interface ReceivablesCustomer {
   customerName: string;
   debit: number;       // Σ credit sale vouchers
   collected: number;   // Σ collections cash+cheque
-  outstanding: number; // Σ still-unpaid voucher portions (FIFO)
+  returns: number;     // Σ credit return notes
+  outstanding: number; // debit − collected − returns (FIFO), ≥ 0
   unpaidVouchers: ReceivablesVoucher[];
 }
 
