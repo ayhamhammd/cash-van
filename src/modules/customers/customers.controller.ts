@@ -36,6 +36,7 @@ import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { SeedLocationDto } from './dto/seed-location.dto';
 import { ListCustomersQuery } from './dto/list-customers.query';
+import { ListVisitsQuery } from './dto/list-visits.query';
 import { CreateVisitDto } from './dto/create-visit.dto';
 import { ReassignCustomerDto } from './dto/reassign-customer.dto';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
@@ -150,9 +151,12 @@ export class CustomersController {
     description: 'List recent visits logged for a customer.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
-  @ApiOkResponse({ description: 'Recent visits' })
-  listVisits(@Param('id', ParseUUIDPipe) id: string) {
-    return this.customers.listVisits(id);
+  @ApiOkResponse({ description: 'Recent visits (optionally within a date range)' })
+  listVisits(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListVisitsQuery,
+  ) {
+    return this.customers.listVisits(id, query);
   }
 
   @Post(':id/visits')

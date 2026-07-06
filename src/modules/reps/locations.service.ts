@@ -22,6 +22,39 @@ export interface LatestRepLocation {
   status: LiveStatus;
 }
 
+/** One GPS ping in a trail (matches RepLocationEvent's public fields). */
+export interface TrailPoint {
+  repId: string;
+  lat: number;
+  lng: number;
+  accuracyM: number | null;
+  recordedAt: Date;
+}
+
+/** A customer visit row for the tracking map / per-customer history. */
+export interface VisitRow {
+  customerId: string;
+  customerNumber: string | null;
+  customerName: string | null;
+  visitedAt: Date;
+  hadSale: boolean;
+  note: string | null;
+  lat: number | null;
+  lng: number | null;
+}
+
+/** A per-day / per-month tracking summary bucket. */
+export interface TrackingBucket {
+  date: string; // YYYY-MM-DD (bucket start)
+  points: number;
+  distanceKm: number;
+  firstAt: Date | null;
+  lastAt: Date | null;
+  activeMinutes: number;
+  customersVisited: number;
+  sales: number;
+}
+
 @Injectable()
 export class LocationsService {
   constructor(
@@ -84,15 +117,126 @@ export class LocationsService {
     return { accepted: rows.length };
   }
 
-  async list(repId: string, q: ListLocationsQuery): Promise<RepLocationEvent[]> {
+  async list(repId: string, q: ListLocationsQuery): Promise<TrailPoint[]> {
     await this.assertRepExists(repId);
     const to = q.to ? new Date(q.to) : new Date();
     const from = q.from ? new Date(q.from) : new Date(to.getTime() - 24 * 3600_000);
-    return this.events.find({
+
+    // Downsample server-side for wide ranges (a month can be tens of thousands of
+    // pings) — keep an even sample plus the first + last so the polyline still fits
+    // bounds correctly. Distance/summary are computed on the FULL rows elsewhere.
+    if (q.maxPoints) {
+      return (await this.events.query(
+        `
+        SELECT rep_id AS "repId", lat, lng, accuracy_m AS "accuracyM", recorded_at AS "recordedAt"
+        FROM (
+          SELECT rep_id, lat, lng, accuracy_m, recorded_at,
+                 row_number() OVER (ORDER BY recorded_at) AS rn,
+                 count(*)     OVER () AS total
+          FROM rep_location_events
+          WHERE rep_id = $1 AND recorded_at BETWEEN $2 AND $3
+        ) t
+        WHERE total <= $4
+           OR rn = 1 OR rn = total
+           OR (rn % (ceil(total::numeric / $4)::int)) = 0
+        ORDER BY recorded_at ASC
+        `,
+        [repId, from, to, q.maxPoints],
+      )) as TrailPoint[];
+    }
+
+    const rows = await this.events.find({
       where: { repId, recordedAt: Between(from, to) },
       order: { recordedAt: 'ASC' },
       take: q.limit ?? 1000,
     });
+    return rows.map((r) => ({
+      repId: r.repId,
+      lat: r.lat,
+      lng: r.lng,
+      accuracyM: r.accuracyM ?? null,
+      recordedAt: r.recordedAt,
+    }));
+  }
+
+  /** A rep's customer visits within a range (visit markers for the tracking map). */
+  async visitsForRep(repId: string, fromIso?: string, toIso?: string): Promise<VisitRow[]> {
+    await this.assertRepExists(repId);
+    const to = toIso ? new Date(toIso) : new Date();
+    const from = fromIso ? new Date(fromIso) : new Date(to.getTime() - 30 * 24 * 3600_000);
+    return (await this.events.query(
+      `
+      SELECT cv.customer_id            AS "customerId",
+             c.customer_number         AS "customerNumber",
+             c.customer_name           AS "customerName",
+             cv.visited_at             AS "visitedAt",
+             cv.had_sale               AS "hadSale",
+             cv.visit_note             AS "note",
+             cv.lat, cv.lng
+      FROM customer_visits cv
+      LEFT JOIN customers c ON c.id = cv.customer_id
+      WHERE cv.rep_id = $1 AND cv.visited_at BETWEEN $2 AND $3
+      ORDER BY cv.visited_at ASC
+      `,
+      [repId, from, to],
+    )) as VisitRow[];
+  }
+
+  /**
+   * Per-day / per-month tracking summary: distance (haversine between consecutive
+   * pings WITHIN the bucket), active span, points, customers visited + sales.
+   * Distance is computed on the full ping set (not the downsampled trail).
+   */
+  async trackingSummary(
+    repId: string,
+    fromIso?: string,
+    toIso?: string,
+    bucket: 'day' | 'month' = 'day',
+  ): Promise<TrackingBucket[]> {
+    await this.assertRepExists(repId);
+    const to = toIso ? new Date(toIso) : new Date();
+    const from = fromIso ? new Date(fromIso) : new Date(to.getTime() - 30 * 24 * 3600_000);
+    const rows = (await this.events.query(
+      `
+      WITH seg AS (
+        SELECT date_trunc($4, recorded_at) AS bucket, recorded_at,
+          CASE WHEN LAG(lat) OVER w IS NULL THEN 0 ELSE
+            6371 * 2 * asin(sqrt(
+              power(sin(radians(lat - LAG(lat) OVER w) / 2), 2) +
+              cos(radians(LAG(lat) OVER w)) * cos(radians(lat)) *
+              power(sin(radians(lng - LAG(lng) OVER w) / 2), 2)
+            )) END AS seg_km
+        FROM rep_location_events
+        WHERE rep_id = $1 AND recorded_at BETWEEN $2 AND $3
+        WINDOW w AS (PARTITION BY date_trunc($4, recorded_at) ORDER BY recorded_at)
+      ),
+      loc AS (
+        SELECT bucket, count(*) AS points, min(recorded_at) AS first_at,
+               max(recorded_at) AS last_at, sum(seg_km) AS distance_km
+        FROM seg GROUP BY bucket
+      ),
+      vis AS (
+        SELECT date_trunc($4, visited_at) AS bucket,
+               count(DISTINCT customer_id) AS customers,
+               count(*) FILTER (WHERE had_sale) AS sales
+        FROM customer_visits
+        WHERE rep_id = $1 AND visited_at BETWEEN $2 AND $3
+        GROUP BY 1
+      )
+      SELECT to_char(coalesce(loc.bucket, vis.bucket), 'YYYY-MM-DD') AS date,
+             coalesce(loc.points, 0)::int              AS points,
+             round(coalesce(loc.distance_km, 0)::numeric, 2)::float8 AS "distanceKm",
+             loc.first_at                              AS "firstAt",
+             loc.last_at                               AS "lastAt",
+             round(coalesce(extract(epoch FROM (loc.last_at - loc.first_at)) / 60, 0)::numeric, 0)::int AS "activeMinutes",
+             coalesce(vis.customers, 0)::int           AS "customersVisited",
+             coalesce(vis.sales, 0)::int               AS sales
+      FROM loc FULL OUTER JOIN vis ON loc.bucket = vis.bucket
+      ORDER BY 1
+      `,
+      [repId, from, to, bucket],
+    )) as TrackingBucket[];
+    return rows;
   }
 
   /**

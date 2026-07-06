@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Brackets, IsNull, Repository } from 'typeorm';
+import { Between, Brackets, IsNull, Repository } from 'typeorm';
 import { parse } from 'csv-parse/sync';
 
 import { Customer } from './entities/customer.entity';
@@ -239,12 +239,24 @@ export class CustomersService {
     );
   }
 
-  async listVisits(customerId: string, limit = 50): Promise<CustomerVisit[]> {
+  async listVisits(
+    customerId: string,
+    opts: { from?: string; to?: string; limit?: number } = {},
+  ): Promise<CustomerVisit[]> {
     await this.findOneOrThrow(customerId);
+    const range =
+      opts.from || opts.to
+        ? {
+            visitedAt: Between(
+              opts.from ? new Date(opts.from) : new Date(0),
+              opts.to ? new Date(opts.to) : new Date(),
+            ),
+          }
+        : {};
     return this.visits.find({
-      where: { customerId },
+      where: { customerId, ...range },
       order: { visitedAt: 'DESC' },
-      take: limit,
+      take: opts.limit ?? 50,
     });
   }
 
