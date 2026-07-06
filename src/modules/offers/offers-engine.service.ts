@@ -183,6 +183,12 @@ export class OffersEngineService {
         }
       } else if (offer.type === 'ITEM_QTY_REWARD') {
         const t = offer.trigger as ItemSetTrigger;
+        // Optional payment gate: skip the offer if it targets a payment condition the
+        // sale doesn't match (CASH covers any non-CREDIT). No condition = any payment.
+        if (t.paymentCondition != null) {
+          const payOk = t.paymentCondition === 'CREDIT' ? isCredit : !isCredit;
+          if (!payOk) continue;
+        }
         const items = t.itemNumbers ?? [];
         const qty = items.reduce((s, n) => s + (cart.get(n) ?? 0), 0);
         const reward = offer.reward;

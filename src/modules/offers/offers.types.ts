@@ -58,6 +58,11 @@ export interface PaymentMethodTrigger {
  *  COMBINED qty of these items in the cart. */
 export interface ItemSetTrigger {
   itemNumbers: string[];
+  /**
+   * Optional payment gate: when set, the ITEM_QTY_REWARD only applies if the sale's
+   * payment matches (CASH = any non-CREDIT). Null/undefined = any payment.
+   */
+  paymentCondition?: PaymentCondition;
 }
 
 export type OfferTriggerConfig =
