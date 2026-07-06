@@ -1176,7 +1176,8 @@ export class VouchersService implements OnModuleInit {
 
     // 3) Price overrides on SALE lines: flag only when the line UNDERCUTS
     // every legitimate price for the item (catalog, item-units, active price
-    // rules). Selling above catalog is allowed — it doesn't hurt the owner.
+    // rules, the customer's assigned price list, and per-customer contract
+    // prices). Selling above catalog is allowed — it doesn't hurt the owner.
     if (dto.transKind === 'SALE' && !has(PERM_PRICE_OVERRIDE)) {
       for (const line of dto.transactions) {
         const lp = num(line.unitPrice);
@@ -1198,8 +1199,24 @@ export class VouchersService implements OnModuleInit {
              JOIN item_cart ic3 ON ic3.id = pr.product_id
             WHERE ic3.item_number = $1
               AND (pr.valid_from IS NULL OR pr.valid_from <= CURRENT_DATE)
-              AND (pr.valid_to   IS NULL OR pr.valid_to   >= CURRENT_DATE)`,
-          [line.itemNumber],
+              AND (pr.valid_to   IS NULL OR pr.valid_to   >= CURRENT_DATE)
+           UNION ALL
+           -- The customer's assigned price list (its contracted item price is a
+           -- legitimate floor — not a manual override).
+           SELECT pli.unit_price::float8 / 1000
+             FROM customers c
+             JOIN price_list_items pli ON pli.price_list_id = c.price_list_id
+             JOIN item_cart ic4 ON ic4.id = pli.item_id
+            WHERE c.customer_number = $2 AND ic4.item_number = $1
+           UNION ALL
+           -- Per-customer contract price (customer_prices mirror + local overrides).
+           SELECT cp.unit_price::float8 / 1000
+             FROM customers c2
+             JOIN customer_prices cp ON cp.customer_id = c2.id
+             JOIN item_cart ic5 ON ic5.id = cp.item_id
+            WHERE c2.customer_number = $2 AND ic5.item_number = $1
+              AND cp.deleted_at IS NULL`,
+          [line.itemNumber, dto.customerNumber ?? null],
         );
         const candidates = rows
           .map((r) => Number(r.p))
