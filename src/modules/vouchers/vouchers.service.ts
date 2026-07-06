@@ -211,6 +211,11 @@ export class VouchersService implements OnModuleInit {
     const offerResult = await this.applyOffers(dto);
     const result = await this.createUnchecked(dto);
     await this.recordOfferRedemptions(result, offerResult);
+    // AR: immediately reflect a credit voucher on the customer's outstanding debt so the
+    // customer detail updates without waiting for the next ERP balance sync. A credit SALE
+    // raises the debt; a credit RETURN (credit note) lowers it. The ERP mirror
+    // (pullCustomerBalances) later reconciles total_debt to the authoritative ERP balance.
+    await this.applyCreditVoucherToDebt(dto);
     // Mirror posted vouchers to the ERP (ErpSync listener filters by kind + enqueues
     // an outbox push; no-op when ERP off). Stock IN/OUT adjustments aren't mirrored.
     if (result.isPosted) {
@@ -260,6 +265,41 @@ export class VouchersService implements OnModuleInit {
         available: creditLimit - balance,
         saleTotal: creditAmount,
       });
+    }
+  }
+
+  /**
+   * Immediately apply a credit voucher to the customer's outstanding debt (`total_debt`)
+   * so the customer detail reflects it right away, without waiting for the next ERP
+   * balance sync. A credit SALE increases the debt by the CREDIT payment amount; a credit
+   * RETURN (credit note) decreases it. Cash/cheque/transfer sales don't touch the debt.
+   * Best-effort — a failure here must never fail the voucher. The ERP mirror
+   * (erp-sync `pullCustomerBalances`) later reconciles `total_debt` to the ERP balance.
+   */
+  private async applyCreditVoucherToDebt(dto: CreateVoucherDto): Promise<void> {
+    if (!dto.customerNumber) return;
+    if (dto.transKind !== 'SALE' && dto.transKind !== 'RETURN') return;
+    const creditAmount = (dto.payments ?? [])
+      .filter((p) => p.paymentType === 'CREDIT')
+      .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    if (creditAmount <= 0) return;
+
+    try {
+      const repo = this.dataSource.getRepository(Customer);
+      const customer = await repo.findOne({
+        where: { customerNumber: dto.customerNumber },
+      });
+      if (!customer) return;
+      const sign = dto.transKind === 'RETURN' ? -1 : 1;
+      const next = (Number(customer.totalDebt) || 0) + sign * creditAmount;
+      customer.totalDebt = Math.max(0, next).toFixed(2); // debt never goes below 0
+      await repo.save(customer);
+    } catch (err) {
+      this.logger.warn(
+        `applyCreditVoucherToDebt failed for ${dto.customerNumber}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
   }
 
