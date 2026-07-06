@@ -515,12 +515,15 @@ export class ReportsService {
             WHERE trans_kind = 'ORDER' AND is_fulfilled = false AND deleted_at IS NULL`,
         ),
         this.ds.query(
+          // "Collected today" = actual collection receipts (the collections table),
+          // NOT sales-voucher payment lines. amount is fils → JOD major. Only money
+          // actually collected (confirmed/deposited), excluding pending/bounced.
           `SELECT
-              COALESCE(SUM(amount::numeric), 0)::float8 AS "todayTotal",
-              COALESCE(SUM(amount::numeric) FILTER (WHERE payment_type = 'CASH'),   0)::float8 AS "todayCash",
-              COALESCE(SUM(amount::numeric) FILTER (WHERE payment_type = 'CHEQUE'), 0)::float8 AS "todayCheque"
-            FROM payments
-           WHERE deleted_at IS NULL AND payment_date >= CURRENT_DATE`,
+              COALESCE(SUM(amount), 0)::float8 / 1000                                   AS "todayTotal",
+              COALESCE(SUM(amount) FILTER (WHERE method = 'cash'),   0)::float8 / 1000   AS "todayCash",
+              COALESCE(SUM(amount) FILTER (WHERE method = 'cheque'), 0)::float8 / 1000   AS "todayCheque"
+            FROM collections
+           WHERE status IN ('confirmed','deposited') AND collected_at >= CURRENT_DATE`,
         ),
         this.ds.query(
           `SELECT
@@ -622,12 +625,13 @@ export class ReportsService {
                AND in_date >= CURRENT_DATE - ($1::int - 1)
              GROUP BY in_date::date) s ON s.day = d.day
          LEFT JOIN (
-            SELECT payment_date::date AS day,
-                   COALESCE(SUM(amount::numeric), 0)::float8 AS "paymentsTotal"
-              FROM payments
-             WHERE deleted_at IS NULL
-               AND payment_date >= CURRENT_DATE - ($1::int - 1)
-             GROUP BY payment_date::date) p ON p.day = d.day
+            -- collection receipts per day (fils → JOD major), not sales-voucher payments
+            SELECT collected_at::date AS day,
+                   COALESCE(SUM(amount), 0)::float8 / 1000 AS "paymentsTotal"
+              FROM collections
+             WHERE status IN ('confirmed','deposited')
+               AND collected_at >= CURRENT_DATE - ($1::int - 1)
+             GROUP BY collected_at::date) p ON p.day = d.day
         ORDER BY d.day`,
       [days],
     );

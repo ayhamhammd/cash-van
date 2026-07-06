@@ -16,6 +16,13 @@ export interface TargetRow {
   actualAmount: number; // fils
   actualQty: number; // units
   progressPct: number | null; // actual-vs-target on the target's metric
+  remaining: number | null; // target − actual on the target's metric (≥ 0); null if no target
+}
+
+/** A target row for a specific month — used by the salesman's target history. */
+export interface TargetHistoryRow extends TargetRow {
+  year: number;
+  month: number;
 }
 
 /**
@@ -105,6 +112,25 @@ export class TargetsService {
     return mapRow(rows[0]);
   }
 
+  /**
+   * A salesman's target history: the last `months` months (most-recent first),
+   * each with the target + actual sales + progress. Used by the mobile app
+   * (`GET /targets/me/history`). Reuses `getForRep` per month.
+   */
+  async historyForRep(repId: string, months: number): Promise<TargetHistoryRow[]> {
+    const n = Math.max(1, Math.min(24, Math.floor(months) || 6));
+    const now = new Date();
+    const out: TargetHistoryRow[] = [];
+    for (let i = 0; i < n; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const year = d.getFullYear();
+      const month = d.getMonth() + 1;
+      const row = await this.getForRep(repId, year, month);
+      out.push({ ...row, year, month });
+    }
+    return out;
+  }
+
   /** Create or replace a rep's target for a (year, month). */
   async upsert(dto: UpsertTargetDto): Promise<SalesTarget> {
     const existing = await this.repo.findOne({
@@ -146,6 +172,8 @@ function mapRow(r: Record<string, string | null>): TargetRow {
     targetValue && targetValue > 0
       ? Math.round((actualForMetric / targetValue) * 100)
       : null;
+  const remaining =
+    targetValue != null ? Math.max(0, targetValue - actualForMetric) : null;
   return {
     repId: r.repId as string,
     repCode: r.repCode ?? null,
@@ -157,5 +185,6 @@ function mapRow(r: Record<string, string | null>): TargetRow {
     actualAmount,
     actualQty,
     progressPct,
+    remaining,
   };
 }

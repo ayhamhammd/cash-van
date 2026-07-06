@@ -47,6 +47,23 @@ export class TargetsController {
     return this.targets.getForRep(repId, year, month);
   }
 
+  @Get('me/history')
+  @ApiOperation({
+    summary: "The signed-in salesman's target history",
+    description:
+      "The authenticated salesman's targets for the last `months` months (default 6, most-recent first), each with actuals + progress. Read-only; used by the mobile app.",
+  })
+  @ApiOkResponse({ description: 'Target history rows' })
+  myHistory(
+    @CurrentUser('repId') repId: string | null,
+    @Query('months') monthsStr?: string,
+  ) {
+    if (!repId) {
+      throw new ForbiddenException('This account is not linked to a salesman.');
+    }
+    return this.targets.historyForRep(repId, monthsStr ? Number(monthsStr) : 6);
+  }
+
   @Get()
   @Roles('admin', 'manager', 'supervisor')
   @ApiOperation({
