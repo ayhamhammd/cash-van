@@ -282,4 +282,140 @@ export class ArService {
       repId: r.customerCode ? repByNumber.get(r.customerCode) ?? null : null,
     }));
   }
+
+  /**
+   * Local receivables from the dashboard's OWN data (not the ERP proxy):
+   *   outstanding(customer) = Σ credit SALE vouchers − Σ collections (cash + cheque)
+   * Collections pay down the credit vouchers oldest-first (FIFO), so every voucher that
+   * is still (partly) unpaid is listed — a customer shows up whenever they hold an
+   * unpaid credit voucher, even with no collection recorded. Optional date range
+   * (`from`/`to`, YYYY-MM-DD, applied to both sales and collections) and `customerNumber`
+   * filter. Only customers with a remaining balance are returned.
+   */
+  async receivables(q: {
+    from?: string;
+    to?: string;
+    customerNumber?: string;
+  }): Promise<ReceivablesResult> {
+    const from = q.from && /^\d{4}-\d{2}-\d{2}$/.test(q.from) ? q.from : null;
+    const to = q.to && /^\d{4}-\d{2}-\d{2}$/.test(q.to) ? q.to : null;
+    const cust = q.customerNumber?.trim() || null;
+    const params = [from, to, cust];
+
+    // Credit SALE vouchers, one row per voucher (the debits), oldest-first.
+    const saleRows: Array<{
+      customerNumber: string; customerName: string;
+      voucherNumber: string; createdAt: Date; amount: string;
+    }> = await this.ds.query(
+      `SELECT h.customer_number AS "customerNumber",
+              COALESCE(c.customer_name, h.customer_number) AS "customerName",
+              h.voucher_number AS "voucherNumber",
+              h.created_at AS "createdAt",
+              SUM(p.amount)::text AS amount
+         FROM payments p
+         JOIN voucher_headers h ON h.voucher_number = p.voucher_number
+         LEFT JOIN customers c ON c.customer_number = h.customer_number
+        WHERE p.payment_type = 'CREDIT' AND h.trans_kind = 'SALE'
+          AND ($1::date IS NULL OR h.created_at >= $1::date)
+          AND ($2::date IS NULL OR h.created_at < ($2::date + 1))
+          AND ($3::text IS NULL OR h.customer_number = $3 OR c.customer_name ILIKE '%' || $3 || '%')
+        GROUP BY h.customer_number, c.customer_name, h.voucher_number, h.created_at
+        ORDER BY h.customer_number, h.created_at ASC`,
+      params,
+    );
+
+    // Collections (cash + cheque) per customer — pay down the debit. Fils → JOD major.
+    const collRows: Array<{ customerNumber: string; paid: string }> = await this.ds.query(
+      `SELECT c.customer_number AS "customerNumber",
+              (COALESCE(SUM(co.amount), 0)::numeric / 1000)::text AS paid
+         FROM collections co
+         JOIN customers c ON c.id = co.customer_id
+        WHERE co.method IN ('cash', 'cheque') AND co.status IN ('confirmed', 'deposited')
+          AND ($1::date IS NULL OR co.collected_at >= $1::date)
+          AND ($2::date IS NULL OR co.collected_at < ($2::date + 1))
+          AND ($3::text IS NULL OR c.customer_number = $3 OR c.customer_name ILIKE '%' || $3 || '%')
+        GROUP BY c.customer_number`,
+      params,
+    );
+
+    const collectedByCustomer = new Map<string, number>();
+    for (const r of collRows) collectedByCustomer.set(r.customerNumber, Number(r.paid));
+
+    const byCustomer = new Map<
+      string,
+      { customerName: string; vouchers: Array<{ voucherNumber: string; date: Date; amount: number }> }
+    >();
+    for (const r of saleRows) {
+      let e = byCustomer.get(r.customerNumber);
+      if (!e) { e = { customerName: r.customerName, vouchers: [] }; byCustomer.set(r.customerNumber, e); }
+      e.vouchers.push({ voucherNumber: r.voucherNumber, date: r.createdAt, amount: Number(r.amount) });
+    }
+
+    const customers: ReceivablesCustomer[] = [];
+    let totalOutstanding = 0;
+    for (const [customerNumber, e] of byCustomer) {
+      const debit = e.vouchers.reduce((s, v) => s + v.amount, 0);
+      const collected = collectedByCustomer.get(customerNumber) ?? 0;
+      // FIFO: collections pay off the oldest credit vouchers first.
+      let rem = collected;
+      const unpaidVouchers: ReceivablesVoucher[] = [];
+      for (const v of e.vouchers) {
+        if (rem >= v.amount - 1e-9) { rem -= v.amount; continue; }
+        const unpaid = v.amount - Math.max(0, rem);
+        rem = 0;
+        unpaidVouchers.push({
+          voucherNumber: v.voucherNumber,
+          date: v.date,
+          amount: Number(v.amount.toFixed(2)),
+          unpaid: Number(unpaid.toFixed(2)),
+        });
+      }
+      const outstanding = unpaidVouchers.reduce((s, v) => s + v.unpaid, 0);
+      if (outstanding <= 0.005) continue;
+      totalOutstanding += outstanding;
+      customers.push({
+        customerNumber,
+        customerName: e.customerName,
+        debit: Number(debit.toFixed(2)),
+        collected: Number(collected.toFixed(2)),
+        outstanding: Number(outstanding.toFixed(2)),
+        unpaidVouchers,
+      });
+    }
+    customers.sort((a, b) => b.outstanding - a.outstanding);
+
+    return {
+      from,
+      to,
+      customerNumber: cust,
+      totalOutstanding: Number(totalOutstanding.toFixed(2)),
+      customerCount: customers.length,
+      customers,
+    };
+  }
+}
+
+export interface ReceivablesVoucher {
+  voucherNumber: string;
+  date: Date;
+  amount: number;
+  unpaid: number;
+}
+
+export interface ReceivablesCustomer {
+  customerNumber: string;
+  customerName: string;
+  debit: number;       // Σ credit sale vouchers
+  collected: number;   // Σ collections cash+cheque
+  outstanding: number; // Σ still-unpaid voucher portions (FIFO)
+  unpaidVouchers: ReceivablesVoucher[];
+}
+
+export interface ReceivablesResult {
+  from: string | null;
+  to: string | null;
+  customerNumber: string | null;
+  totalOutstanding: number;
+  customerCount: number;
+  customers: ReceivablesCustomer[];
 }

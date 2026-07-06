@@ -40,6 +40,20 @@ export class ArController {
     });
   }
 
+  /**
+   * Local receivables: customers with unpaid credit vouchers (credit sale − collections),
+   * FIFO-listed per voucher. Optional date range + customerNumber filter.
+   */
+  @Get('receivables')
+  @ApiOkResponse({ description: 'Unpaid credit vouchers per customer' })
+  receivables(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('customerNumber') customerNumber?: string,
+  ) {
+    return this.ar.receivables({ from, to, customerNumber });
+  }
+
   /** Arrears + monthly-collection widget (month = YYYY-MM, default current). */
   @Get('arrears-summary')
   @ApiOkResponse({ description: 'Monthly credit-sold vs collected + arrears list' })
