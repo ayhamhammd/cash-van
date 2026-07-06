@@ -266,13 +266,26 @@ dashboard export links the return to the original credit invoice so ERP applies 
 
 ```
 available          = creditLimit − balance            (balance = open AR, ≥ 0)
-blockCreditSale    = creditHold OR (balance + saleTotal) > creditLimit
+blockCreditSale    = creditHold OR creditLimit <= 0 OR (balance + saleTotal) > creditLimit
                      (van uses offline-effective balance from §5.1)
 onBlock            = hard reject; NO device override.
                      remedy = manager raises creditLimit → syncs → rep re-creates voucher
 cashSaleUnaffected = CASH/CHEQUE/TRANSFER sales never blocked, never touch AR
-creditReturn       = RETURN of a credit sale → balance −= returnTotal (frees credit)
+creditReturn       = RETURN inherits the original sale's payment type; a credit return
+                     → balance −= returnTotal (frees credit); a cash return doesn't touch AR
 ```
+
+**Van-side refinements (field-requested, implemented):**
+- **No limit ⇒ no credit.** On the van, `creditLimit <= 0` **blocks** the credit sale with
+  a "customer has no credit limit" dialog (`NoCreditLimitException`) — a customer must have
+  a positive limit to buy on credit. *(The ERP/dashboard still treat `creditLimit = 0` as
+  "not enforced" for defense-in-depth; harmless because the van is the sale origin and
+  blocks first. Align the backend to also block-on-0 only if you want a hard server gate.)*
+- **Return inherits the sale's payment type** — the van copies the original sale's payment
+  method onto the RETURN (credit→credit frees A/R, cash→cash), from the local saved sale or
+  the server-looked-up sale (`VoucherDetailDto.payments`).
+- **Offline numbering = last number + 1** — `VoucherNumberGenerator` uses the max trailing
+  sequence + 1 (not COUNT+1), so a cancelled/removed voucher never causes a reused number.
 
 Money: fils/thousandths integers end-to-end; ERP v1 API converts to/from major decimals
 with `round(x*1000)`.
