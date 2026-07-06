@@ -17,6 +17,7 @@ import { Payment } from './entities/payment.entity';
 import { PaymentCheque } from './entities/payment-cheque.entity';
 import { TransactionKind } from './entities/transaction-kind.entity';
 import { VanStock } from '../products/entities/van-stock.entity';
+import { Customer } from '../customers/entities/customer.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -198,6 +199,11 @@ export class VouchersService implements OnModuleInit {
       repLat: dto.repLat,
       repLng: dto.repLng,
     });
+    // AR credit-limit guard: a credit (on-account) SALE may not push the customer's
+    // balance over their limit. Hard block — the remedy is a manager raising the limit
+    // (which mirrors down), then the rep re-creates the voucher. See
+    // docs/SPEC-accounts-receivable.md.
+    await this.enforceCreditLimit(dto);
     // Server-authoritative offers: bake per-line discounts and gift free-lines
     // into the dto BEFORE the voucher is built, so gifts post as real lines and
     // their stock moves. MUST run before createUnchecked (was previously dead
@@ -214,6 +220,47 @@ export class VouchersService implements OnModuleInit {
       });
     }
     return result;
+  }
+
+  /**
+   * AR credit-limit enforcement for credit (on-account) SALEs. The credit amount is the
+   * sum of CREDIT payment lines (JOD major). Blocks (409) when the customer is on credit
+   * hold, or when a POSITIVE limit would be exceeded by balance + credit amount. A limit
+   * of 0 means "not enforced" (legacy default) — use credit hold to stop a customer
+   * entirely. Cash/cheque/transfer/card sales never touch AR. See
+   * docs/SPEC-accounts-receivable.md.
+   */
+  private async enforceCreditLimit(dto: CreateVoucherDto): Promise<void> {
+    if (dto.transKind !== 'SALE' || !dto.customerNumber) return;
+    const creditAmount = (dto.payments ?? [])
+      .filter((p) => p.paymentType === 'CREDIT')
+      .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    if (creditAmount <= 0) return;
+
+    const customer = await this.dataSource.getRepository(Customer).findOne({
+      where: { customerNumber: dto.customerNumber },
+    });
+    if (!customer) return; // unknown customer — let the normal flow surface it
+
+    if (customer.creditHold) {
+      throw new ConflictException({
+        code: 'CREDIT_HOLD',
+        message: `Customer ${customer.customerName} is on credit hold — no credit sales allowed.`,
+      });
+    }
+    const creditLimit = Number(customer.creditLimit) || 0;
+    if (creditLimit <= 0) return; // not enforced
+    const balance = Number(customer.totalDebt) || 0;
+    if (balance + creditAmount > creditLimit + 1e-9) {
+      throw new ConflictException({
+        code: 'CREDIT_LIMIT_EXCEEDED',
+        message: `Credit limit exceeded for ${customer.customerName}: balance ${balance.toFixed(2)} + sale ${creditAmount.toFixed(2)} > limit ${creditLimit.toFixed(2)}.`,
+        balance,
+        creditLimit,
+        available: creditLimit - balance,
+        saleTotal: creditAmount,
+      });
+    }
   }
 
   /**

@@ -141,9 +141,19 @@ interface ErpCustomer {
   email?: string | null;
   taxNumber?: string | null;
   creditLimit?: number | string | null; // ERP stores thousandths
+  paymentTermsDays?: number | null;      // AR: Net-N terms
+  creditHold?: boolean | null;           // AR: hard-stop all credit sales
   priceListId?: string | null;
   priceListName?: string | null;
   allowManualPriceEdit?: boolean | null;
+}
+
+/** A per-customer aging row from the ERP `GET /api/v1/ar/aging`. */
+interface ErpAgingRow {
+  customerId: string;
+  customerCode?: string | null;
+  totalOpen?: number | null;   // open receivable, major units
+  overdue?: number | null;     // past-due portion, major units
 }
 
 /** A resolved price row from the ERP `GET /api/v1/prices?customerCode=`. */
@@ -875,6 +885,9 @@ export class ErpSyncService {
         if (c.creditLimit != null) {
           cust.creditLimit = Number(c.creditLimit).toFixed(2); // ERP GET returns JOD major already
         }
+        // AR: mirror payment terms + credit hold (see docs/SPEC-accounts-receivable.md).
+        if (c.paymentTermsDays != null) cust.paymentTerms = Number(c.paymentTermsDays);
+        if (c.creditHold != null) cust.creditHold = Boolean(c.creditHold);
         // ERP customer pricing assignment (drives customer_prices + the app lock).
         cust.erpPriceListId = c.priceListId ?? null;
         cust.erpPriceListName = c.priceListName ?? null;
@@ -886,7 +899,52 @@ export class ErpSyncService {
       page += 1;
       if (page > 200) break; // safety cap (20k customers)
     }
+    // AR: mirror each customer's live open balance from the ERP onto total_debt so the
+    // dashboard + van see receivables without recomputing. Best-effort — a failure here
+    // must not fail the whole customer sync.
+    try {
+      await this.pullCustomerBalances();
+    } catch (err) {
+      this.logger.warn(
+        `AR balance mirror skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return processed;
+  }
+
+  /**
+   * Pull the ERP org-wide AR aging (`GET /api/v1/ar/aging`) and write each customer's
+   * open receivable to `customers.total_debt`. Matches on the ERP customer id (via the
+   * id-map) so code-less ERP customers are covered. See docs/SPEC-accounts-receivable.md.
+   */
+  private async pullCustomerBalances(): Promise<number> {
+    const pageSize = 100;
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+    let updated = 0;
+    while ((page - 1) * pageSize < total) {
+      const { data, total: t } = await this.erp.list<ErpAgingRow>('ar/aging', { page, pageSize });
+      total = t;
+      if (data.length === 0) break;
+      for (const row of data) {
+        const map = await this.idmap.findOne({
+          where: { entity: 'customer', erpId: String(row.customerId) },
+        });
+        const localNumber =
+          map?.localId ?? (row.customerCode ? row.customerCode : null);
+        if (!localNumber) continue;
+        const cust = await this.customers.findOne({
+          where: { customerNumber: localNumber },
+        });
+        if (!cust) continue;
+        cust.totalDebt = Number(row.totalOpen ?? 0).toFixed(2);
+        await this.customers.save(cust);
+        updated += 1;
+      }
+      page += 1;
+      if (page > 400) break; // safety cap
+    }
+    return updated;
   }
 
   /**

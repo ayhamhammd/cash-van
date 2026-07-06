@@ -48,6 +48,7 @@ import { AgentModule } from './modules/agent/agent.module';
 import { OffersModule } from './modules/offers/offers.module';
 import { AiInsightsModule } from './modules/ai-insights/ai-insights.module';
 import { TargetsModule } from './modules/targets/targets.module';
+import { ArModule } from './modules/ar/ar.module';
 
 @Module({
   imports: [
@@ -107,6 +108,7 @@ import { TargetsModule } from './modules/targets/targets.module';
     OffersModule,
     AiInsightsModule,
     TargetsModule,
+    ArModule,
   ],
   controllers: [HealthController],
   providers: [

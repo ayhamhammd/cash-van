@@ -54,6 +54,6 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
   ],
   controllers: [ErpSyncController],
   providers: [ErpHttpClient, ErpSyncService, ErpOutboxService],
-  exports: [ErpSyncService, ErpOutboxService],
+  exports: [ErpSyncService, ErpOutboxService, ErpHttpClient],
 })
 export class ErpSyncModule {}

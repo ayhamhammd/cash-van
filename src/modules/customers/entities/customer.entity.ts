@@ -70,6 +70,11 @@ export class Customer extends BaseEntity {
   @Column({ name: 'payment_terms', type: 'integer', default: 30 })
   paymentTerms!: number;
 
+  /** AR credit hold — when true, block ALL credit (on-account) sales regardless of
+   * limit. Mirrored from the ERP customer. See docs/SPEC-accounts-receivable.md. */
+  @Column({ name: 'credit_hold', type: 'boolean', default: false })
+  creditHold!: boolean;
+
   @Column({ name: 'customer_type', type: 'text', default: 'CASH' })
   customerType!: CustomerType;
 
