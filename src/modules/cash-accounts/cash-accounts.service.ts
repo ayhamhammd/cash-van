@@ -335,7 +335,7 @@ export class CashAccountsService {
            JOIN cash_accounts a ON a.id = t.account_id
           WHERE t.settlement_id = $1
             AND t.entry_kind IN ('SETTLEMENT_OUT', 'SETTLEMENT_IN')
-          ORDER BY t.entry_kind DESC`, // IN before OUT (debits first, tidy journal)
+          ORDER BY t.entry_kind ASC`, // SETTLEMENT_IN < SETTLEMENT_OUT → debits (IN) lead, tidy journal
         [settlementId],
       );
     if (!rows.length) return null; // nothing moved (empty boxes / no destinations)
