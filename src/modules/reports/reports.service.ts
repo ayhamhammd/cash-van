@@ -493,6 +493,25 @@ export class ReportsService {
     return { items, total: totalRows[0]?.c ?? 0 };
   }
 
+  /** Today's customer visits that did NO business (had_sale=false) — who was visited
+   *  without a transaction, with customer + rep names (newest first). */
+  async noTransactionVisitsToday(): Promise<VisitRow[]> {
+    return this.ds.query(
+      `SELECT v.id::text AS id,
+              v.visited_at AS "visitedAt",
+              v.had_sale AS "hadSale",
+              v.visit_note AS "visitNote",
+              c.customer_name AS "customerName",
+              c.customer_number AS "customerNumber",
+              r.name_ar AS "repName"
+         FROM customer_visits v
+         LEFT JOIN customers c ON c.id = v.customer_id
+         LEFT JOIN reps r ON r.id = v.rep_id
+        WHERE v.had_sale = false AND v.visited_at >= CURRENT_DATE
+        ORDER BY v.visited_at DESC`,
+    );
+  }
+
   /** One aggregated KPI payload for the dashboard home page (today vs yesterday). */
   async dashboard(): Promise<DashboardOverview> {
     const [salesRows, openOrderRows, payRows, visitRows, custRows, chequeRows, lowStockRows, repRows] =

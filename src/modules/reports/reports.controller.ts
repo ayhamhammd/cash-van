@@ -115,6 +115,16 @@ export class ReportsController {
     return this.reports.visits(q.offset ?? 0, q.limit ?? 25);
   }
 
+  @Get('visits-no-transaction')
+  @ApiOperation({
+    summary: "Today's no-transaction visits",
+    description: 'Customers visited today where the rep did no business (had_sale=false), with customer + rep names.',
+  })
+  @ApiOkResponse({ description: 'Today no-transaction visits' })
+  noTransactionVisits() {
+    return this.reports.noTransactionVisitsToday();
+  }
+
   // ── End-of-Day cash reconciliation (admin/manager) ──────────────────────────
 
   @Get('end-of-day')
