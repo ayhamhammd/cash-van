@@ -1,8 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 
 import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
+import { CashAccountsService, SettleTransfers } from '../cash-accounts/cash-accounts.service';
 import { SalesmanSettlement } from './entities/salesman-settlement.entity';
 
 /** One salesman's End-of-Day cash summary over a period (all money in fils). */
@@ -183,6 +184,7 @@ export class ReportsService {
     @InjectRepository(SalesmanSettlement)
     private readonly settlements: Repository<SalesmanSettlement>,
     private readonly erpOutbox: ErpOutboxService,
+    private readonly cashAccounts: CashAccountsService,
   ) {}
 
   // ── End-of-Day cash reconciliation ─────────────────────────────────────────
@@ -332,7 +334,7 @@ export class ReportsService {
    * any sale/collection.
    */
   async settle(
-    dto: { repId: string; from: string; to: string; receivedFils: number; note?: string },
+    dto: { repId: string; from: string; to: string; receivedFils: number; note?: string; transfers?: SettleTransfers },
     userId?: string,
   ): Promise<SalesmanSettlement> {
     if (dto.receivedFils < 0) throw new BadRequestException('receivedFils must be ≥ 0');
@@ -360,6 +362,16 @@ export class ReportsService {
     );
     // Queue the accounting entry to the ERP (best-effort, non-blocking).
     await this.erpOutbox.enqueue('CASH_SETTLEMENT', saved.id);
+    // Empty the rep's cash boxes into the chosen destination accounts. Best-effort: a
+    // failure here leaves the boxes non-zero (visible on the EOD tab) but never voids the
+    // settlement record. See docs/SPEC-eod-rep-cash-accounts.md.
+    try {
+      await this.cashAccounts.settleTransfers(dto.repId, saved.id, dto.transfers ?? {});
+    } catch (err) {
+      new Logger('Reports').warn(
+        `settleTransfers failed for settlement ${saved.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return saved;
   }
 
