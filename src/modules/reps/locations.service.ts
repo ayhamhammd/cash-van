@@ -41,6 +41,7 @@ export interface VisitRow {
   note: string | null;
   lat: number | null;
   lng: number | null;
+  onPlan: boolean; // visited outlet was on the planned route / journey plan that day
 }
 
 /** A per-day / per-month tracking summary bucket. */
@@ -172,7 +173,19 @@ export class LocationsService {
              cv.visited_at             AS "visitedAt",
              cv.had_sale               AS "hadSale",
              cv.visit_note             AS "note",
-             cv.lat, cv.lng
+             cv.lat, cv.lng,
+             -- On-plan = the visited outlet was a route stop for that date, OR the
+             -- recurring journey plan covers the visit's weekday (0=Sun..6=Sat).
+             (EXISTS (
+                SELECT 1 FROM route_stops rs
+                JOIN route_plans rp ON rp.id = rs.plan_id
+                WHERE rp.rep_id = $1 AND rs.customer_id = cv.customer_id
+                  AND rp.plan_date = cv.visited_at::date
+              ) OR EXISTS (
+                SELECT 1 FROM journey_plan_entries jp
+                WHERE jp.rep_id = $1 AND jp.customer_id = cv.customer_id AND jp.is_active = true
+                  AND EXTRACT(DOW FROM cv.visited_at)::smallint = ANY(jp.weekdays)
+              )) AS "onPlan"
       FROM customer_visits cv
       LEFT JOIN customers c ON c.id = cv.customer_id
       WHERE cv.rep_id = $1 AND cv.visited_at BETWEEN $2 AND $3
