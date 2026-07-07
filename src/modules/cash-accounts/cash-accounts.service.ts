@@ -316,6 +316,50 @@ export class CashAccountsService {
     return moved;
   }
 
+  /**
+   * Reconstruct the ERP GL journal for a completed settlement from its SETTLEMENT_IN/OUT
+   * rows: DR each destination that received cash, CR each rep box that was emptied
+   * (both are cash/asset accounts, so a transfer is DR dest / CR box). Amounts are JOD
+   * major (the ERP journal endpoint re-scales to thousandths). Returns null when nothing
+   * was settled OR any involved account isn't ERP-linked — in which case the caller keeps
+   * the legacy cash-settlement push instead of a partial (unbalanced) journal.
+   */
+  async buildSettlementJournal(
+    settlementId: string,
+  ): Promise<{ externalId: string; description: string; date?: string; lines: Array<{ accountCode: string; debit: number; credit: number; description: string }> } | null> {
+    const rows: Array<{ entryKind: string; amountFils: string; erpAccountCode: string | null; accountName: string }> =
+      await this.ds.query(
+        `SELECT t.entry_kind AS "entryKind", ABS(t.amount_fils)::bigint AS "amountFils",
+                a.erp_account_code AS "erpAccountCode", a.name AS "accountName"
+           FROM account_transactions t
+           JOIN cash_accounts a ON a.id = t.account_id
+          WHERE t.settlement_id = $1
+            AND t.entry_kind IN ('SETTLEMENT_OUT', 'SETTLEMENT_IN')
+          ORDER BY t.entry_kind DESC`, // IN before OUT (debits first, tidy journal)
+        [settlementId],
+      );
+    if (!rows.length) return null; // nothing moved (empty boxes / no destinations)
+    if (rows.some((r) => !r.erpAccountCode)) {
+      this.logger.warn(`settlement ${settlementId} has unlinked cash accounts — GL journal skipped`);
+      return null;
+    }
+    const lines = rows.map((r) => {
+      const major = Number(r.amountFils) / 1000; // fils → JOD major
+      const isIn = r.entryKind === 'SETTLEMENT_IN';
+      return {
+        accountCode: r.erpAccountCode as string,
+        debit: isIn ? major : 0,
+        credit: isIn ? 0 : major,
+        description: r.accountName,
+      };
+    });
+    return {
+      externalId: `settlement-${settlementId}`,
+      description: `تسوية صناديق المندوب — ${settlementId}`,
+      lines,
+    };
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────────
 
   private async balanceOf(accountId: string, manager?: EntityManager): Promise<number> {

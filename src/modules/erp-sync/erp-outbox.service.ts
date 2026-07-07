@@ -10,6 +10,7 @@ import { Collection } from '../collections/entities/collection.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { SettingsService } from '../settings/settings.service';
+import { CashAccountsService } from '../cash-accounts/cash-accounts.service';
 import { ErpHttpClient } from './erp-http.client';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import {
@@ -29,6 +30,7 @@ export class ErpOutboxService {
   constructor(
     private readonly erp: ErpHttpClient,
     private readonly settings: SettingsService,
+    private readonly cashAccounts: CashAccountsService,
     @InjectRepository(ErpOutbox) private readonly outbox: Repository<ErpOutbox>,
     @InjectRepository(ErpIdMap) private readonly idmap: Repository<ErpIdMap>,
     @InjectRepository(VoucherHeader) private readonly headers: Repository<VoucherHeader>,
@@ -130,6 +132,10 @@ export class ErpOutboxService {
     // so ERP stock moves RIGHT AWAY — the ERP `stock-transfers` document instead
     // sits PENDING_DISPATCH and doesn't touch stock until dispatch+receive.
     if (row.kind === 'STOCK_TRANSFER') return this.buildTransferCalls(row.ref);
+    if (row.kind === 'REP_SETTLEMENT_JOURNAL') {
+      const call = await this.buildRepSettlementJournal(row.ref);
+      return call ? [call] : null;
+    }
     const one = await this.buildPayload(row);
     return one ? [one] : null;
   }
@@ -159,7 +165,31 @@ export class ErpOutboxService {
     // STOCK_TRANSFER is handled as two calls in buildCalls (buildTransferCalls).
     if (row.kind === 'PAYMENT') return this.buildPayment(row.ref);
     if (row.kind === 'CASH_SETTLEMENT') return this.buildSettlement(row.ref);
+    // REP_SETTLEMENT_JOURNAL is handled in buildCalls (carries its own externalId/idem).
     return null;
+  }
+
+  /**
+   * Build a balanced ERP manual journal that mirrors an EOD settlement's box→destination
+   * transfers (DR destinations, CR rep boxes). The lines are reconstructed from the
+   * settlement's ledger rows by the cash-accounts service; null means the accounts aren't
+   * ERP-linked (the settlement then falls back to the legacy cash-settlement push).
+   */
+  private async buildRepSettlementJournal(
+    settlementId: string,
+  ): Promise<{ path: string; body: Record<string, unknown>; idem: string } | null> {
+    const journal = await this.cashAccounts.buildSettlementJournal(settlementId);
+    if (!journal) return null;
+    return {
+      path: 'journal-entries',
+      idem: journal.externalId,
+      body: {
+        externalId: journal.externalId,
+        description: journal.description,
+        date: journal.date,
+        lines: journal.lines,
+      },
+    };
   }
 
   /**

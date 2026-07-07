@@ -132,6 +132,15 @@ export class ErpSyncController {
     return this.sync.listErpTaxRates();
   }
 
+  @Get('chart-of-accounts')
+  @ApiOperation({
+    summary: 'List ERP GL accounts',
+    description: 'Postable (leaf) chart-of-accounts entries for linking rep cash boxes. Admin only.',
+  })
+  erpChartOfAccounts() {
+    return this.sync.listErpChartOfAccounts();
+  }
+
   @Get('outbox')
   @ApiOperation({ summary: 'Outbound queue', description: 'Van docs queued/failed for the ERP. Admin only.' })
   @ApiOkResponse({ description: 'Outbox rows' })

@@ -18,6 +18,7 @@ import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.ent
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { SettingsModule } from '../settings/settings.module';
 import { VouchersModule } from '../vouchers/vouchers.module';
+import { CashAccountsModule } from '../cash-accounts/cash-accounts.module';
 import { ErpHttpClient } from './erp-http.client';
 import { ErpSyncService } from './erp-sync.service';
 import { ErpOutboxService } from './erp-outbox.service';
@@ -51,6 +52,7 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
     ]),
     SettingsModule,
     VouchersModule,
+    CashAccountsModule,
   ],
   controllers: [ErpSyncController],
   providers: [ErpHttpClient, ErpSyncService, ErpOutboxService],

@@ -314,6 +314,14 @@ export class ErpSyncService {
     return data;
   }
 
+  /** Passthrough: list postable ERP GL accounts (for the cash-account link picker). [] when ERP off. */
+  async listErpChartOfAccounts(): Promise<unknown[]> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return [];
+    const { data } = await this.erp.list('chart-of-accounts');
+    return data;
+  }
+
   // ── Create-mirror (dashboard → ERP), event-driven to avoid module cycles ──
 
   @OnEvent('erp.customer.created')
