@@ -21,6 +21,10 @@ import {
 
 const MAX_ATTEMPTS = 6;
 const BATCH = 20;
+// A 429 is transient (the ERP per-key window resets in 60s), so we reschedule past
+// the window WITHOUT consuming a dead-letter attempt — rate limiting must never
+// permanently fail a document.
+const RATE_LIMIT_BACKOFF_MS = 65_000;
 
 @Injectable()
 export class ErpOutboxService {
@@ -105,6 +109,8 @@ export class ErpOutboxService {
       for (const c of calls) {
         const res = await this.erp.post(c.path, c.body, c.idem ?? row.ref);
         if (!res.ok) {
+          // Rate limited: back off past the window and retry, no attempt spent.
+          if (res.status === 429) return this.softRetry(row, res.error ?? 'RATE_LIMITED');
           return this.fail(row, res.error ?? 'ERP rejected the document');
         }
         lastData = res.data;
@@ -138,6 +144,17 @@ export class ErpOutboxService {
     }
     const one = await this.buildPayload(row);
     return one ? [one] : null;
+  }
+
+  /** Transient rate-limit: reschedule past the ERP window without spending an attempt. */
+  private async softRetry(row: ErpOutbox, reason: string): Promise<void> {
+    row.status = 'pending';
+    row.error = reason;
+    row.nextAttemptAt = new Date(Date.now() + RATE_LIMIT_BACKOFF_MS);
+    await this.outbox.save(row);
+    this.logger.log(
+      `outbox ${row.kind} ${row.ref} rate-limited — retrying in ${RATE_LIMIT_BACKOFF_MS / 1000}s (attempt ${row.attempts}, not counted)`,
+    );
   }
 
   private async fail(row: ErpOutbox, error: string): Promise<void> {
