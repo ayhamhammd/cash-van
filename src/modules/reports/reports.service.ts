@@ -360,25 +360,23 @@ export class ReportsService {
         createdByUserId: userId ?? null,
       }),
     );
-    // Empty the rep's cash boxes into the chosen destination accounts FIRST — it writes the
-    // SETTLEMENT_IN/OUT ledger rows the GL journal is reconstructed from. Best-effort: a
-    // failure here leaves the boxes non-zero (visible on the EOD tab) but never voids the
-    // settlement record. See docs/SPEC-eod-rep-cash-accounts.md.
-    try {
-      await this.cashAccounts.settleTransfers(dto.repId, saved.id, dto.transfers ?? {});
-    } catch (err) {
-      new Logger('Reports').warn(
-        `settleTransfers failed for settlement ${saved.id}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    // Push accounting to the ERP (best-effort, non-blocking). Prefer the per-box GL journal
-    // when the boxes/destinations are ERP-linked; otherwise fall back to the legacy
-    // cash-settlement transaction so nothing is double-posted.
+    // Post the settlement to the ERP as a GL journal (best-effort, non-blocking): the
+    // main accounts recognise the full expected, the rep's account carries the shortfall.
+    // Skipped (with a warning) when the rep or a main account isn't ERP-linked.
+    // See docs/SPEC-rep-erp-accounts-settlement.md §4.
     try {
       const journal = await this.cashAccounts.buildSettlementJournal(saved.id);
-      await this.erpOutbox.enqueue(journal ? 'REP_SETTLEMENT_JOURNAL' : 'CASH_SETTLEMENT', saved.id);
-    } catch {
-      await this.erpOutbox.enqueue('CASH_SETTLEMENT', saved.id);
+      if (journal) {
+        await this.erpOutbox.enqueue('REP_SETTLEMENT_JOURNAL', saved.id);
+      } else {
+        new Logger('Reports').warn(
+          `settlement ${saved.id}: no ERP journal posted (rep or main account not linked)`,
+        );
+      }
+    } catch (err) {
+      new Logger('Reports').warn(
+        `settlement ${saved.id}: journal enqueue failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     return saved;
   }

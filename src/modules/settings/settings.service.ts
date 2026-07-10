@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 
 import { AppSettings, TaxCalcMethod } from './entities/app-settings.entity';
 import { UpdateAppSettingsDto } from './dto/update-settings.dto';
+import { UpdateAccountingDto } from './dto/update-accounting.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
 import { UpdateAiDto } from './dto/update-ai.dto';
@@ -36,6 +37,12 @@ export interface AppSettingsView {
   aiChatQuota: number;
   aiInferQuota: number;
   tobaccoTaxEnabled: boolean;
+  accounting: {
+    /** The three main settlement accounts (ERP GL refs). null = unset. */
+    salesAccount: { id: string | null; code: string | null };
+    cashCollectionAccount: { id: string | null; code: string | null };
+    chequeCollectionAccount: { id: string | null; code: string | null };
+  };
   jofotara: {
     clientId: string | null;
     secretLast4: string | null;
@@ -135,6 +142,7 @@ export class SettingsService {
 
   async update(dto: UpdateAppSettingsDto): Promise<AppSettingsView> {
     const row = await this.requireRow();
+    // Main settlement accounts are ERP chart-of-accounts refs (validated ERP-side on post).
     Object.assign(row, dto);
     row.updatedBy = this.userCtx.getUserId();
     await this.repo.save(row);
@@ -147,6 +155,18 @@ export class SettingsService {
       phone: row.sellerPhone ?? null,
       taxNumber: row.sellerTin ?? null,
     });
+    return this.toView(row);
+  }
+
+  /**
+   * Set the three main settlement accounts (ERP CoA refs). FlowVan-side config — editable
+   * even when the ERP integration is on (unlike the generic company-settings PATCH).
+   */
+  async updateAccounting(dto: UpdateAccountingDto): Promise<AppSettingsView> {
+    const row = await this.requireRow();
+    Object.assign(row, dto);
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
     return this.toView(row);
   }
 
@@ -332,6 +352,11 @@ export class SettingsService {
       aiChatQuota: row.aiChatQuota,
       aiInferQuota: row.aiInferQuota,
       tobaccoTaxEnabled: row.tobaccoTaxEnabled,
+      accounting: {
+        salesAccount: { id: row.erpSalesAccountId ?? null, code: row.erpSalesAccountCode ?? null },
+        cashCollectionAccount: { id: row.erpCashCollectionAccountId ?? null, code: row.erpCashCollectionAccountCode ?? null },
+        chequeCollectionAccount: { id: row.erpChequeCollectionAccountId ?? null, code: row.erpChequeCollectionAccountCode ?? null },
+      },
       jofotara: {
         clientId: row.jofotaraClientId ?? null,
         secretLast4: row.jofotaraSecretLast4 ?? null,

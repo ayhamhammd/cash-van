@@ -20,6 +20,8 @@ export interface ProvisionRepInput {
   isActive?: boolean;
   hireDate?: string | null;
   dailyQuotaFils?: number | null;
+  erpAccountId?: string | null;
+  erpAccountCode?: string | null;
 }
 
 /**
@@ -79,6 +81,8 @@ export async function provisionRep(
     isActive: input.isActive ?? true,
     hireDate: input.hireDate ?? null,
     dailyQuotaFils: input.dailyQuotaFils ?? null,
+    erpAccountId: input.erpAccountId ?? null,
+    erpAccountCode: input.erpAccountCode ?? null,
     vanId: store.id,
     userId,
   });

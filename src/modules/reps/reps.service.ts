@@ -130,6 +130,8 @@ export class RepsService {
         isActive: dto.isActive,
         hireDate: dto.hireDate,
         dailyQuotaFils: dto.dailyQuotaFils,
+        erpAccountId: dto.erpAccountId,
+        erpAccountCode: dto.erpAccountCode,
       }),
     );
 

@@ -8,6 +8,8 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 
+import { ACCESS_TOKEN_COOKIE } from '../common/auth/auth-cookie';
+
 /**
  * Operational realtime stream for dashboard clients.
  *
@@ -57,12 +59,24 @@ export class EventsGateway implements OnGatewayConnection {
   }
 
   private extractToken(client: Socket): string | null {
+    // Browser clients authenticate via the httpOnly cookie sent on the handshake.
+    const fromCookie = this.tokenFromCookie(client.handshake.headers?.cookie);
+    if (fromCookie) return fromCookie;
     const fromAuth = (client.handshake.auth as { token?: string } | undefined)?.token;
     if (fromAuth) return fromAuth;
     const fromQuery = client.handshake.query?.token;
     if (typeof fromQuery === 'string') return fromQuery;
     const header = client.handshake.headers?.authorization;
     if (header?.startsWith('Bearer ')) return header.slice(7);
+    return null;
+  }
+
+  private tokenFromCookie(cookieHeader?: string): string | null {
+    if (!cookieHeader) return null;
+    for (const part of cookieHeader.split(';')) {
+      const [name, ...rest] = part.trim().split('=');
+      if (name === ACCESS_TOKEN_COOKIE) return decodeURIComponent(rest.join('='));
+    }
     return null;
   }
 }

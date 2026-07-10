@@ -2,9 +2,17 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import type { Request } from 'express';
 
 import { AuthenticatedUser } from '../../../common/decorators/current-user.decorator';
 import { UserContextService } from '../../../common/context/user-context.service';
+import { ACCESS_TOKEN_COOKIE } from '../../../common/auth/auth-cookie';
+
+/** Read the JWT from the httpOnly cookie (browser); the header extractor covers mobile/API. */
+const cookieExtractor = (req: Request): string | null => {
+  const cookies = (req as Request & { cookies?: Record<string, string> }).cookies;
+  return cookies?.[ACCESS_TOKEN_COOKIE] ?? null;
+};
 
 /**
  * v: 2 (introduced in preflight 00.5)
@@ -33,7 +41,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     private readonly userCtx: UserContextService,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        cookieExtractor,
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ]),
       ignoreExpiration: false,
       secretOrKey: config.getOrThrow<string>('jwt.secret'),
     });

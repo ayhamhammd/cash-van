@@ -8,6 +8,7 @@ import {
   IsUUID,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 
 export class CreateRepDto {
@@ -82,4 +83,21 @@ export class CreateRepDto {
   @IsInt()
   @Min(0)
   dailyQuotaFils?: number;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: "The rep's ERP GL account id (chart-of-accounts) that settlements post against.",
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  @MaxLength(128)
+  erpAccountId?: string | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Snapshot of the ERP account code · name.' })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  @MaxLength(255)
+  erpAccountCode?: string | null;
 }

@@ -13,6 +13,7 @@ import { CashAccount, CashAccountKind } from './entities/cash-account.entity';
 import { AccountEntryKind, AccountTransaction } from './entities/account-transaction.entity';
 import { CreateCashAccountDto } from './dto/create-cash-account.dto';
 import { UpdateCashAccountDto } from './dto/update-cash-account.dto';
+import { SettingsService } from '../settings/settings.service';
 
 export interface AccountView extends CashAccount {
   balanceFils: number;
@@ -40,6 +41,7 @@ export class CashAccountsService {
     @InjectRepository(CashAccount) private readonly accounts: Repository<CashAccount>,
     @InjectRepository(AccountTransaction) private readonly txns: Repository<AccountTransaction>,
     @InjectDataSource() private readonly ds: DataSource,
+    private readonly settings: SettingsService,
   ) {}
 
   // ── CRUD ────────────────────────────────────────────────────────────────
@@ -317,47 +319,82 @@ export class CashAccountsService {
   }
 
   /**
-   * Reconstruct the ERP GL journal for a completed settlement from its SETTLEMENT_IN/OUT
-   * rows: DR each destination that received cash, CR each rep box that was emptied
-   * (both are cash/asset accounts, so a transfer is DR dest / CR box). Amounts are JOD
-   * major (the ERP journal endpoint re-scales to thousandths). Returns null when nothing
-   * was settled OR any involved account isn't ERP-linked — in which case the caller keeps
-   * the legacy cash-settlement push instead of a partial (unbalanced) journal.
+   * Build the ERP GL journal for a completed EOD settlement (reconciliation model).
+   * Van cash isn't in any GL cash account yet, so this is one self-contained balanced entry:
+   *   DR Cash-Collections  = received cash
+   *   DR Cheque-Collections = cheque total
+   *   DR Rep account       = shortfall (expected − received)   [or CR = overpayment]
+   *   CR Sales (reconciliation) = received + cheques + shortfall (i.e. accountable + overpay net)
+   * The rep account carries the shortfall; the Sales account is the CLEARING contra (NOT the
+   * P&L revenue account). Amounts are JOD major (fils ÷ 1000). Returns null when the rep isn't
+   * GL-linked or a needed account is unset — the settlement then records with no ERP post.
+   * See docs/SPEC-rep-erp-accounts-settlement.md §3.
    */
   async buildSettlementJournal(
     settlementId: string,
   ): Promise<{ externalId: string; description: string; date?: string; lines: Array<{ accountCode: string; debit: number; credit: number; description: string }> } | null> {
-    const rows: Array<{ entryKind: string; amountFils: string; erpAccountCode: string | null; accountName: string }> =
-      await this.ds.query(
-        `SELECT t.entry_kind AS "entryKind", ABS(t.amount_fils)::bigint AS "amountFils",
-                a.erp_account_code AS "erpAccountCode", a.name AS "accountName"
-           FROM account_transactions t
-           JOIN cash_accounts a ON a.id = t.account_id
-          WHERE t.settlement_id = $1
-            AND t.entry_kind IN ('SETTLEMENT_OUT', 'SETTLEMENT_IN')
-          ORDER BY t.entry_kind ASC`, // SETTLEMENT_IN < SETTLEMENT_OUT → debits (IN) lead, tidy journal
-        [settlementId],
-      );
-    if (!rows.length) return null; // nothing moved (empty boxes / no destinations)
-    if (rows.some((r) => !r.erpAccountCode)) {
-      this.logger.warn(`settlement ${settlementId} has unlinked cash accounts — GL journal skipped`);
+    const [s] = await this.ds.query(
+      `SELECT rep_id AS "repId", to_char(period_to,'YYYY-MM-DD') AS "periodTo",
+              cash_sales_fils AS "cashSales", cash_returns_fils AS "cashReturns",
+              collected_cash_fils AS "collectedCash", collected_cheque_fils AS "collectedCheque",
+              received_fils AS "received"
+         FROM salesman_settlement WHERE id = $1`,
+      [settlementId],
+    );
+    if (!s) return null;
+    const [rep] = await this.ds.query(
+      `SELECT erp_account_code AS "erpAccountCode", COALESCE(name_ar, name_en) AS name
+         FROM reps WHERE id = $1`,
+      [s.repId],
+    );
+    const repCode: string | null = rep?.erpAccountCode ?? null;
+    if (!repCode) {
+      this.logger.warn(`settlement ${settlementId}: rep has no ERP account — GL journal skipped`);
       return null;
     }
-    const lines = rows.map((r) => {
-      const major = Number(r.amountFils) / 1000; // fils → JOD major
-      const isIn = r.entryKind === 'SETTLEMENT_IN';
-      return {
-        accountCode: r.erpAccountCode as string,
-        debit: isIn ? major : 0,
-        credit: isIn ? 0 : major,
-        description: r.accountName,
-      };
-    });
-    return {
-      externalId: `settlement-${settlementId}`,
-      description: `تسوية صناديق المندوب — ${settlementId}`,
-      lines,
+    const acct = (await this.settings.get()).accounting;
+    const salesCode = acct.salesAccount.code; // reconciliation / clearing (credit side)
+    const cashCode = acct.cashCollectionAccount.code;
+    const chequeCode = acct.chequeCollectionAccount.code;
+
+    const n = (v: unknown) => Number(v ?? 0);
+    const salesCash = n(s.cashSales) - n(s.cashReturns);
+    const collectionCash = n(s.collectedCash);
+    const chequeBal = n(s.collectedCheque);
+    const expected = salesCash + collectionCash;
+    const received = n(s.received);
+    const shortfall = Math.max(0, expected - received);
+    const overpay = Math.max(0, received - expected);
+    const accountable = expected + chequeBal;
+    if (accountable <= 0 && received <= 0) return null; // nothing to post
+
+    // Accumulate signed fils per account code (+ = debit, − = credit); same code merges.
+    const post = new Map<string, number>();
+    const add = (code: string, fils: number, debit: boolean) =>
+      post.set(code, (post.get(code) ?? 0) + (debit ? fils : -fils));
+    const need = (code: string | null): code is string => {
+      if (!code) { this.logger.warn(`settlement ${settlementId}: a required main account is unset — GL journal skipped`); return false; }
+      return true;
     };
+
+    if (received > 0) { if (!need(cashCode)) return null; add(cashCode, received, true); }   // DR cash in
+    if (chequeBal > 0) { if (!need(chequeCode)) return null; add(chequeCode, chequeBal, true); } // DR cheques in
+    if (shortfall > 0) add(repCode, shortfall, true);   // DR rep — still owes
+    if (overpay > 0) add(repCode, overpay, false);      // CR rep — pays down prior debt
+    if (accountable > 0) { if (!need(salesCode)) return null; add(salesCode, accountable, false); } // CR reconciliation
+
+    const memo = `تسوية مندوب المبيعات (${rep?.name ?? ''}) — ${s.periodTo}`;
+    const lines = [...post.entries()]
+      .filter(([, signed]) => signed !== 0)
+      .map(([code, signed]) => ({
+        accountCode: code,
+        debit: signed > 0 ? signed / 1000 : 0,
+        credit: signed < 0 ? -signed / 1000 : 0,
+        description: memo,
+      }));
+    if (!lines.length) return null;
+
+    return { externalId: `settlement-${settlementId}`, description: memo, date: s.periodTo, lines };
   }
 
   // ── helpers ─────────────────────────────────────────────────────────────
