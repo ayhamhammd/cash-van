@@ -350,6 +350,23 @@ describe('OffersEngineService', () => {
     expect(res.lines[0].lineNetFils).toBe(0);
   });
 
+  it('ITEM_QTY_REWARD with a payment gate only applies on the matching payment', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'], paymentCondition: 'CREDIT' },
+      reward: { kind: 'ITEM_AMOUNT_DISCOUNT', minQty: 1, baseAmountFils: 100, mode: 'STATIC' },
+    };
+    const engine = makeEngine([offer]);
+    expect(
+      (await engine.evaluate([{ itemNumber: 'A', qty: 2 }], { paymentMethod: 'CREDIT' }))
+        .appliedOffers,
+    ).toHaveLength(1);
+    expect(
+      (await engine.evaluate([{ itemNumber: 'A', qty: 2 }], { paymentMethod: 'CASH' }))
+        .appliedOffers,
+    ).toHaveLength(0);
+  });
+
   it('ITEM_AMOUNT_DISCOUNT DYNAMIC steps the per-unit amount and caps at maxAmountFils', async () => {
     const offer: Partial<Offer> = {
       type: 'ITEM_QTY_REWARD',
