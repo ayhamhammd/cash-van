@@ -9,6 +9,7 @@ import {
 } from '@nestjs/swagger';
 import helmet from 'helmet';
 import compression from 'compression';
+import cookieParser from 'cookie-parser';
 
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
@@ -62,6 +63,8 @@ async function bootstrap(): Promise<void> {
 
   app.use(helmet());
   app.use(compression());
+  // Parse cookies so the JWT strategy can read the httpOnly access-token cookie.
+  app.use(cookieParser());
 
   const origins = config.get<string>('cors.origins', '*');
   app.enableCors({

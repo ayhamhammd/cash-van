@@ -17,6 +17,7 @@ import { Payment } from './entities/payment.entity';
 import { PaymentCheque } from './entities/payment-cheque.entity';
 import { TransactionKind } from './entities/transaction-kind.entity';
 import { VanStock } from '../products/entities/van-stock.entity';
+import { Customer } from '../customers/entities/customer.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -198,6 +199,11 @@ export class VouchersService implements OnModuleInit {
       repLat: dto.repLat,
       repLng: dto.repLng,
     });
+    // AR credit-limit guard: a credit (on-account) SALE may not push the customer's
+    // balance over their limit. Hard block — the remedy is a manager raising the limit
+    // (which mirrors down), then the rep re-creates the voucher. See
+    // docs/SPEC-accounts-receivable.md.
+    await this.enforceCreditLimit(dto);
     // Server-authoritative offers: bake per-line discounts and gift free-lines
     // into the dto BEFORE the voucher is built, so gifts post as real lines and
     // their stock moves. MUST run before createUnchecked (was previously dead
@@ -205,6 +211,11 @@ export class VouchersService implements OnModuleInit {
     const offerResult = await this.applyOffers(dto);
     const result = await this.createUnchecked(dto);
     await this.recordOfferRedemptions(result, offerResult);
+    // AR: immediately reflect a credit voucher on the customer's outstanding debt so the
+    // customer detail updates without waiting for the next ERP balance sync. A credit SALE
+    // raises the debt; a credit RETURN (credit note) lowers it. The ERP mirror
+    // (pullCustomerBalances) later reconciles total_debt to the authoritative ERP balance.
+    await this.applyCreditVoucherToDebt(dto);
     // Mirror posted vouchers to the ERP (ErpSync listener filters by kind + enqueues
     // an outbox push; no-op when ERP off). Stock IN/OUT adjustments aren't mirrored.
     if (result.isPosted) {
@@ -214,6 +225,82 @@ export class VouchersService implements OnModuleInit {
       });
     }
     return result;
+  }
+
+  /**
+   * AR credit-limit enforcement for credit (on-account) SALEs. The credit amount is the
+   * sum of CREDIT payment lines (JOD major). Blocks (409) when the customer is on credit
+   * hold, or when a POSITIVE limit would be exceeded by balance + credit amount. A limit
+   * of 0 means "not enforced" (legacy default) — use credit hold to stop a customer
+   * entirely. Cash/cheque/transfer/card sales never touch AR. See
+   * docs/SPEC-accounts-receivable.md.
+   */
+  private async enforceCreditLimit(dto: CreateVoucherDto): Promise<void> {
+    if (dto.transKind !== 'SALE' || !dto.customerNumber) return;
+    const creditAmount = (dto.payments ?? [])
+      .filter((p) => p.paymentType === 'CREDIT')
+      .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    if (creditAmount <= 0) return;
+
+    const customer = await this.dataSource.getRepository(Customer).findOne({
+      where: { customerNumber: dto.customerNumber },
+    });
+    if (!customer) return; // unknown customer — let the normal flow surface it
+
+    if (customer.creditHold) {
+      throw new ConflictException({
+        code: 'CREDIT_HOLD',
+        message: `Customer ${customer.customerName} is on credit hold — no credit sales allowed.`,
+      });
+    }
+    const creditLimit = Number(customer.creditLimit) || 0;
+    if (creditLimit <= 0) return; // not enforced
+    const balance = Number(customer.totalDebt) || 0;
+    if (balance + creditAmount > creditLimit + 1e-9) {
+      throw new ConflictException({
+        code: 'CREDIT_LIMIT_EXCEEDED',
+        message: `Credit limit exceeded for ${customer.customerName}: balance ${balance.toFixed(2)} + sale ${creditAmount.toFixed(2)} > limit ${creditLimit.toFixed(2)}.`,
+        balance,
+        creditLimit,
+        available: creditLimit - balance,
+        saleTotal: creditAmount,
+      });
+    }
+  }
+
+  /**
+   * Immediately apply a credit voucher to the customer's outstanding debt (`total_debt`)
+   * so the customer detail reflects it right away, without waiting for the next ERP
+   * balance sync. A credit SALE increases the debt by the CREDIT payment amount; a credit
+   * RETURN (credit note) decreases it. Cash/cheque/transfer sales don't touch the debt.
+   * Best-effort — a failure here must never fail the voucher. The ERP mirror
+   * (erp-sync `pullCustomerBalances`) later reconciles `total_debt` to the ERP balance.
+   */
+  private async applyCreditVoucherToDebt(dto: CreateVoucherDto): Promise<void> {
+    if (!dto.customerNumber) return;
+    if (dto.transKind !== 'SALE' && dto.transKind !== 'RETURN') return;
+    const creditAmount = (dto.payments ?? [])
+      .filter((p) => p.paymentType === 'CREDIT')
+      .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    if (creditAmount <= 0) return;
+
+    try {
+      const repo = this.dataSource.getRepository(Customer);
+      const customer = await repo.findOne({
+        where: { customerNumber: dto.customerNumber },
+      });
+      if (!customer) return;
+      const sign = dto.transKind === 'RETURN' ? -1 : 1;
+      const next = (Number(customer.totalDebt) || 0) + sign * creditAmount;
+      customer.totalDebt = Math.max(0, next).toFixed(2); // debt never goes below 0
+      await repo.save(customer);
+    } catch (err) {
+      this.logger.warn(
+        `applyCreditVoucherToDebt failed for ${dto.customerNumber}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /**
@@ -1176,7 +1263,8 @@ export class VouchersService implements OnModuleInit {
 
     // 3) Price overrides on SALE lines: flag only when the line UNDERCUTS
     // every legitimate price for the item (catalog, item-units, active price
-    // rules). Selling above catalog is allowed — it doesn't hurt the owner.
+    // rules, the customer's assigned price list, and per-customer contract
+    // prices). Selling above catalog is allowed — it doesn't hurt the owner.
     if (dto.transKind === 'SALE' && !has(PERM_PRICE_OVERRIDE)) {
       for (const line of dto.transactions) {
         const lp = num(line.unitPrice);
@@ -1198,8 +1286,24 @@ export class VouchersService implements OnModuleInit {
              JOIN item_cart ic3 ON ic3.id = pr.product_id
             WHERE ic3.item_number = $1
               AND (pr.valid_from IS NULL OR pr.valid_from <= CURRENT_DATE)
-              AND (pr.valid_to   IS NULL OR pr.valid_to   >= CURRENT_DATE)`,
-          [line.itemNumber],
+              AND (pr.valid_to   IS NULL OR pr.valid_to   >= CURRENT_DATE)
+           UNION ALL
+           -- The customer's assigned price list (its contracted item price is a
+           -- legitimate floor — not a manual override).
+           SELECT pli.unit_price::float8 / 1000
+             FROM customers c
+             JOIN price_list_items pli ON pli.price_list_id = c.price_list_id
+             JOIN item_cart ic4 ON ic4.id = pli.item_id
+            WHERE c.customer_number = $2 AND ic4.item_number = $1
+           UNION ALL
+           -- Per-customer contract price (customer_prices mirror + local overrides).
+           SELECT cp.unit_price::float8 / 1000
+             FROM customers c2
+             JOIN customer_prices cp ON cp.customer_id = c2.id
+             JOIN item_cart ic5 ON ic5.id = cp.item_id
+            WHERE c2.customer_number = $2 AND ic5.item_number = $1
+              AND cp.deleted_at IS NULL`,
+          [line.itemNumber, dto.customerNumber ?? null],
         );
         const candidates = rows
           .map((r) => Number(r.p))

@@ -10,12 +10,15 @@ import { Unit } from '../units/entities/unit.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { ProductCategory } from '../products/entities/product-category.entity';
 import { CustomerPrice } from '../products/entities/customer-price.entity';
+import { PriceList } from '../products/entities/price-list.entity';
+import { PriceListItem } from '../products/entities/price-list-item.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { SettingsModule } from '../settings/settings.module';
 import { VouchersModule } from '../vouchers/vouchers.module';
+import { CashAccountsModule } from '../cash-accounts/cash-accounts.module';
 import { ErpHttpClient } from './erp-http.client';
 import { ErpSyncService } from './erp-sync.service';
 import { ErpOutboxService } from './erp-outbox.service';
@@ -36,6 +39,8 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
       Unit,
       ItemUnit,
       CustomerPrice,
+      PriceList,
+      PriceListItem,
       ProductCategory,
       Collection,
       ErpIdMap,
@@ -47,9 +52,10 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
     ]),
     SettingsModule,
     VouchersModule,
+    CashAccountsModule,
   ],
   controllers: [ErpSyncController],
   providers: [ErpHttpClient, ErpSyncService, ErpOutboxService],
-  exports: [ErpSyncService, ErpOutboxService],
+  exports: [ErpSyncService, ErpOutboxService, ErpHttpClient],
 })
 export class ErpSyncModule {}

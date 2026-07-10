@@ -5,6 +5,8 @@ import { Repository } from 'typeorm';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { PriceRule } from './entities/price-rule.entity';
 import { CustomerPrice } from './entities/customer-price.entity';
+import { PriceListItem } from './entities/price-list-item.entity';
+import { Customer } from '../customers/entities/customer.entity';
 import { CustomerAiProfile } from '../customers/entities/customer-ai-profile.entity';
 
 export interface PriceQuote {
@@ -29,6 +31,10 @@ export class PricingService {
     private readonly rules: Repository<PriceRule>,
     @InjectRepository(CustomerPrice)
     private readonly customerPrices: Repository<CustomerPrice>,
+    @InjectRepository(PriceListItem)
+    private readonly priceListItems: Repository<PriceListItem>,
+    @InjectRepository(Customer)
+    private readonly customers: Repository<Customer>,
     @InjectRepository(CustomerAiProfile)
     private readonly aiProfiles: Repository<CustomerAiProfile>,
   ) {}
@@ -70,6 +76,29 @@ export class PricingService {
           lineTotal: contract.unitPrice * qty,
           priceSource: contract.priceSource ?? 'CONTRACT',
         };
+      }
+
+      // Then the customer's assigned price list (below a per-customer override).
+      const cust = await this.customers.findOne({ where: { id: customerId } });
+      if (cust?.priceListId) {
+        const pli = await this.priceListItems.findOne({
+          where: { priceListId: cust.priceListId, itemId: productId },
+        });
+        if (pli) {
+          const listUnit = product.price;
+          return {
+            productId,
+            qty,
+            segment,
+            listUnitPrice: listUnit,
+            appliedRuleId: null,
+            discountPct:
+              listUnit > 0 ? Math.round((1 - pli.unitPrice / listUnit) * 1000) / 10 : 0,
+            finalUnitPrice: pli.unitPrice,
+            lineTotal: pli.unitPrice * qty,
+            priceSource: 'PRICE_LIST',
+          };
+        }
       }
     }
 

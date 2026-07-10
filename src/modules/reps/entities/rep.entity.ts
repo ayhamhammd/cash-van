@@ -44,4 +44,17 @@ export class Rep extends BaseEntity {
 
   @Column({ name: 'daily_quota_fils', type: 'integer', nullable: true })
   dailyQuotaFils?: number | null;
+
+  /**
+   * The rep's ERP GL account (chart-of-accounts id) — the "cash with salesman" account
+   * that settlements post against. FlowVan-side link; a rep re-sync must not clobber it.
+   * NULL ⇒ not linked (settle records but skips the ERP journal).
+   * See docs/SPEC-rep-erp-accounts-settlement.md.
+   */
+  @Column({ name: 'erp_account_id', type: 'text', nullable: true })
+  erpAccountId?: string | null;
+
+  /** Snapshot of the ERP account code · name for display and journal memos. */
+  @Column({ name: 'erp_account_code', type: 'text', nullable: true })
+  erpAccountCode?: string | null;
 }

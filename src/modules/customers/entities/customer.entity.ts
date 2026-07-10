@@ -70,6 +70,11 @@ export class Customer extends BaseEntity {
   @Column({ name: 'payment_terms', type: 'integer', default: 30 })
   paymentTerms!: number;
 
+  /** AR credit hold — when true, block ALL credit (on-account) sales regardless of
+   * limit. Mirrored from the ERP customer. See docs/SPEC-accounts-receivable.md. */
+  @Column({ name: 'credit_hold', type: 'boolean', default: false })
+  creditHold!: boolean;
+
   @Column({ name: 'customer_type', type: 'text', default: 'CASH' })
   customerType!: CustomerType;
 
@@ -119,4 +124,9 @@ export class Customer extends BaseEntity {
   /** When false, the rep may NOT edit the contracted price in the app. */
   @Column({ name: 'allow_manual_price_edit', type: 'boolean', default: true })
   allowManualPriceEdit!: boolean;
+
+  /** Assigned price list (FK → price_lists.id; local or ERP-mirrored). Drives
+   * resolution: price-list item price applies unless a customer_prices override wins. */
+  @Column({ name: 'price_list_id', type: 'uuid', nullable: true })
+  priceListId?: string | null;
 }

@@ -26,6 +26,7 @@ import {
 } from './dto/record-location.dto';
 import { HeartbeatDto } from './dto/heartbeat.dto';
 import { ListLocationsQuery } from './dto/list-locations.query';
+import { TrackingSummaryQuery } from './dto/tracking-summary.query';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
@@ -114,6 +115,36 @@ export class LocationsController {
     @Query() query: ListLocationsQuery,
   ) {
     return this.locations.list(id, query);
+  }
+
+  @Get(':id/visits')
+  @ApiOperation({
+    summary: "Rep's customer visits in a range",
+    description:
+      "The rep's customer_visits within [from,to] (defaults last 30d) — the visit markers for the tracking map.",
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
+  @ApiOkResponse({ description: 'Ordered list of visits in the window' })
+  visits(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListLocationsQuery,
+  ) {
+    return this.locations.visitsForRep(id, query.from, query.to);
+  }
+
+  @Get(':id/tracking-summary')
+  @ApiOperation({
+    summary: 'Per-day / per-month tracking summary',
+    description:
+      'Distance, active span, points, customers visited and sales per calendar day (or month) for the rep in [from,to].',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
+  @ApiOkResponse({ description: 'Ordered list of tracking buckets' })
+  trackingSummary(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: TrackingSummaryQuery,
+  ) {
+    return this.locations.trackingSummary(id, query.from, query.to, query.bucket ?? 'day');
   }
 
   @Get(':id/locations.geojson')

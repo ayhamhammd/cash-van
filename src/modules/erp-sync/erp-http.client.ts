@@ -62,6 +62,32 @@ export class ErpHttpClient {
     return { data, total };
   }
 
+  /**
+   * GET an ERP endpoint and return the FULL parsed body (not just `data`) — needed when
+   * the response carries extra top-level fields (e.g. `/ar/aging`'s `summary`).
+   */
+  async getJson<T>(
+    path: string,
+    query: Record<string, string | number | undefined> = {},
+  ): Promise<T> {
+    const cfg = await this.settings.getErpConfig();
+    if (!cfg.baseUrl || !cfg.apiKey) throw new Error('ERP base URL or API key not configured');
+    const base = cfg.baseUrl.replace(/\/+$/, '');
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== null) qs.set(k, String(v));
+    }
+    const url = `${base}/api/v1/${path}${qs.toString() ? `?${qs}` : ''}`;
+    this.logger.log(`→ GET ${url}`);
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${cfg.apiKey}` },
+      signal: AbortSignal.timeout(20000),
+    });
+    this.logger.log(`← GET ${path} ${res.status}`);
+    if (!res.ok) throw new Error(`ERP ${path} failed (HTTP ${res.status})`);
+    return (await res.json()) as T;
+  }
+
   /** GET a single ERP resource → unwrap the `data` object (e.g. an invoice detail). */
   async getOne<T>(path: string): Promise<T | null> {
     const cfg = await this.settings.getErpConfig();

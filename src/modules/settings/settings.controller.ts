@@ -23,6 +23,7 @@ import {
 
 import { SettingsService } from './settings.service';
 import { UpdateAppSettingsDto } from './dto/update-settings.dto';
+import { UpdateAccountingDto } from './dto/update-accounting.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
 import { UpdateAiDto } from './dto/update-ai.dto';
@@ -94,6 +95,18 @@ export class SettingsController {
     file: Express.Multer.File,
   ) {
     return this.settings.setLogo(file);
+  }
+
+  @Patch('accounting')
+  @ApiOperation({
+    summary: 'Set the main settlement accounts (ERP CoA refs)',
+    description:
+      'Choose which ERP chart-of-accounts entries receive rep sales / cash / cheque on ' +
+      'settle. A FlowVan-side mapping — editable even when the ERP integration is on. Admin only.',
+  })
+  @ApiOkResponse({ description: 'Updated app settings' })
+  updateAccounting(@Body() dto: UpdateAccountingDto) {
+    return this.settings.updateAccounting(dto);
   }
 
   @Patch('tobacco-tax')

@@ -48,6 +48,8 @@ import { AgentModule } from './modules/agent/agent.module';
 import { OffersModule } from './modules/offers/offers.module';
 import { AiInsightsModule } from './modules/ai-insights/ai-insights.module';
 import { TargetsModule } from './modules/targets/targets.module';
+import { ArModule } from './modules/ar/ar.module';
+import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module';
 
 @Module({
   imports: [
@@ -107,6 +109,8 @@ import { TargetsModule } from './modules/targets/targets.module';
     OffersModule,
     AiInsightsModule,
     TargetsModule,
+    ArModule,
+    CashAccountsModule,
   ],
   controllers: [HealthController],
   providers: [

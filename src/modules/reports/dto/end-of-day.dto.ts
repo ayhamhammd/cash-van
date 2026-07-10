@@ -8,7 +8,26 @@ import {
   IsUUID,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
+
+/** Destination company accounts the rep's boxes empty into on settlement. */
+export class SettleTransfersDto {
+  @ApiPropertyOptional({ description: 'Destination account for the sales box' })
+  @IsOptional()
+  @IsUUID()
+  salesAccountId?: string;
+
+  @ApiPropertyOptional({ description: 'Destination account for the receipts box' })
+  @IsOptional()
+  @IsUUID()
+  receiptsAccountId?: string;
+
+  @ApiPropertyOptional({ description: 'Destination account for the cheques box' })
+  @IsOptional()
+  @IsUUID()
+  chequesAccountId?: string;
+}
 
 export class EndOfDayQueryDto {
   @ApiProperty({ description: 'From date (YYYY-MM-DD)', example: '2026-06-01' })
@@ -49,6 +68,12 @@ export class SettleEndOfDayDto {
   @IsString()
   @MaxLength(500)
   note?: string;
+
+  @ApiPropertyOptional({ description: 'Destination accounts to empty the rep boxes into', type: SettleTransfersDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SettleTransfersDto)
+  transfers?: SettleTransfersDto;
 }
 
 export class SettlementsQueryDto {

@@ -159,6 +159,32 @@ export class AppSettings {
   @Column({ name: 'voucher_report', type: 'jsonb', nullable: true })
   voucherReport?: Record<string, unknown> | null;
 
+  // ── Accounting: the three main settlement accounts (ERP GL refs) ───────────
+  // Each is an ERP chart-of-accounts id + a code·name snapshot for display/memos.
+  // See docs/SPEC-rep-erp-accounts-settlement.md. Set sales === cash-collection to post
+  // cash as one combined line, or split them.
+
+  /** Destination for the rep's cash-SALES cash on settle. */
+  @Column({ name: 'erp_sales_account_id', type: 'text', nullable: true })
+  erpSalesAccountId?: string | null;
+
+  @Column({ name: 'erp_sales_account_code', type: 'text', nullable: true })
+  erpSalesAccountCode?: string | null;
+
+  /** Destination for the rep's cash-COLLECTIONS cash on settle. */
+  @Column({ name: 'erp_cash_collection_account_id', type: 'text', nullable: true })
+  erpCashCollectionAccountId?: string | null;
+
+  @Column({ name: 'erp_cash_collection_account_code', type: 'text', nullable: true })
+  erpCashCollectionAccountCode?: string | null;
+
+  /** Destination for the rep's CHEQUE collections on settle (always in full). */
+  @Column({ name: 'erp_cheque_collection_account_id', type: 'text', nullable: true })
+  erpChequeCollectionAccountId?: string | null;
+
+  @Column({ name: 'erp_cheque_collection_account_code', type: 'text', nullable: true })
+  erpChequeCollectionAccountCode?: string | null;
+
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 

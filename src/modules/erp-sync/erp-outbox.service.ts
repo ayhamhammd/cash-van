@@ -10,6 +10,7 @@ import { Collection } from '../collections/entities/collection.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { SettingsService } from '../settings/settings.service';
+import { CashAccountsService } from '../cash-accounts/cash-accounts.service';
 import { ErpHttpClient } from './erp-http.client';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import {
@@ -20,6 +21,10 @@ import {
 
 const MAX_ATTEMPTS = 6;
 const BATCH = 20;
+// A 429 is transient (the ERP per-key window resets in 60s), so we reschedule past
+// the window WITHOUT consuming a dead-letter attempt — rate limiting must never
+// permanently fail a document.
+const RATE_LIMIT_BACKOFF_MS = 65_000;
 
 @Injectable()
 export class ErpOutboxService {
@@ -29,6 +34,7 @@ export class ErpOutboxService {
   constructor(
     private readonly erp: ErpHttpClient,
     private readonly settings: SettingsService,
+    private readonly cashAccounts: CashAccountsService,
     @InjectRepository(ErpOutbox) private readonly outbox: Repository<ErpOutbox>,
     @InjectRepository(ErpIdMap) private readonly idmap: Repository<ErpIdMap>,
     @InjectRepository(VoucherHeader) private readonly headers: Repository<VoucherHeader>,
@@ -103,6 +109,8 @@ export class ErpOutboxService {
       for (const c of calls) {
         const res = await this.erp.post(c.path, c.body, c.idem ?? row.ref);
         if (!res.ok) {
+          // Rate limited: back off past the window and retry, no attempt spent.
+          if (res.status === 429) return this.softRetry(row, res.error ?? 'RATE_LIMITED');
           return this.fail(row, res.error ?? 'ERP rejected the document');
         }
         lastData = res.data;
@@ -130,8 +138,23 @@ export class ErpOutboxService {
     // so ERP stock moves RIGHT AWAY — the ERP `stock-transfers` document instead
     // sits PENDING_DISPATCH and doesn't touch stock until dispatch+receive.
     if (row.kind === 'STOCK_TRANSFER') return this.buildTransferCalls(row.ref);
+    if (row.kind === 'REP_SETTLEMENT_JOURNAL') {
+      const call = await this.buildRepSettlementJournal(row.ref);
+      return call ? [call] : null;
+    }
     const one = await this.buildPayload(row);
     return one ? [one] : null;
+  }
+
+  /** Transient rate-limit: reschedule past the ERP window without spending an attempt. */
+  private async softRetry(row: ErpOutbox, reason: string): Promise<void> {
+    row.status = 'pending';
+    row.error = reason;
+    row.nextAttemptAt = new Date(Date.now() + RATE_LIMIT_BACKOFF_MS);
+    await this.outbox.save(row);
+    this.logger.log(
+      `outbox ${row.kind} ${row.ref} rate-limited — retrying in ${RATE_LIMIT_BACKOFF_MS / 1000}s (attempt ${row.attempts}, not counted)`,
+    );
   }
 
   private async fail(row: ErpOutbox, error: string): Promise<void> {
@@ -159,7 +182,31 @@ export class ErpOutboxService {
     // STOCK_TRANSFER is handled as two calls in buildCalls (buildTransferCalls).
     if (row.kind === 'PAYMENT') return this.buildPayment(row.ref);
     if (row.kind === 'CASH_SETTLEMENT') return this.buildSettlement(row.ref);
+    // REP_SETTLEMENT_JOURNAL is handled in buildCalls (carries its own externalId/idem).
     return null;
+  }
+
+  /**
+   * Build a balanced ERP manual journal that mirrors an EOD settlement's box→destination
+   * transfers (DR destinations, CR rep boxes). The lines are reconstructed from the
+   * settlement's ledger rows by the cash-accounts service; null means the accounts aren't
+   * ERP-linked (the settlement then falls back to the legacy cash-settlement push).
+   */
+  private async buildRepSettlementJournal(
+    settlementId: string,
+  ): Promise<{ path: string; body: Record<string, unknown>; idem: string } | null> {
+    const journal = await this.cashAccounts.buildSettlementJournal(settlementId);
+    if (!journal) return null;
+    return {
+      path: 'journal-entries',
+      idem: journal.externalId,
+      body: {
+        externalId: journal.externalId,
+        description: journal.description,
+        date: journal.date,
+        lines: journal.lines,
+      },
+    };
   }
 
   /**

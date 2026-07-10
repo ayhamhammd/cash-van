@@ -36,6 +36,7 @@ import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { SeedLocationDto } from './dto/seed-location.dto';
 import { ListCustomersQuery } from './dto/list-customers.query';
+import { ListVisitsQuery } from './dto/list-visits.query';
 import { CreateVisitDto } from './dto/create-visit.dto';
 import { ReassignCustomerDto } from './dto/reassign-customer.dto';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
@@ -80,12 +81,15 @@ export class CustomersController {
     return this.customers.insights(id);
   }
 
+  // Allowed even when ERP mode is on — like Update below, a new customer saves
+  // locally AND pushes to the ERP (erp.customer.created → pushCustomer), so both
+  // sides stay in sync. Gated by the canAddCustomer permission (NOT ErpReadOnlyGuard).
   @Post()
-  @UseGuards(ErpReadOnlyGuard)
   @RequirePermissions('canAddCustomer')
   @ApiOperation({
     summary: 'Create customer',
-    description: 'Create a customer. Requires the canAddCustomer permission.',
+    description:
+      'Create a customer. Allowed even when ERP mode is on — the new customer is mirrored to the ERP. Requires the canAddCustomer permission.',
   })
   @ApiCreatedResponse({ description: 'Customer created' })
   create(@Body() dto: CreateCustomerDto) {
@@ -147,9 +151,12 @@ export class CustomersController {
     description: 'List recent visits logged for a customer.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
-  @ApiOkResponse({ description: 'Recent visits' })
-  listVisits(@Param('id', ParseUUIDPipe) id: string) {
-    return this.customers.listVisits(id);
+  @ApiOkResponse({ description: 'Recent visits (optionally within a date range)' })
+  listVisits(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListVisitsQuery,
+  ) {
+    return this.customers.listVisits(id, query);
   }
 
   @Post(':id/visits')

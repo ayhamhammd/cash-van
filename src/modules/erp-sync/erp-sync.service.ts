@@ -14,6 +14,8 @@ import { Unit } from '../units/entities/unit.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { ProductCategory } from '../products/entities/product-category.entity';
 import { CustomerPrice } from '../products/entities/customer-price.entity';
+import { PriceList } from '../products/entities/price-list.entity';
+import { PriceListItem } from '../products/entities/price-list-item.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
@@ -139,9 +141,19 @@ interface ErpCustomer {
   email?: string | null;
   taxNumber?: string | null;
   creditLimit?: number | string | null; // ERP stores thousandths
+  paymentTermsDays?: number | null;      // AR: Net-N terms
+  creditHold?: boolean | null;           // AR: hard-stop all credit sales
   priceListId?: string | null;
   priceListName?: string | null;
   allowManualPriceEdit?: boolean | null;
+}
+
+/** A per-customer aging row from the ERP `GET /api/v1/ar/aging`. */
+interface ErpAgingRow {
+  customerId: string;
+  customerCode?: string | null;
+  totalOpen?: number | null;   // open receivable, major units
+  overdue?: number | null;     // past-due portion, major units
 }
 
 /** A resolved price row from the ERP `GET /api/v1/prices?customerCode=`. */
@@ -154,6 +166,23 @@ interface ErpPrice {
   currency?: string | null;
   /** PRICE_LIST | CUSTOMER_PRICE | DEFAULT_PRICE */
   priceSource?: string | null;
+}
+
+/** A price list from the ERP `GET /api/v1/price-lists`. */
+interface ErpPriceList {
+  id: string;
+  code: string;
+  name: string;
+  isActive?: boolean;
+}
+
+/** `GET /api/v1/price-lists/{id}` → the list + its items. */
+interface ErpPriceListDetail extends ErpPriceList {
+  items?: Array<{
+    skuCode: string;
+    price: number | string; // ERP major units
+    minQty?: number | null;
+  }>;
 }
 
 /** Organization (company) settings from the ERP `GET /api/v1/organization`. */
@@ -192,6 +221,8 @@ export class ErpSyncService {
     @InjectRepository(Unit) private readonly units: Repository<Unit>,
     @InjectRepository(ItemUnit) private readonly itemUnits: Repository<ItemUnit>,
     @InjectRepository(CustomerPrice) private readonly customerPrices: Repository<CustomerPrice>,
+    @InjectRepository(PriceList) private readonly priceLists: Repository<PriceList>,
+    @InjectRepository(PriceListItem) private readonly priceListItems: Repository<PriceListItem>,
     @InjectRepository(ProductCategory) private readonly productCategories: Repository<ProductCategory>,
     @InjectRepository(Collection) private readonly collections: Repository<Collection>,
     @InjectRepository(VoucherHeader) private readonly headers: Repository<VoucherHeader>,
@@ -280,6 +311,14 @@ export class ErpSyncService {
     const cfg = await this.settings.getErpConfig().catch(() => null);
     if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return [];
     const { data } = await this.erp.list('tax-rates');
+    return data;
+  }
+
+  /** Passthrough: list postable ERP GL accounts (for the cash-account link picker). [] when ERP off. */
+  async listErpChartOfAccounts(): Promise<unknown[]> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return [];
+    const { data } = await this.erp.list('chart-of-accounts');
     return data;
   }
 
@@ -660,6 +699,7 @@ export class ErpSyncService {
       // Customer contract prices must reflect automatically (5-min poll + ERP
       // webhook), not only on a manual "Refresh from ERP" — else an ERP price
       // change never reaches the app.
+      await this.runEntity('price_list', () => this.pullPriceLists()),
       await this.runEntity('customer_price', () => this.pullCustomerPrices()),
     ];
     // Mirror ERP stock movements for EVERY warehouse cash-van knows — vans AND
@@ -725,6 +765,7 @@ export class ErpSyncService {
       await this.runEntity('tobacco_profile', () => this.pullTobaccoProfiles()),
       await this.runEntity('item', () => this.pullItems()),
       await this.runEntity('customer', () => this.pullCustomers()),
+      await this.runEntity('price_list', () => this.pullPriceLists()),
       await this.runEntity('customer_price', () => this.pullCustomerPrices()),
     ];
   }
@@ -852,6 +893,9 @@ export class ErpSyncService {
         if (c.creditLimit != null) {
           cust.creditLimit = Number(c.creditLimit).toFixed(2); // ERP GET returns JOD major already
         }
+        // AR: mirror payment terms + credit hold (see docs/SPEC-accounts-receivable.md).
+        if (c.paymentTermsDays != null) cust.paymentTerms = Number(c.paymentTermsDays);
+        if (c.creditHold != null) cust.creditHold = Boolean(c.creditHold);
         // ERP customer pricing assignment (drives customer_prices + the app lock).
         cust.erpPriceListId = c.priceListId ?? null;
         cust.erpPriceListName = c.priceListName ?? null;
@@ -862,6 +906,143 @@ export class ErpSyncService {
       processed += data.length;
       page += 1;
       if (page > 200) break; // safety cap (20k customers)
+    }
+    // AR: mirror each customer's live open balance from the ERP onto total_debt so the
+    // dashboard + van see receivables without recomputing. Best-effort — a failure here
+    // must not fail the whole customer sync.
+    try {
+      await this.pullCustomerBalances();
+    } catch (err) {
+      this.logger.warn(
+        `AR balance mirror skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return processed;
+  }
+
+  /**
+   * Pull the ERP org-wide AR aging (`GET /api/v1/ar/aging`) and write each customer's
+   * open receivable to `customers.total_debt`. Matches on the ERP customer id (via the
+   * id-map) so code-less ERP customers are covered. See docs/SPEC-accounts-receivable.md.
+   */
+  private async pullCustomerBalances(): Promise<number> {
+    const pageSize = 100;
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+    let updated = 0;
+    while ((page - 1) * pageSize < total) {
+      const { data, total: t } = await this.erp.list<ErpAgingRow>('ar/aging', { page, pageSize });
+      total = t;
+      if (data.length === 0) break;
+      for (const row of data) {
+        const map = await this.idmap.findOne({
+          where: { entity: 'customer', erpId: String(row.customerId) },
+        });
+        const localNumber =
+          map?.localId ?? (row.customerCode ? row.customerCode : null);
+        if (!localNumber) continue;
+        const cust = await this.customers.findOne({
+          where: { customerNumber: localNumber },
+        });
+        if (!cust) continue;
+        cust.totalDebt = Number(row.totalOpen ?? 0).toFixed(2);
+        await this.customers.save(cust);
+        updated += 1;
+      }
+      page += 1;
+      if (page > 400) break; // safety cap
+    }
+    return updated;
+  }
+
+  /**
+   * Mirror ERP price lists (`GET /api/v1/price-lists` + `/{id}`) into local
+   * `price_lists` (origin='erp', rebuilt each sync) and map each customer's ERP
+   * price-list assignment → the local mirror (`customers.price_list_id`), so the
+   * price-list resolution + the app apply to ERP-assigned customers. Local
+   * (dashboard-authored) lists and manual assignments are left untouched.
+   */
+  private async pullPriceLists(): Promise<number> {
+    let processed = 0;
+    // 1) Pull the lists (paginated).
+    const lists: ErpPriceList[] = [];
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+    while (lists.length < total) {
+      const { data, total: t } = await this.erp.list<ErpPriceList>('price-lists', {
+        page,
+        pageSize: 200,
+      });
+      total = t;
+      if (data.length === 0) break;
+      lists.push(...data);
+      page += 1;
+      if (page > 100) break;
+    }
+    const keptErpIds = new Set<string>();
+    for (const l of lists) {
+      keptErpIds.add(l.id);
+      let local = await this.priceLists.findOne({ where: { erpId: l.id } });
+      if (!local) local = this.priceLists.create({ erpId: l.id, code: l.code, origin: 'erp' });
+      local.origin = 'erp';
+      local.code = l.code;
+      local.name = l.name ?? l.code;
+      local.isActive = l.isActive ?? true;
+      await this.priceLists.save(local);
+
+      // 2) Pull its items → map skuCode→item, keep the lowest (base) tier price.
+      const detail = await this.erp.getOne<ErpPriceListDetail>(`price-lists/${l.id}`);
+      const byItem = new Map<string, number>();
+      for (const it of detail?.items ?? []) {
+        if (!it.skuCode) continue;
+        const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: it.skuCode } });
+        const item = map?.localId
+          ? await this.items.findOne({ where: { itemNumber: map.localId } })
+          : null;
+        if (!item) continue;
+        const unitPrice = Math.round((Number(it.price) || 0) * 1000);
+        const prev = byItem.get(item.id);
+        if (prev === undefined || unitPrice < prev) byItem.set(item.id, unitPrice);
+      }
+      const keptItemIds = new Set<string>();
+      for (const [itemId, unitPrice] of byItem) {
+        keptItemIds.add(itemId);
+        let row = await this.priceListItems.findOne({
+          where: { priceListId: local.id, itemId },
+        });
+        if (!row) row = this.priceListItems.create({ priceListId: local.id, itemId });
+        row.unitPrice = unitPrice;
+        await this.priceListItems.save(row);
+        processed += 1;
+      }
+      for (const e of await this.priceListItems.find({ where: { priceListId: local.id } })) {
+        if (!keptItemIds.has(e.itemId)) await this.priceListItems.delete(e.id);
+      }
+    }
+
+    // 3) Drop ERP-origin lists that no longer exist upstream (keep local ones).
+    for (const l of await this.priceLists.find({ where: { origin: 'erp' } })) {
+      if (l.erpId && !keptErpIds.has(l.erpId)) {
+        await this.customers.update({ priceListId: l.id }, { priceListId: null });
+        await this.priceListItems.delete({ priceListId: l.id });
+        await this.priceLists.delete(l.id);
+      }
+    }
+
+    // 4) Map each customer's ERP assignment → the local mirror. Never override a
+    //    dashboard-set assignment to a LOCAL list.
+    for (const c of await this.customers.find({ where: { isActive: true } })) {
+      if (!c.erpPriceListId) continue;
+      const local = await this.priceLists.findOne({ where: { erpId: c.erpPriceListId } });
+      if (!local) continue;
+      if (c.priceListId) {
+        const current = await this.priceLists.findOne({ where: { id: c.priceListId } });
+        if (current && current.origin === 'local') continue; // keep manual/local assignment
+      }
+      if (c.priceListId !== local.id) {
+        c.priceListId = local.id;
+        await this.customers.save(c);
+      }
     }
     return processed;
   }
@@ -880,16 +1061,27 @@ export class ErpSyncService {
     const custs = await this.customers.find({ where: { isActive: true } });
     let processed = 0;
     for (const cust of custs) {
-      const code = cust.customerNumber;
-      if (!code || code.startsWith('ERP-')) continue; // need a real ERP customer code
+      // Identify the customer to the ERP. Customers created in the ERP UI have a
+      // NULL code — FlowVan shows them as `ERP-<id>` — so CODE alone can't reach
+      // them. The id-map always holds the ERP customer id (`erpId`); prefer that
+      // (`/prices?customerId=`). Fall back to a real code, else skip FlowVan-only
+      // customers the ERP has never heard of.
+      const idmap = await this.idmap.findOne({
+        where: { entity: 'customer', localId: cust.customerNumber },
+      });
+      const idQuery: { customerId?: string; customerCode?: string } = {};
+      if (idmap?.erpId) idQuery.customerId = idmap.erpId;
+      else if (idmap?.erpCode) idQuery.customerCode = idmap.erpCode;
+      else if (cust.customerNumber && !cust.customerNumber.startsWith('ERP-'))
+        idQuery.customerCode = cust.customerNumber;
+      if (!idQuery.customerId && !idQuery.customerCode) continue;
       try {
-        processed += await this.syncCustomerPricesFor(cust, code);
+        processed += await this.syncCustomerPricesFor(cust, idQuery);
       } catch (e) {
         // One customer failing must NOT abort the whole pull. The ERP returns
-        // HTTP 400 CUSTOMER_NOT_FOUND for a code it doesn't have (e.g. a
-        // FlowVan-only customer) — skip it and keep syncing the rest.
+        // HTTP 400 CUSTOMER_NOT_FOUND for an id/code it doesn't have — skip + continue.
         this.logger.warn(
-          `customer-price pull skipped ${code}: ${e instanceof Error ? e.message : e}`,
+          `customer-price pull skipped ${cust.customerNumber}: ${e instanceof Error ? e.message : e}`,
         );
       }
     }
@@ -897,7 +1089,10 @@ export class ErpSyncService {
   }
 
   /** Pull + cache ONE customer's resolved ERP prices. Returns rows upserted. */
-  private async syncCustomerPricesFor(cust: Customer, code: string): Promise<number> {
+  private async syncCustomerPricesFor(
+    cust: Customer,
+    idQuery: { customerId?: string; customerCode?: string },
+  ): Promise<number> {
     let processed = 0;
     // Fetch all resolved prices for this customer (paginated).
     const rows: ErpPrice[] = [];
@@ -905,7 +1100,7 @@ export class ErpSyncService {
     let total = Number.POSITIVE_INFINITY;
     while (rows.length < total) {
       const { data, total: t } = await this.erp.list<ErpPrice>('prices', {
-        customerCode: code,
+        ...idQuery,
         page,
         pageSize: 200,
       });

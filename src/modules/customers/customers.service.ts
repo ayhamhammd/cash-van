@@ -39,6 +39,18 @@ export interface CsvImportResult {
 
 export const AI_PROFILE_REFRESH_QUEUE = 'customer-ai-profile-refresh';
 
+/** A customer visit enriched with the visiting rep's name (per-customer history). */
+export interface CustomerVisitRow {
+  id: string;
+  repId: string;
+  repName: string | null;
+  visitedAt: Date;
+  hadSale: boolean;
+  visitNote: string | null;
+  lat: number | null;
+  lng: number | null;
+}
+
 @Injectable()
 export class CustomersService {
   private readonly logger = new Logger(CustomersService.name);
@@ -239,13 +251,34 @@ export class CustomersService {
     );
   }
 
-  async listVisits(customerId: string, limit = 50): Promise<CustomerVisit[]> {
+  async listVisits(
+    customerId: string,
+    opts: { from?: string; to?: string; limit?: number } = {},
+  ): Promise<CustomerVisitRow[]> {
     await this.findOneOrThrow(customerId);
-    return this.visits.find({
-      where: { customerId },
-      order: { visitedAt: 'DESC' },
-      take: limit,
-    });
+    const from = opts.from ? new Date(opts.from) : null;
+    const to = opts.to ? new Date(opts.to) : null;
+    const limit = opts.limit ?? 50;
+    // Enrich with the visiting rep's name (who came) — the per-customer visit history.
+    return (await this.visits.query(
+      `
+      SELECT cv.id::text                        AS id,
+             cv.rep_id                          AS "repId",
+             COALESCE(r.name_ar, r.name_en)     AS "repName",
+             cv.visited_at                      AS "visitedAt",
+             cv.had_sale                        AS "hadSale",
+             cv.visit_note                      AS "visitNote",
+             cv.lat, cv.lng
+      FROM customer_visits cv
+      LEFT JOIN reps r ON r.id = cv.rep_id
+      WHERE cv.customer_id = $1
+        AND ($2::timestamptz IS NULL OR cv.visited_at >= $2)
+        AND ($3::timestamptz IS NULL OR cv.visited_at <= $3)
+      ORDER BY cv.visited_at DESC
+      LIMIT $4
+      `,
+      [customerId, from, to, limit],
+    )) as CustomerVisitRow[];
   }
 
   async remove(id: string): Promise<void> {

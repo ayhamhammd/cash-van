@@ -1,8 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 
 import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
+import { CashAccountsService, SettleTransfers } from '../cash-accounts/cash-accounts.service';
 import { SalesmanSettlement } from './entities/salesman-settlement.entity';
 
 /** One salesman's End-of-Day cash summary over a period (all money in fils). */
@@ -183,6 +184,7 @@ export class ReportsService {
     @InjectRepository(SalesmanSettlement)
     private readonly settlements: Repository<SalesmanSettlement>,
     private readonly erpOutbox: ErpOutboxService,
+    private readonly cashAccounts: CashAccountsService,
   ) {}
 
   // ── End-of-Day cash reconciliation ─────────────────────────────────────────
@@ -332,7 +334,7 @@ export class ReportsService {
    * any sale/collection.
    */
   async settle(
-    dto: { repId: string; from: string; to: string; receivedFils: number; note?: string },
+    dto: { repId: string; from: string; to: string; receivedFils: number; note?: string; transfers?: SettleTransfers },
     userId?: string,
   ): Promise<SalesmanSettlement> {
     if (dto.receivedFils < 0) throw new BadRequestException('receivedFils must be ≥ 0');
@@ -358,8 +360,24 @@ export class ReportsService {
         createdByUserId: userId ?? null,
       }),
     );
-    // Queue the accounting entry to the ERP (best-effort, non-blocking).
-    await this.erpOutbox.enqueue('CASH_SETTLEMENT', saved.id);
+    // Post the settlement to the ERP as a GL journal (best-effort, non-blocking): the
+    // main accounts recognise the full expected, the rep's account carries the shortfall.
+    // Skipped (with a warning) when the rep or a main account isn't ERP-linked.
+    // See docs/SPEC-rep-erp-accounts-settlement.md §4.
+    try {
+      const journal = await this.cashAccounts.buildSettlementJournal(saved.id);
+      if (journal) {
+        await this.erpOutbox.enqueue('REP_SETTLEMENT_JOURNAL', saved.id);
+      } else {
+        new Logger('Reports').warn(
+          `settlement ${saved.id}: no ERP journal posted (rep or main account not linked)`,
+        );
+      }
+    } catch (err) {
+      new Logger('Reports').warn(
+        `settlement ${saved.id}: journal enqueue failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return saved;
   }
 
@@ -493,6 +511,25 @@ export class ReportsService {
     return { items, total: totalRows[0]?.c ?? 0 };
   }
 
+  /** Today's customer visits that did NO business (had_sale=false) — who was visited
+   *  without a transaction, with customer + rep names (newest first). */
+  async noTransactionVisitsToday(): Promise<VisitRow[]> {
+    return this.ds.query(
+      `SELECT v.id::text AS id,
+              v.visited_at AS "visitedAt",
+              v.had_sale AS "hadSale",
+              v.visit_note AS "visitNote",
+              c.customer_name AS "customerName",
+              c.customer_number AS "customerNumber",
+              r.name_ar AS "repName"
+         FROM customer_visits v
+         LEFT JOIN customers c ON c.id = v.customer_id
+         LEFT JOIN reps r ON r.id = v.rep_id
+        WHERE v.had_sale = false AND v.visited_at >= CURRENT_DATE
+        ORDER BY v.visited_at DESC`,
+    );
+  }
+
   /** One aggregated KPI payload for the dashboard home page (today vs yesterday). */
   async dashboard(): Promise<DashboardOverview> {
     const [salesRows, openOrderRows, payRows, visitRows, custRows, chequeRows, lowStockRows, repRows] =
@@ -515,12 +552,15 @@ export class ReportsService {
             WHERE trans_kind = 'ORDER' AND is_fulfilled = false AND deleted_at IS NULL`,
         ),
         this.ds.query(
+          // "Collected today" = actual collection receipts (the collections table),
+          // NOT sales-voucher payment lines. amount is fils → JOD major. Only money
+          // actually collected (confirmed/deposited), excluding pending/bounced.
           `SELECT
-              COALESCE(SUM(amount::numeric), 0)::float8 AS "todayTotal",
-              COALESCE(SUM(amount::numeric) FILTER (WHERE payment_type = 'CASH'),   0)::float8 AS "todayCash",
-              COALESCE(SUM(amount::numeric) FILTER (WHERE payment_type = 'CHEQUE'), 0)::float8 AS "todayCheque"
-            FROM payments
-           WHERE deleted_at IS NULL AND payment_date >= CURRENT_DATE`,
+              COALESCE(SUM(amount), 0)::float8 / 1000                                   AS "todayTotal",
+              COALESCE(SUM(amount) FILTER (WHERE method = 'cash'),   0)::float8 / 1000   AS "todayCash",
+              COALESCE(SUM(amount) FILTER (WHERE method = 'cheque'), 0)::float8 / 1000   AS "todayCheque"
+            FROM collections
+           WHERE status IN ('confirmed','deposited') AND collected_at >= CURRENT_DATE`,
         ),
         this.ds.query(
           `SELECT
@@ -622,12 +662,13 @@ export class ReportsService {
                AND in_date >= CURRENT_DATE - ($1::int - 1)
              GROUP BY in_date::date) s ON s.day = d.day
          LEFT JOIN (
-            SELECT payment_date::date AS day,
-                   COALESCE(SUM(amount::numeric), 0)::float8 AS "paymentsTotal"
-              FROM payments
-             WHERE deleted_at IS NULL
-               AND payment_date >= CURRENT_DATE - ($1::int - 1)
-             GROUP BY payment_date::date) p ON p.day = d.day
+            -- collection receipts per day (fils → JOD major), not sales-voucher payments
+            SELECT collected_at::date AS day,
+                   COALESCE(SUM(amount), 0)::float8 / 1000 AS "paymentsTotal"
+              FROM collections
+             WHERE status IN ('confirmed','deposited')
+               AND collected_at >= CURRENT_DATE - ($1::int - 1)
+             GROUP BY collected_at::date) p ON p.day = d.day
         ORDER BY d.day`,
       [days],
     );
