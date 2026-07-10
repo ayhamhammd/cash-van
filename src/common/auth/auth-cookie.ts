@@ -13,11 +13,13 @@ export const ACCESS_TOKEN_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 export function accessTokenCookieOptions(): CookieOptions {
   const isProd = process.env.NODE_ENV === 'production';
-  // SameSite=lax gives CSRF protection (cross-site POSTs don't carry the cookie) while
-  // still working for same-site XHR (dashboard ↔ api on the same registrable domain).
-  // If the API is served from a DIFFERENT site than the dashboard, set COOKIE_SAMESITE=none
-  // (which forces Secure) so the cross-site cookie is still sent.
-  const sameSite = (process.env.COOKIE_SAMESITE as CookieOptions['sameSite']) ?? 'lax';
+  // The dashboard and API are deployed on separate subdomains (e.g. *.onrender.com, which
+  // the browser treats as CROSS-SITE), so a SameSite=lax cookie is never sent on the
+  // dashboard's XHR and every call 401s. Default to 'none' (auto-Secure) in production so
+  // the cross-site cookie IS sent; keep 'lax' for local same-site dev (localhost ↔ localhost).
+  // Override with COOKIE_SAMESITE=lax when the dashboard + API share one registrable domain.
+  const sameSite = (process.env.COOKIE_SAMESITE as CookieOptions['sameSite'])
+    ?? (isProd ? 'none' : 'lax');
   return {
     httpOnly: true,
     secure: isProd || sameSite === 'none',
