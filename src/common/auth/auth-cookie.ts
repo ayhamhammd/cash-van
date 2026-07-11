@@ -20,9 +20,17 @@ export function accessTokenCookieOptions(): CookieOptions {
   // Override with COOKIE_SAMESITE=lax when the dashboard + API share one registrable domain.
   const sameSite = (process.env.COOKIE_SAMESITE as CookieOptions['sameSite'])
     ?? (isProd ? 'none' : 'lax');
+  // A Secure cookie is dropped by browsers over plain HTTP (except on localhost).
+  // Cloud (HTTPS) wants Secure; an on-prem LAN box on http://<device-ip> can't use
+  // it — set COOKIE_SECURE=false there (same-origin proxy + SameSite=lax keeps it
+  // working). Default: Secure in prod or whenever SameSite=none (which requires it).
+  const secure =
+    process.env.COOKIE_SECURE != null
+      ? process.env.COOKIE_SECURE === 'true'
+      : isProd || sameSite === 'none';
   return {
     httpOnly: true,
-    secure: isProd || sameSite === 'none',
+    secure,
     sameSite,
     path: '/',
     maxAge: ACCESS_TOKEN_MAX_AGE_MS,
