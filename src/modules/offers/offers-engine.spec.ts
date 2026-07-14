@@ -611,4 +611,119 @@ describe('OffersEngineService', () => {
       { offerId: 'pay10', name: expect.any(String), pct: 10, discountFils: 500 },
     ]);
   });
+
+  /* -------- quantity bands (min..max) + per-item "dynamic" tables --------- */
+
+  it('a quantity band applies only when the order count is inside [min, max]', async () => {
+    // Two non-overlapping banded CASH offers: 1–49 → 100/unit, 50–99 → 200/unit.
+    const engine = makeEngine([
+      {
+        id: 'band1',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH', minItemCount: 1, maxItemCount: 49 },
+        reward: { kind: 'LINE_AMOUNT_DISCOUNT', baseAmountFils: 100, mode: 'STATIC' },
+      },
+      {
+        id: 'band2',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH', minItemCount: 50, maxItemCount: 99 },
+        reward: { kind: 'LINE_AMOUNT_DISCOUNT', baseAmountFils: 200, mode: 'STATIC' },
+      },
+    ]);
+    // 49 units → only band1 (100/unit).
+    const at49 = await engine.evaluate([{ itemNumber: 'A', qty: 49 }], {
+      paymentMethod: 'CASH',
+    });
+    expect(at49.appliedOffers.map((o) => o.offerId)).toEqual(['band1']);
+    expect(at49.lines[0].lineDiscountFils).toBe(4900); // 100 × 49
+    // 50 units → only band2 (200/unit); band1's ceiling excludes it.
+    const at50 = await engine.evaluate([{ itemNumber: 'A', qty: 50 }], {
+      paymentMethod: 'CASH',
+    });
+    expect(at50.appliedOffers.map((o) => o.offerId)).toEqual(['band2']);
+    expect(at50.lines[0].lineDiscountFils).toBe(10000); // 200 × 50
+    // 100 units → above both bands → nothing.
+    const at100 = await engine.evaluate([{ itemNumber: 'A', qty: 100 }], {
+      paymentMethod: 'CASH',
+    });
+    expect(at100.appliedOffers).toHaveLength(0);
+  });
+
+  it('TABLE_AMOUNT_DISCOUNT gives each listed item its own per-unit amount; unlisted items get nothing', async () => {
+    const engine = makeEngine([
+      {
+        id: 'tbl',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH', minItemCount: 50, maxItemCount: 99 },
+        reward: {
+          kind: 'TABLE_AMOUNT_DISCOUNT',
+          entries: [{ itemNumber: 'A', amountFils: 110 }],
+        },
+      },
+    ]);
+    // 50× A + 5× B = 55 in band. A listed (110/unit), B unlisted → 0.
+    const res = await engine.evaluate(
+      [
+        { itemNumber: 'A', qty: 50 },
+        { itemNumber: 'B', qty: 5 },
+      ],
+      { paymentMethod: 'CASH' },
+    );
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(5500); // 110 × 50
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(0);
+    // Below the band floor → the whole offer is inert.
+    const below = await engine.evaluate(
+      [
+        { itemNumber: 'A', qty: 40 },
+        { itemNumber: 'B', qty: 5 },
+      ],
+      { paymentMethod: 'CASH' },
+    );
+    expect(below.appliedOffers).toHaveLength(0);
+  });
+
+  it('TABLE_PERCENT_DISCOUNT gives each listed item its own % off', async () => {
+    const engine = makeEngine([
+      {
+        id: 'tblp',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH', minItemCount: 1, maxItemCount: 99 },
+        reward: {
+          kind: 'TABLE_PERCENT_DISCOUNT',
+          entries: [
+            { itemNumber: 'A', percent: 10 },
+            { itemNumber: 'B', percent: 20 },
+          ],
+        },
+      },
+    ]);
+    const res = await engine.evaluate(
+      [
+        { itemNumber: 'A', qty: 50 }, // gross 50000 × 10% = 5000
+        { itemNumber: 'B', qty: 10 }, // gross 5000 × 20% = 1000
+      ],
+      { paymentMethod: 'CASH' },
+    );
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(5000);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(1000);
+  });
+
+  it('TABLE_AMOUNT_DISCOUNT caps a per-item amount at maxPercentOfPrice of the line price', async () => {
+    const engine = makeEngine([
+      {
+        id: 'tblcap',
+        type: 'PAYMENT_METHOD_DISCOUNT',
+        trigger: { paymentCondition: 'CASH', minItemCount: 1, maxItemCount: 99 },
+        reward: {
+          kind: 'TABLE_AMOUNT_DISCOUNT',
+          // 500/unit but capped at 20% of A's 1000 price → 200/unit.
+          entries: [{ itemNumber: 'A', amountFils: 500, maxPercentOfPrice: 20 }],
+        },
+      },
+    ]);
+    const res = await engine.evaluate([{ itemNumber: 'A', qty: 50 }], {
+      paymentMethod: 'CASH',
+    });
+    expect(res.lines[0].lineDiscountFils).toBe(10000); // 200 × 50
+  });
 });

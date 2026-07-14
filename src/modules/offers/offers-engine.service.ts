@@ -136,6 +136,16 @@ export class OffersEngineService {
       /** Amount rewards only: cap the per-unit amount to this % of the line's unit price. */
       maxPercentOfPrice?: number;
       items: Set<string> | null; // null = applies to every line (payment-method)
+      /**
+       * Per-item discount table (TABLE_*_DISCOUNT, the "dynamic" payment-method
+       * offer). When set, this candidate's discount is looked up PER LINE from the
+       * item's entry; a line whose itemNumber is absent gets NO discount from it.
+       * Overrides the flat `pct`/`amountPerUnitFils` above.
+       */
+      table?: Map<
+        string,
+        { pct?: number; amountPerUnitFils?: number; maxPercentOfPrice?: number }
+      >;
     }
     const payOffers: Disc[] = [];
     const itemOffers: Disc[] = [];
@@ -161,7 +171,11 @@ export class OffersEngineService {
         const payOk = t.paymentCondition === 'CREDIT' ? isCredit : !isCredit;
         const totalOk = t.minOrderTotal == null || subtotalFils >= t.minOrderTotal;
         const countOk = t.minItemCount == null || itemCount >= t.minItemCount;
-        if (payOk && totalOk && countOk) {
+        // Quantity band ceiling: the order's total unit count must be within
+        // [minItemCount, maxItemCount] for this banded offer to apply. Null max =
+        // open-ended (legacy behaviour).
+        const maxOk = t.maxItemCount == null || itemCount <= t.maxItemCount;
+        if (payOk && totalOk && countOk && maxOk) {
           // Base applies at minItemCount; steps accrue per itemsPerStep above it.
           if (reward?.kind === 'LINE_PERCENT_DISCOUNT') {
             const pct = this.effectivePercent(reward, itemCount, t.minItemCount ?? 0);
@@ -179,6 +193,31 @@ export class OffersEngineService {
                 items: null,
               });
             }
+          } else if (reward?.kind === 'TABLE_AMOUNT_DISCOUNT') {
+            // Per-item table ("dynamic"): each listed item gets its own per-unit
+            // amount off; unlisted items get nothing (absent from the map).
+            const table = new Map<
+              string,
+              { amountPerUnitFils?: number; maxPercentOfPrice?: number }
+            >();
+            for (const e of reward.entries ?? []) {
+              if (e.amountFils != null && e.amountFils > 0) {
+                table.set(e.itemNumber, {
+                  amountPerUnitFils: e.amountFils,
+                  maxPercentOfPrice: e.maxPercentOfPrice,
+                });
+              }
+            }
+            if (table.size) payOffers.push({ offer, pct: 0, items: null, table });
+          } else if (reward?.kind === 'TABLE_PERCENT_DISCOUNT') {
+            // Per-item table, percentage twin.
+            const table = new Map<string, { pct?: number }>();
+            for (const e of reward.entries ?? []) {
+              if (e.percent != null && e.percent > 0) {
+                table.set(e.itemNumber, { pct: Math.min(e.percent, 100) });
+              }
+            }
+            if (table.size) payOffers.push({ offer, pct: 0, items: null, table });
           }
         }
       } else if (offer.type === 'ITEM_QTY_REWARD') {
@@ -231,15 +270,27 @@ export class OffersEngineService {
       // (the per-unit amount first clamped to maxPercentOfPrice of THIS line's unit
       // price, when set); percent → % of gross. Highest fils wins.
       const discFor = (c: Disc): number => {
-        if (c.amountPerUnitFils != null) {
-          let perUnit = c.amountPerUnitFils;
-          if (c.maxPercentOfPrice != null) {
-            const cap = roundFils((l.unitPriceFils * c.maxPercentOfPrice) / 100);
+        // Per-item table candidates resolve their value from THIS line's entry;
+        // a line not listed in the table contributes nothing from this offer.
+        let pct = c.pct;
+        let amountPerUnitFils = c.amountPerUnitFils;
+        let maxPercentOfPrice = c.maxPercentOfPrice;
+        if (c.table) {
+          const entry = c.table.get(itemNumber);
+          if (!entry) return 0;
+          pct = entry.pct ?? 0;
+          amountPerUnitFils = entry.amountPerUnitFils;
+          maxPercentOfPrice = entry.maxPercentOfPrice;
+        }
+        if (amountPerUnitFils != null) {
+          let perUnit = amountPerUnitFils;
+          if (maxPercentOfPrice != null) {
+            const cap = roundFils((l.unitPriceFils * maxPercentOfPrice) / 100);
             if (cap < perUnit) perUnit = cap;
           }
           return roundFils(l.qty * perUnit);
         }
-        return roundFils((gross * c.pct) / 100);
+        return roundFils((gross * pct) / 100);
       };
       let bestPay: Disc | null = null;
       let bestPayFils = 0;
@@ -603,12 +654,27 @@ export class OffersEngineService {
     const t = offer.trigger as PaymentMethodTrigger;
     const r = offer.reward;
     const cond = t.paymentCondition === 'CREDIT' ? 'Credit' : 'Cash';
+    const jod = (fils: number): string => (fils / 1000).toFixed(3);
     const mins: string[] = [];
     if (t.minOrderTotal) mins.push(`≥ ${(t.minOrderTotal / 1000).toFixed(3)} JOD`);
-    if (t.minItemCount) mins.push(`≥ ${t.minItemCount} items`);
+    // Quantity band: show the interval when a ceiling is set, else the floor only.
+    if (t.minItemCount != null && t.maxItemCount != null) {
+      mins.push(`${t.minItemCount}–${t.maxItemCount} items`);
+    } else if (t.maxItemCount != null) {
+      mins.push(`≤ ${t.maxItemCount} items`);
+    } else if (t.minItemCount) {
+      mins.push(`≥ ${t.minItemCount} items`);
+    }
     const suffix = mins.length ? ` (${mins.join(', ')})` : '';
+    if (r?.kind === 'TABLE_AMOUNT_DISCOUNT') {
+      const n = r.entries?.length ?? 0;
+      return `${cond} · per-item amount off (${n} item${n === 1 ? '' : 's'})${suffix}`;
+    }
+    if (r?.kind === 'TABLE_PERCENT_DISCOUNT') {
+      const n = r.entries?.length ?? 0;
+      return `${cond} · per-item % off (${n} item${n === 1 ? '' : 's'})${suffix}`;
+    }
     if (r?.kind === 'LINE_AMOUNT_DISCOUNT') {
-      const jod = (fils: number): string => (fils / 1000).toFixed(3);
       if (r.mode === 'DYNAMIC') {
         const cap = r.maxAmountFils != null ? ` up to ${jod(r.maxAmountFils)} JOD` : '';
         return `${cond} · ${jod(r.baseAmountFils)} JOD per unit, ×${r.multiplier ?? 0} per ${

@@ -347,6 +347,18 @@ export class OffersService {
         if (t.minItemCount != null && t.minItemCount < 1) {
           throw new BadRequestException('trigger.minItemCount must be ≥ 1');
         }
+        if (t.maxItemCount != null && t.maxItemCount < 1) {
+          throw new BadRequestException('trigger.maxItemCount must be ≥ 1');
+        }
+        if (
+          t.minItemCount != null &&
+          t.maxItemCount != null &&
+          t.maxItemCount < t.minItemCount
+        ) {
+          throw new BadRequestException(
+            'trigger.maxItemCount must be ≥ minItemCount (quantity band)',
+          );
+        }
         this.assertLineReward(reward);
         break;
       case 'ITEM_QTY_REWARD':
@@ -366,10 +378,64 @@ export class OffersService {
       this.assertPercentFields(reward);
     } else if (reward?.kind === 'LINE_AMOUNT_DISCOUNT') {
       this.assertAmountFields(reward);
+    } else if (reward?.kind === 'TABLE_AMOUNT_DISCOUNT') {
+      this.assertTableEntries(reward, 'amount');
+    } else if (reward?.kind === 'TABLE_PERCENT_DISCOUNT') {
+      this.assertTableEntries(reward, 'percent');
     } else {
       throw new BadRequestException(
-        'PAYMENT_METHOD_DISCOUNT requires a LINE_PERCENT_DISCOUNT or LINE_AMOUNT_DISCOUNT reward',
+        'PAYMENT_METHOD_DISCOUNT requires a LINE_PERCENT_DISCOUNT, LINE_AMOUNT_DISCOUNT, TABLE_AMOUNT_DISCOUNT or TABLE_PERCENT_DISCOUNT reward',
       );
+    }
+  }
+
+  /**
+   * Per-item table validation: non-empty rows, unique items, and each row carries
+   * a valid value for its kind (fils amount or 0–100 percent). Unlisted items are
+   * simply not discounted, so no coverage requirement here.
+   */
+  private assertTableEntries(
+    reward: OfferRewardDto,
+    kind: 'amount' | 'percent',
+  ): void {
+    const entries = reward.entries ?? [];
+    if (!entries.length) {
+      throw new BadRequestException(
+        'TABLE_*_DISCOUNT requires at least one entry',
+      );
+    }
+    const seen = new Set<string>();
+    for (const e of entries) {
+      if (!e.itemNumber) {
+        throw new BadRequestException('Each table entry requires an itemNumber');
+      }
+      if (seen.has(e.itemNumber)) {
+        throw new BadRequestException(
+          `Duplicate item ${e.itemNumber} in the discount table`,
+        );
+      }
+      seen.add(e.itemNumber);
+      if (kind === 'amount') {
+        if (e.amountFils == null || e.amountFils < 0) {
+          throw new BadRequestException(
+            `Table entry ${e.itemNumber} requires amountFils ≥ 0`,
+          );
+        }
+        if (
+          e.maxPercentOfPrice != null &&
+          (e.maxPercentOfPrice < 0 || e.maxPercentOfPrice > 100)
+        ) {
+          throw new BadRequestException(
+            `Table entry ${e.itemNumber} maxPercentOfPrice must be 0–100`,
+          );
+        }
+      } else {
+        if (e.percent == null || e.percent < 0 || e.percent > 100) {
+          throw new BadRequestException(
+            `Table entry ${e.itemNumber} requires percent 0–100`,
+          );
+        }
+      }
     }
   }
 

@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
   ArrayNotEmpty,
   IsArray,
@@ -9,6 +10,7 @@ import {
   IsString,
   Max,
   Min,
+  ValidateNested,
 } from 'class-validator';
 import {
   DISCOUNT_MODES,
@@ -22,6 +24,8 @@ import {
 const REWARD_KINDS: RewardKind[] = [
   'LINE_PERCENT_DISCOUNT',
   'LINE_AMOUNT_DISCOUNT',
+  'TABLE_AMOUNT_DISCOUNT',
+  'TABLE_PERCENT_DISCOUNT',
   'GIFT',
   'ITEM_PERCENT_DISCOUNT',
   'ITEM_AMOUNT_DISCOUNT',
@@ -48,11 +52,17 @@ export class OfferTriggerDto {
   @Min(0)
   minOrderTotal?: number;
 
-  @ApiPropertyOptional({ description: 'PAYMENT_METHOD_DISCOUNT: min total item count (Σ qty).' })
+  @ApiPropertyOptional({ description: 'PAYMENT_METHOD_DISCOUNT: min total item count (Σ qty) — band floor.' })
   @IsOptional()
   @IsInt()
   @Min(1)
   minItemCount?: number;
+
+  @ApiPropertyOptional({ description: 'PAYMENT_METHOD_DISCOUNT: max total item count (Σ qty) — band ceiling. With minItemCount forms an inclusive quantity band.' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  maxItemCount?: number;
 
   // ---- ITEM_QTY_REWARD ----
   @ApiPropertyOptional({
@@ -64,6 +74,37 @@ export class OfferTriggerDto {
   @ArrayNotEmpty()
   @IsString({ each: true })
   itemNumbers?: string[];
+}
+
+/**
+ * One row of a per-item discount table (TABLE_AMOUNT_DISCOUNT /
+ * TABLE_PERCENT_DISCOUNT). Exactly one of `amountFils` / `percent` is meaningful,
+ * matching the reward kind — enforced in OffersService.validateConfig.
+ */
+export class TableEntryDto {
+  @ApiProperty({ description: 'The item this row discounts.' })
+  @IsString()
+  itemNumber!: string;
+
+  @ApiPropertyOptional({ description: 'TABLE_AMOUNT_DISCOUNT: fils off each unit of this item.' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  amountFils?: number;
+
+  @ApiPropertyOptional({ description: 'TABLE_PERCENT_DISCOUNT: % off this item, 0–100.' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  percent?: number;
+
+  @ApiPropertyOptional({ description: 'TABLE_AMOUNT_DISCOUNT: cap the per-unit amount to this % of unit price (0–100).' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100)
+  maxPercentOfPrice?: number;
 }
 
 /**
@@ -133,6 +174,18 @@ export class OfferRewardDto {
   @Min(0)
   @Max(100)
   maxPercentOfPrice?: number;
+
+  // ---- TABLE_AMOUNT_DISCOUNT / TABLE_PERCENT_DISCOUNT (per-item table) ----
+  @ApiPropertyOptional({
+    type: [TableEntryDto],
+    description: 'TABLE_*_DISCOUNT: per-item discount rows. Only listed items are discounted.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @ValidateNested({ each: true })
+  @Type(() => TableEntryDto)
+  entries?: TableEntryDto[];
 
   // ---- GIFT ----
   @ApiPropertyOptional({ type: [String], description: 'GIFT: pool the rep picks free items from.' })

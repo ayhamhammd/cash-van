@@ -38,6 +38,8 @@ export const DISCOUNT_MODES: DiscountMode[] = ['STATIC', 'DYNAMIC'];
 export type RewardKind =
   | 'LINE_PERCENT_DISCOUNT'
   | 'LINE_AMOUNT_DISCOUNT'
+  | 'TABLE_AMOUNT_DISCOUNT'
+  | 'TABLE_PERCENT_DISCOUNT'
   | 'GIFT'
   | 'ITEM_PERCENT_DISCOUNT'
   | 'ITEM_AMOUNT_DISCOUNT';
@@ -50,8 +52,16 @@ export interface PaymentMethodTrigger {
   paymentCondition: PaymentCondition;
   /** Minimum order subtotal (fils) for the offer to apply. */
   minOrderTotal?: number;
-  /** Minimum total item count (sum of qty) for the offer to apply. */
+  /** Minimum total item count (sum of qty) for the offer to apply — band floor. */
   minItemCount?: number;
+  /**
+   * Maximum total item count (sum of qty) for the offer to apply — band ceiling.
+   * Together with `minItemCount` this forms an INCLUSIVE quantity band, e.g.
+   * [1, 49] then [50, 99]. Null/undefined = no ceiling (open-ended, legacy
+   * behaviour). Admins create one offer per band; the order's total unit count
+   * selects which offer applies.
+   */
+  maxItemCount?: number;
 }
 
 /** ITEM_QTY_REWARD: the offer's selected items. The trigger quantity is the
@@ -127,6 +137,43 @@ export interface LineAmountDiscountReward {
 }
 
 /**
+ * One row of a per-item discount table (PAYMENT_METHOD_DISCOUNT, "dynamic" mode).
+ * Exactly one of `percent` / `amountFils` is meaningful, matching the reward kind
+ * (`TABLE_PERCENT_DISCOUNT` → percent; `TABLE_AMOUNT_DISCOUNT` → amountFils).
+ */
+export interface TableEntry {
+  itemNumber: string;
+  /** TABLE_PERCENT_DISCOUNT: % off this item's line, 0–100. */
+  percent?: number;
+  /** TABLE_AMOUNT_DISCOUNT: fils off each unit of this item. */
+  amountFils?: number;
+  /** TABLE_AMOUNT_DISCOUNT only: cap the per-unit amount to % of unit price (0–100). */
+  maxPercentOfPrice?: number;
+}
+
+/**
+ * PAYMENT_METHOD_DISCOUNT "per-item table" (the user's "dynamic" offer): within a
+ * quantity band, each LISTED item gets its own fixed amount (fils) off per unit.
+ * Items NOT listed get NO discount from this offer. Applied per line as
+ * `amountFils × line qty`, optionally capped by `maxPercentOfPrice`, clamped to
+ * the line gross — same math as LINE_AMOUNT_DISCOUNT but with a per-item value.
+ */
+export interface TableAmountDiscountReward {
+  kind: 'TABLE_AMOUNT_DISCOUNT';
+  entries: TableEntry[];
+}
+
+/**
+ * PAYMENT_METHOD_DISCOUNT "per-item table", percentage twin of
+ * TableAmountDiscountReward: each LISTED item gets its own % off its line; items
+ * not listed get nothing.
+ */
+export interface TablePercentDiscountReward {
+  kind: 'TABLE_PERCENT_DISCOUNT';
+  entries: TableEntry[];
+}
+
+/**
  * ITEM_QTY_REWARD gift: the system computes the number of free gifts from the
  * combined selected-item qty — one free gift per `itemsPerGift` bought
  * (`freeQty = floor(qty / itemsPerGift)`), capped at `maxFreeQty`. The rep picks
@@ -193,6 +240,8 @@ export interface ItemAmountDiscountReward {
 export type OfferRewardConfig =
   | LinePercentDiscountReward
   | LineAmountDiscountReward
+  | TableAmountDiscountReward
+  | TablePercentDiscountReward
   | GiftReward
   | ItemPercentDiscountReward
   | ItemAmountDiscountReward;
