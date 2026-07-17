@@ -32,6 +32,7 @@ import {
 
 import { CustomersService } from './customers.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { SeedLocationDto } from './dto/seed-location.dto';
@@ -55,10 +56,18 @@ export class CustomersController {
   @ApiOperation({
     summary: 'List customers',
     description:
-      'List customers with optional filters (q, segment, churnRisk, region, rep) and pagination.',
+      'List customers with optional filters (q, segment, churnRisk, region, rep) and pagination. ' +
+      'Field reps (salesmen) are automatically scoped to their own assigned customers.',
   })
   @ApiOkResponse({ description: 'Paginated customer list' })
-  list(@Query() query: ListCustomersQuery) {
+  list(@Query() query: ListCustomersQuery, @CurrentUser() user: AuthenticatedUser) {
+    // A field rep (repId present on the JWT) only ever sees the customers
+    // assigned to them — force the rep scope regardless of any repId/unassigned
+    // the client sent. Admins/managers (repId null) keep the full, filterable list.
+    if (user?.repId) {
+      query.repId = user.repId;
+      query.unassigned = false;
+    }
     return this.customers.list(query);
   }
 

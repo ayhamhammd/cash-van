@@ -5,6 +5,7 @@ import { LessThanOrEqual, Repository } from 'typeorm';
 
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
+import { Payment } from '../vouchers/entities/payment.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { Customer } from '../customers/entities/customer.entity';
@@ -26,6 +27,15 @@ const BATCH = 20;
 // permanently fail a document.
 const RATE_LIMIT_BACKOFF_MS = 65_000;
 
+// CashVan payment_type → ERP sales-invoice paymentMethod. CREDIT has no method
+// (an on-account sale). Cheques are treated as PAID immediately (mapped to CHECK).
+const ERP_PAYMENT_METHOD: Record<string, string> = {
+  CASH: 'CASH',
+  CHEQUE: 'CHECK',
+  CARD: 'CARD',
+  TRANSFER: 'BANK_TRANSFER',
+};
+
 @Injectable()
 export class ErpOutboxService {
   private readonly logger = new Logger(ErpOutboxService.name);
@@ -43,6 +53,7 @@ export class ErpOutboxService {
     @InjectRepository(Collection) private readonly collections: Repository<Collection>,
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
     @InjectRepository(SalesmanSettlement) private readonly salesmanSettlements: Repository<SalesmanSettlement>,
+    @InjectRepository(Payment) private readonly payments: Repository<Payment>,
   ) {}
 
   /** Queue a van document for push to the ERP (best-effort; never throws to the caller). */
@@ -121,6 +132,13 @@ export class ErpOutboxService {
       await this.outbox.save(row);
       if (row.kind === 'SALE_INVOICE' && row.resultRef) {
         await this.mapVoucher(row.ref, row.resultRef);
+        // A partially-paid sale posts as CREDIT; settle its paid portion with a
+        // companion receipt allocated to the just-created invoice (Phase 2). Only
+        // enqueued now — after the invoice exists + is id-mapped — so the receipt
+        // can reference the ERP invoice number. enqueue() dedups on (kind, ref).
+        if (await this.splitPaidPortion(row.ref)) {
+          await this.enqueue('SALE_SPLIT_RECEIPT', row.ref);
+        }
       }
     } catch (e) {
       await this.fail(row, e instanceof Error ? e.message : String(e));
@@ -140,6 +158,12 @@ export class ErpOutboxService {
     if (row.kind === 'STOCK_TRANSFER') return this.buildTransferCalls(row.ref);
     if (row.kind === 'REP_SETTLEMENT_JOURNAL') {
       const call = await this.buildRepSettlementJournal(row.ref);
+      return call ? [call] : null;
+    }
+    // Split-sale receipt carries its own externalId/idem (`<voucher>-PAY`) so it
+    // never replays as the sale's push.
+    if (row.kind === 'SALE_SPLIT_RECEIPT') {
+      const call = await this.buildSplitReceipt(row.ref);
       return call ? [call] : null;
     }
     const one = await this.buildPayload(row);
@@ -239,6 +263,43 @@ export class ErpOutboxService {
   }
 
   /**
+   * Companion receipt for the PAID portion of a split sale. The invoice itself was
+   * pushed as CREDIT (buildSale → paymentType CREDIT); this settles the paid part,
+   * allocated to the ERP invoice number resolved from the id-map (populated by
+   * mapVoucher once the SALE_INVOICE posts — this row is only enqueued after that,
+   * so the number is available). Carries its OWN idempotency key (`<voucher>-PAY`)
+   * so it never collides with the sale's push. Returns null if the sale is no
+   * longer a split (e.g. edited) — nothing to receipt.
+   */
+  private async buildSplitReceipt(
+    voucherNumber: string,
+  ): Promise<{ path: string; body: Record<string, unknown>; idem: string } | null> {
+    const portion = await this.splitPaidPortion(voucherNumber);
+    if (!portion) return null;
+    const header = await this.headers.findOne({ where: { voucherNumber } });
+    if (!header?.customerNumber) return null;
+    const ref = await this.customerRef(header.customerNumber);
+    if (!('customerId' in ref) && !('customerCode' in ref)) return null;
+    // ERP invoice number for this sale (written by mapVoucher after it posted).
+    const map = await this.idmap.findOne({
+      where: { entity: 'voucher', localId: voucherNumber },
+    });
+    const invoiceNumber = map?.erpCode ?? undefined;
+    const externalId = `${voucherNumber}-PAY`;
+    return {
+      path: 'receipts',
+      idem: externalId,
+      body: {
+        externalId,
+        ...ref,
+        amount: portion.amount, // JOD major (voucher payments are stored in JOD)
+        paymentMethod: portion.paymentMethod,
+        ...(invoiceNumber ? { invoiceNumber } : {}),
+      },
+    };
+  }
+
+  /**
    * The van store for a voucher == the salesman code == the ERP warehouse code
    * (one shared identity). Prefer a line's own store, fall back to the voucher's
    * userCode (the salesman who created it).
@@ -325,6 +386,61 @@ export class ErpOutboxService {
     return p?.erpId ?? undefined;
   }
 
+  /**
+   * Classify a sale's payment for the ERP sales-invoice. A sale is PAID (the ERP
+   * settles the invoice + posts a RECEIPT_VOUCHER + cash_receipt) when it has ≥1
+   * non-CREDIT payment row and no CREDIT row; cheques count as paid (mapped to
+   * CHECK). Otherwise the sale is on-account — send `paymentType: 'CREDIT'` so the
+   * receivable stands and the credit limit is consumed. A split (paid + credit)
+   * sale is treated as credit here; posting a companion receipt for the paid part
+   * is a Phase-2 follow-up (see docs/SPEC-cash-sale-erp-export.md).
+   */
+  private async salePaymentFields(
+    voucherNumber: string,
+  ): Promise<{ paymentMethod?: string; paymentType: 'CASH' | 'CREDIT' }> {
+    const rows = await this.payments.find({ where: { voucherNumber } });
+    const paidRows = rows.filter((p) => p.paymentType !== 'CREDIT');
+    const hasCredit = rows.some((p) => p.paymentType === 'CREDIT');
+
+    // No money captured at the point of sale, or a credit portion exists → on-account.
+    if (paidRows.length === 0 || hasCredit) return { paymentType: 'CREDIT' };
+
+    // Fully paid: the ERP records ONE method for the full invoice total, so pick
+    // the method carrying the most value.
+    const byMethod = new Map<string, number>();
+    for (const p of paidRows) {
+      byMethod.set(p.paymentType, (byMethod.get(p.paymentType) ?? 0) + (Number(p.amount) || 0));
+    }
+    const dominant = [...byMethod.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    return { paymentMethod: ERP_PAYMENT_METHOD[dominant] ?? 'CASH', paymentType: 'CASH' };
+  }
+
+  /**
+   * The PAID portion of a SPLIT (part-paid / part-credit) sale — its total paid
+   * amount (JOD major) + the dominant method. Returns null when the sale is not a
+   * split (fully paid, fully credit, or no payments), i.e. there is nothing to
+   * settle with a companion receipt. A split = ≥1 non-CREDIT row AND a CREDIT row.
+   */
+  private async splitPaidPortion(
+    voucherNumber: string,
+  ): Promise<{ amount: number; paymentMethod: string } | null> {
+    const rows = await this.payments.find({ where: { voucherNumber } });
+    const paidRows = rows.filter((p) => p.paymentType !== 'CREDIT');
+    const hasCredit = rows.some((p) => p.paymentType === 'CREDIT');
+    if (paidRows.length === 0 || !hasCredit) return null;
+
+    const byMethod = new Map<string, number>();
+    let amount = 0;
+    for (const p of paidRows) {
+      const v = Number(p.amount) || 0;
+      amount += v;
+      byMethod.set(p.paymentType, (byMethod.get(p.paymentType) ?? 0) + v);
+    }
+    if (amount <= 0) return null;
+    const dominant = [...byMethod.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    return { amount, paymentMethod: ERP_PAYMENT_METHOD[dominant] ?? 'CASH' };
+  }
+
   private async buildSale(
     voucherNumber: string,
   ): Promise<{ path: string; body: Record<string, unknown> } | null> {
@@ -356,6 +472,11 @@ export class ErpOutboxService {
         return { ...base, taxRateId: await this.taxRateIdForPct(Number(l.taxPercentage) || 0) };
       }),
     );
+    // Cash/cheque/card/transfer sales carry paymentMethod so the ERP settles the
+    // invoice (records the payment + RECEIPT_VOUCHER journal); credit sales send
+    // paymentType CREDIT and stay as a receivable. Without this the ERP booked
+    // EVERY van sale as credit. (docs/SPEC-cash-sale-erp-export.md)
+    const payment = await this.salePaymentFields(voucherNumber);
     return {
       path: 'sales-invoices',
       body: {
@@ -364,6 +485,7 @@ export class ErpOutboxService {
         ...(await this.customerRef(header.customerNumber)),
         warehouseCode: this.vanStoreOf(lines, header.userCode), // attribute to the van
         invoiceDate: header.inDate,
+        ...payment,
         items,
       },
     };

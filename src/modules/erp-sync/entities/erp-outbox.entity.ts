@@ -14,6 +14,9 @@ export type ErpOutboxKind =
   | 'STOCK_ADJUSTMENT'
   | 'STOCK_TRANSFER'
   | 'PAYMENT'
+  // Companion receipt for the PAID portion of a split (part-cash/part-credit)
+  // sale — enqueued after the SALE_INVOICE posts, allocated to that invoice.
+  | 'SALE_SPLIT_RECEIPT'
   | 'CASH_SETTLEMENT'
   | 'REP_SETTLEMENT_JOURNAL';
 export type ErpOutboxStatus = 'pending' | 'posted' | 'failed' | 'dead_letter';
