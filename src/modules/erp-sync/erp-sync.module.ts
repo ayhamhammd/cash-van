@@ -15,6 +15,7 @@ import { PriceListItem } from '../products/entities/price-list-item.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
+import { Payment } from '../vouchers/entities/payment.entity';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { SettingsModule } from '../settings/settings.module';
 import { VouchersModule } from '../vouchers/vouchers.module';
@@ -48,6 +49,7 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
       ErpOutbox,
       VoucherHeader,
       VoucherTransaction,
+      Payment,
       SalesmanSettlement,
     ]),
     SettingsModule,

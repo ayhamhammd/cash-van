@@ -14,6 +14,7 @@ const BASE_PROFILE: TobaccoTaxProfileData = {
   taxBase: 'CONSUMER_PRICE',
   salesTaxEnabled: true,
   salesTaxRate: 13,
+  taxIncludedInConsumerPrice: false,
   specialTaxEnabled: true,
   specialTaxCalculationType: 'FIXED_PER_UNIT',
   specialTaxBase: 'QUANTITY',
@@ -34,6 +35,31 @@ describe('calculateTobaccoTax', () => {
     expect(r.withheldTaxAmount).toBe(4000); // 400 × 10
     expect(r.grossTaxAmount).toBe(9250);
     expect(r.netTaxAmount).toBe(5250);
+  });
+
+  it('taxIncludedInConsumerPrice=true extracts the tax (BOHEM: consumer 25.000, 16%)', () => {
+    const p: TobaccoTaxProfileData = {
+      ...BASE_PROFILE,
+      salesTaxRate: 16,
+      taxIncludedInConsumerPrice: true,
+      specialTaxEnabled: false,
+      withheldTaxEnabled: false,
+    };
+    const r = calculateTobaccoTax({ quantity: 1, unitPrice: 24700, consumerPrice: 25000, profile: p });
+    expect(r.salesTaxAmount).toBe(3448); // 25000 × 16 / 116, matches the ERP engine
+    expect(r.netTaxAmount).toBe(3448);
+  });
+
+  it('taxIncludedInConsumerPrice=false adds the tax on top', () => {
+    const p: TobaccoTaxProfileData = {
+      ...BASE_PROFILE,
+      salesTaxRate: 16,
+      taxIncludedInConsumerPrice: false,
+      specialTaxEnabled: false,
+      withheldTaxEnabled: false,
+    };
+    const r = calculateTobaccoTax({ quantity: 1, unitPrice: 24700, consumerPrice: 25000, profile: p });
+    expect(r.salesTaxAmount).toBe(4000); // 25000 × 16 / 100
   });
 
   it('sales tax on SALE_PRICE base', () => {

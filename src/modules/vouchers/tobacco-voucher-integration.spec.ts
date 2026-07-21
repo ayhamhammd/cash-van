@@ -16,6 +16,7 @@ const PROFILE: TobaccoTaxProfileData = {
   taxBase: 'CONSUMER_PRICE',
   salesTaxEnabled: true,
   salesTaxRate: 13,
+  taxIncludedInConsumerPrice: false,
   specialTaxEnabled: true,
   specialTaxCalculationType: 'FIXED_PER_UNIT',
   specialTaxBase: 'QUANTITY',

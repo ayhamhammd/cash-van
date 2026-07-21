@@ -36,6 +36,11 @@ export interface TobaccoTaxProfileData {
   salesTaxEnabled: boolean;
   salesTaxRate: number; // percentageInteger
 
+  // When true, the sales-tax base (consumer price) already INCLUDES the sales
+  // tax, so the tax is extracted from within the price: base × r / (100 + r).
+  // When false, the tax is added on top: base × r / 100. (Mirrors the ERP engine.)
+  taxIncludedInConsumerPrice: boolean;
+
   specialTaxEnabled: boolean;
   specialTaxCalculationType: SpecialTaxCalcType;
   specialTaxBase: SpecialTaxBase;
@@ -107,10 +112,13 @@ export function calculateTobaccoTax(input: TobaccoTaxInput): TobaccoTaxResult {
   const consumerBase = consumerPrice * quantity; // total consumer value
 
   // ── 1. Sales Tax ────────────────────────────────────────────────────────
+  // If the base price is tax-inclusive, extract the tax from within the price
+  // (base × r / (100 + r)); otherwise add it on top (base × r / 100).
   const salesTaxBase = profile.taxBase === 'CONSUMER_PRICE' ? consumerBase : saleBase;
+  const salesTaxDivisor = profile.taxIncludedInConsumerPrice ? 100 + profile.salesTaxRate : 100;
   const salesTax =
     profile.salesTaxEnabled && profile.salesTaxRate > 0
-      ? Math.round((salesTaxBase * profile.salesTaxRate) / 100)
+      ? Math.round((salesTaxBase * profile.salesTaxRate) / salesTaxDivisor)
       : 0;
 
   // ── 2. Special Tax ──────────────────────────────────────────────────────

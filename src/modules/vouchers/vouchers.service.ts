@@ -51,6 +51,7 @@ function toEngineProfile(p: TobaccoTaxProfile): TobaccoTaxProfileData {
     taxBase: p.taxBase,
     salesTaxEnabled: p.salesTaxEnabled,
     salesTaxRate: p.salesTaxRate,
+    taxIncludedInConsumerPrice: p.taxIncludedInConsumerPrice,
     specialTaxEnabled: p.specialTaxEnabled,
     specialTaxCalculationType: p.specialTaxCalculationType,
     specialTaxBase: p.specialTaxBase,
@@ -937,7 +938,13 @@ export class VouchersService implements OnModuleInit {
   async list(
     q: ListVouchersQueryDto = {},
   ): Promise<
-    Array<VoucherHeader & { storeNumber: string | null; customerName: string | null }>
+    Array<
+      VoucherHeader & {
+        storeNumber: string | null;
+        customerName: string | null;
+        creditTotal: string;
+      }
+    >
   > {
     const qb = this.headersRepo
       .createQueryBuilder('h')
@@ -952,6 +959,14 @@ export class VouchersService implements OnModuleInit {
         'storeNumber',
       )
       .addSelect('MIN(COALESCE(cust.name_ar, cust.name_en))', 'customerName')
+      // Portion of the voucher settled ON ACCOUNT (CREDIT payments), major units.
+      // The account statement uses this so cash/cheque/transfer sales — settled at
+      // point of sale — never post to the customer's receivable ledger.
+      .addSelect(
+        `COALESCE((SELECT SUM(p.amount) FROM payments p
+           WHERE p.voucher_number = h.voucher_number AND p.payment_type = 'CREDIT'), 0)`,
+        'creditTotal',
+      )
       .groupBy('h.id')
       .orderBy('h.in_date', 'DESC');
 
@@ -989,6 +1004,7 @@ export class VouchersService implements OnModuleInit {
       ...e,
       storeNumber: (raw[i]?.storeNumber as string | null) ?? null,
       customerName: (raw[i]?.customerName as string | null) ?? null,
+      creditTotal: String(raw[i]?.creditTotal ?? '0'),
     }));
   }
 
