@@ -1,0 +1,113 @@
+# VanFlow full stack — BE (this repo) + FE (../cash-van-dashboard-frontend) +
+# Postgres, wired together for local/Windows Docker Desktop use.
+#
+# Layout assumption: both repos are siblings on disk, e.g.
+#   C:\Users\<you>\IdeaProjects\cash-van-dashboard            (this repo)
+#   C:\Users\<you>\IdeaProjects\cash-van-dashboard-frontend
+# If yours differ, edit the `dashboard` service's build.context below.
+#
+# Windows setup (PowerShell, from this repo's folder):
+#   copy .env.vanflow.example .env.vanflow
+#   # edit .env.vanflow: fill JWT_SECRET / PHONE_HASH_SECRET / ERP_WEBHOOK_SECRET
+#   docker compose -f docker-compose.vanflow.yml --env-file .env.vanflow up -d --build
+#
+# Requires Docker Desktop with the WSL2 backend (default on modern installs).
+#
+#   API      → http://localhost:3001/api/v1  (Swagger: /docs)
+#   Frontend → http://localhost:3002
+#   Postgres → localhost:5434 (host-mapped, container port stays 5432)
+
+services:
+  db:
+    image: postgres:16.4-alpine
+    container_name: vanflow-db
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-cashvan}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-cashvan_dev_pw}
+      POSTGRES_DB: ${DB_NAME:-cashvan}
+    ports:
+      - "5434:5432"
+    volumes:
+      - vanflow_pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-cashvan} -d ${DB_NAME:-cashvan}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [vanflow-net]
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      target: production
+    image: cashvan-api:windows
+    container_name: vanflow-api
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USERNAME: ${DB_USERNAME:-cashvan}
+      DB_PASSWORD: ${DB_PASSWORD:-cashvan_dev_pw}
+      DB_NAME: ${DB_NAME:-cashvan}
+      DB_SSL: "false"
+      DB_LOGGING: "false"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (>=16 chars) in .env.vanflow}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3002}
+      PHONE_HASH_SECRET: ${PHONE_HASH_SECRET:?set PHONE_HASH_SECRET (>=16 chars, e.g. openssl rand -hex 16) in .env.vanflow}
+      JOFOTARA_MOCK: ${JOFOTARA_MOCK:-true}
+      JOFOTARA_KMS_KEY: ${JOFOTARA_KMS_KEY:-}
+      JOBS_ENABLED: ${JOBS_ENABLED:-true}
+      # Only needed if this stack also talks to an ERP instance — leave blank otherwise.
+      ERP_WEBHOOK_SECRET: ${ERP_WEBHOOK_SECRET:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    # migrate → seed (idempotent) → start. No manual migration step needed.
+    command: ["npm", "run", "start:deploy"]
+    ports:
+      - "3001:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - vanflow_storage:/app/storage
+    networks: [vanflow-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  dashboard:
+    build:
+      context: ../cash-van-dashboard-frontend
+      args:
+        # Browser-reachable URL — must match the HOST port api is published on.
+        NEXT_PUBLIC_API_BASE_URL: ${FE_API_BASE_URL:-http://localhost:3001/api/v1}
+        NEXT_PUBLIC_WS_URL: ${FE_WS_URL:-http://localhost:3001}
+        NEXT_PUBLIC_AI_ENABLED: ${NEXT_PUBLIC_AI_ENABLED:-false}
+        NEXT_PUBLIC_DEFAULT_LOCALE: ${NEXT_PUBLIC_DEFAULT_LOCALE:-ar}
+        NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY:-}
+    image: vanflow-dashboard:windows
+    container_name: vanflow-dashboard
+    environment:
+      NODE_ENV: production
+    ports:
+      - "3002:3000"
+    depends_on:
+      - api
+    networks: [vanflow-net]
+    restart: unless-stopped
+
+volumes:
+  vanflow_pgdata:
+  vanflow_storage:
+
+networks:
+  vanflow-net:
+    driver: bridge

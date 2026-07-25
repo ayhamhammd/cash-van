@@ -26,6 +26,7 @@ import { ErpOutboxService } from './erp-outbox.service';
 import { ErpSyncController } from './erp-sync.controller';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
+import { ErpStockSnapshot } from './entities/erp-stock-snapshot.entity';
 import { ErpOutbox } from './entities/erp-outbox.entity';
 
 /** ERP (erp-saas) integration — inbound catalog pull + outbound van-txn push. */
@@ -46,6 +47,7 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
       Collection,
       ErpIdMap,
       ErpSyncCursor,
+      ErpStockSnapshot,
       ErpOutbox,
       VoucherHeader,
       VoucherTransaction,

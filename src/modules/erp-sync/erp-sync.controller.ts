@@ -76,11 +76,11 @@ export class ErpSyncController {
 
   @Post('sync/movements/catch-up')
   @ApiOperation({
-    summary: 'Skip stock-movement history (post API-key switch)',
+    summary: 'Reset the van/stock baseline (post API-key switch)',
     description:
-      'Seeds every movements:* cursor to now so the next pull ignores past movements. Run ONCE right after moving the ERP API key to a dedicated integration user, to avoid re-mirroring history and double-counting stock. Admin only.',
+      'Clears erp_stock_snapshot so the next pull re-seeds every (store, sku) quantity without posting adjustment vouchers for it. Run ONCE right after moving the ERP API key to a dedicated integration user, to avoid posting a giant adjustment for stock already reflected under the OLD key. Admin only.',
   })
-  @ApiOkResponse({ description: 'Seeded cursors + timestamp' })
+  @ApiOkResponse({ description: 'Rows cleared + timestamp' })
   catchUpMovements() {
     return this.sync.catchUpMovements();
   }
