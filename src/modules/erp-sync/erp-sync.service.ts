@@ -1,10 +1,8 @@
-import { randomUUID } from 'node:crypto';
-
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
@@ -27,7 +25,6 @@ import { ErpHttpClient } from './erp-http.client';
 import { ErpOutboxService } from './erp-outbox.service';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
-import { ErpStockSnapshot } from './entities/erp-stock-snapshot.entity';
 import { ErpOutboxKind } from './entities/erp-outbox.entity';
 
 /** cash-van voucher kind → ERP outbox kind (per-kind outbound, same kind preserved). */
@@ -107,17 +104,6 @@ interface ErpReceipt {
   amount: number | string; // major units
   note?: string | null;
   createdAt?: string | null;
-}
-
-/** A snapshot row from the ERP `GET /api/v1/van/stock` (current on-hand, org-wide). */
-interface ErpVanStockRow {
-  skuId?: string;
-  skuCode: string;
-  warehouseId: string;
-  warehouseName?: string;
-  quantity: number | string;
-  reservedQuantity?: number | string;
-  availableQuantity?: number | string;
 }
 
 /** A category row from the ERP `GET /api/v1/categories`. */
@@ -232,7 +218,6 @@ export class ErpSyncService {
     @InjectRepository(VoucherTransaction) private readonly txns: Repository<VoucherTransaction>,
     @InjectRepository(ErpIdMap) private readonly idmap: Repository<ErpIdMap>,
     @InjectRepository(ErpSyncCursor) private readonly cursors: Repository<ErpSyncCursor>,
-    @InjectRepository(ErpStockSnapshot) private readonly stockSnapshots: Repository<ErpStockSnapshot>,
     private readonly vouchers: VouchersService,
     private readonly outbox: ErpOutboxService,
   ) {}
@@ -275,25 +260,6 @@ export class ErpSyncService {
     return this.cursors.find();
   }
 
-  /**
-   * Wipe the van/stock baseline so the next pull treats every (store, sku) as
-   * first-sight again. Since `reconcileStockRow` now posts a real opening-balance
-   * adjustment on first sight (not a silent no-op seed — see that method), this
-   * forces a FULL corrective resync: the next `syncNow()`/webhook pull posts one
-   * adjustment voucher per (store, sku) for whatever is needed to bring cash-van's
-   * stock exactly in line with the ERP's current quantity. Use this as the "force
-   * cash-van's stock to match ERP now" tool — e.g. after suspecting drift, or
-   * after switching the ERP API key to a dedicated integration user. Expect a
-   * burst of adjustment vouchers immediately after calling this. Admin only.
-   */
-  async catchUpMovements(): Promise<{ seeded: number; at: string }> {
-    const now = new Date();
-    const { affected } = await this.stockSnapshots
-      .createQueryBuilder()
-      .delete()
-      .execute();
-    return { seeded: affected ?? 0, at: now.toISOString() };
-  }
 
   /** Passthrough: list ERP categories (for the item form). [] when ERP off. */
   async listErpCategories(): Promise<unknown[]> {
@@ -699,153 +665,9 @@ export class ErpSyncService {
       await this.runEntity('price_list', () => this.pullPriceLists()),
       await this.runEntity('customer_price', () => this.pullCustomerPrices()),
     ];
-    // Reconcile cash-van stock to the ERP's current on-hand snapshot for every
-    // warehouse cash-van knows — vans AND normal stores (Main Store …) — so ERP
-    // stock changes affect cash-van on both the dashboard and the app.
-    results.push(await this.runEntity('van/stock', () => this.pullVanStock()));
     // ERP-native customer receipts → cash-van collections (customer-scoped).
     results.push(await this.runEntity('receipts', () => this.pullReceipts()));
     return results;
-  }
-
-  /**
-   * Pull the ERP's current on-hand snapshot (`GET /api/v1/van/stock`, org-wide,
-   * all warehouses in one paginated call) and diff each (store, sku) against the
-   * last-known quantity in `erp_stock_snapshot`. A non-zero delta is posted as a
-   * generic stock-adjustment voucher (IN if it rose, OUT if it fell) — van/stock
-   * has no event type, so unlike the old ledger mirror this can't distinguish a
-   * SALE from a RETURN from a TRANSFER leg; it only knows the net change.
-   */
-  private async pullVanStock(): Promise<number> {
-    const pageSize = 200;
-    let page = 1;
-    let total = Number.POSITIVE_INFINITY;
-    let processed = 0;
-    const storeByWarehouseId = new Map<string, string | null>();
-    while ((page - 1) * pageSize < total) {
-      const { data, total: t } = await this.erp.list<ErpVanStockRow>('van/stock', { page, pageSize });
-      total = t;
-      if (data.length === 0) break;
-      for (const row of data) {
-        if (!row.warehouseId || !row.skuCode) continue;
-        let store = storeByWarehouseId.get(row.warehouseId);
-        if (store === undefined) {
-          const map = await this.idmap.findOne({ where: { entity: 'warehouse', erpId: row.warehouseId } });
-          store = map?.localId ?? null;
-          storeByWarehouseId.set(row.warehouseId, store);
-        }
-        if (!store) continue; // warehouse not (yet) mirrored — pullWarehouses runs first, but be safe
-        await this.reconcileStockRow(store, row.skuCode, Math.round(Number(row.quantity) || 0));
-        processed += 1;
-      }
-      if (data.length < pageSize) break;
-      page += 1;
-      if (page > 500) break; // safety cap
-    }
-    return processed;
-  }
-
-  /**
-   * Diff ONE (store, sku) quantity against its last-known snapshot and, if it
-   * changed, post a generic adjustment voucher for the delta — atomically with
-   * advancing the baseline, so a crash mid-way never double-posts on retry (the
-   * next pull just recomputes from whatever baseline actually committed).
-   *
-   * The baseline is only advanced when the post actually succeeds. If the item
-   * isn't ID-mapped on cash-van's side yet, `postStockDelta` posts nothing and
-   * returns false — the snapshot is left untouched so the SAME delta (including
-   * a first-sight opening quantity) is recomputed and retried on the next pull
-   * instead of being silently and permanently dropped.
-   */
-  private async reconcileStockRow(store: string, skuCode: string, quantity: number): Promise<void> {
-    await this.dataSource.transaction(async (tx) => {
-      const snapRepo = tx.getRepository(ErpStockSnapshot);
-      const snap = await snapRepo.findOne({ where: { store, skuCode } });
-      if (snap) {
-        const delta = quantity - snap.quantity;
-        if (delta === 0) return;
-        const posted = await this.postStockDelta(tx, store, skuCode, delta);
-        if (!posted) return; // item not mapped yet — retry this delta on the next pull
-        snap.quantity = quantity;
-        await snapRepo.save(snap);
-      } else if (quantity === 0) {
-        await snapRepo.save(snapRepo.create({ store, skuCode, quantity }));
-      } else {
-        // First time we've ever seen this (store, sku): post ERP's current
-        // quantity as an opening-balance adjustment so cash-van's stock actually
-        // starts matching ERP. (Previously this only seeded the baseline without
-        // posting, which permanently hid the opening quantity from cash-van's
-        // stock ledger — see catchUpMovements() below for the intentional,
-        // explicit "reset without replay" version of this seed-only behavior.)
-        const posted = await this.postStockDelta(tx, store, skuCode, quantity);
-        if (!posted) return; // item not mapped yet — retry as first-sight again next pull
-        await snapRepo.save(snapRepo.create({ store, skuCode, quantity }));
-      }
-    });
-  }
-
-  /**
-   * Post a generic IN/OUT stock-adjustment voucher for a net quantity change.
-   * Returns false (and posts nothing) if the item isn't mapped on cash-van's
-   * side yet — callers must NOT advance their baseline in that case, so the
-   * delta is retried on a later sync instead of being silently lost.
-   */
-  private async postStockDelta(
-    tx: EntityManager,
-    store: string,
-    skuCode: string,
-    delta: number,
-  ): Promise<boolean> {
-    const into = delta > 0;
-    const abs = Math.abs(delta);
-    const kind = into ? 'IN' : 'OUT';
-    const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: skuCode } });
-    const itemNumber = map?.localId ?? skuCode;
-    const item = await this.items.findOne({ where: { itemNumber } });
-    if (!item) return false; // unknown item on cash-van's side — nothing to post against
-
-    const voucherNumber = `ERP-VS-${randomUUID()}`;
-    const headerRepo = tx.getRepository(VoucherHeader);
-    const txnRepo = tx.getRepository(VoucherTransaction);
-
-    await headerRepo.save(
-      headerRepo.create({
-        voucherNumber,
-        transKind: kind,
-        userCode: 'admin',
-        referenceVoucherNumber: null,
-        inDate: new Date(),
-        total: '0',
-        totalTax: '0',
-        netTotal: '0',
-        totalDiscountValue: '0',
-        totalDiscountPercentage: '0',
-        isPosted: true,
-        isEdit: false,
-      }),
-    );
-    await txnRepo.save(
-      txnRepo.create({
-        voucherNumber,
-        itemNumber,
-        itemName: item.name ?? itemNumber,
-        transKind: kind,
-        storeNumber: store,
-        fromStoreNumber: into ? null : store,
-        toStoreNumber: into ? store : null,
-        itemQty: String(abs),
-        unitPrice: '0',
-        qtyOfUnit: String(abs),
-        unitBaseQty: 1,
-        signedQty: String(into ? abs : -abs),
-        taxPercentage: '0',
-        discountPercentage: '0',
-        discountValue: '0',
-        total: '0',
-        netTotal: '0',
-      }),
-    );
-    return true;
   }
 
   /**

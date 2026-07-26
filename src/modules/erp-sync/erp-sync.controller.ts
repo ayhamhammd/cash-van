@@ -74,17 +74,6 @@ export class ErpSyncController {
     return this.sync.status();
   }
 
-  @Post('sync/movements/catch-up')
-  @ApiOperation({
-    summary: 'Reset the van/stock baseline (post API-key switch)',
-    description:
-      'Clears erp_stock_snapshot so the next pull re-seeds every (store, sku) quantity without posting adjustment vouchers for it. Run ONCE right after moving the ERP API key to a dedicated integration user, to avoid posting a giant adjustment for stock already reflected under the OLD key. Admin only.',
-  })
-  @ApiOkResponse({ description: 'Rows cleared + timestamp' })
-  catchUpMovements() {
-    return this.sync.catchUpMovements();
-  }
-
   @Get('export/pending')
   @ApiOperation({
     summary: 'Pending manual exports',
