@@ -106,6 +106,17 @@ interface ErpReceipt {
   createdAt?: string | null;
 }
 
+/** A ledger row from the ERP `GET /api/v1/stock-movements` (the inbound feed). */
+interface ErpMovement {
+  id: string;
+  type: string | null;
+  skuCode: string;
+  quantityChanged: number | string; // signed: + into the warehouse, − out
+  warehouseCode: string;
+  reason?: string | null;
+  createdAt?: string | null;
+}
+
 /** A category row from the ERP `GET /api/v1/categories`. */
 interface ErpCategory {
   id: string;
@@ -260,6 +271,32 @@ export class ErpSyncService {
     return this.cursors.find();
   }
 
+  /**
+   * Seed every stock-movement cursor to "now" so the next pull skips all history.
+   * Run this ONCE right after switching the ERP API key to a dedicated integration
+   * user: without it, the first pull (cursor still null → full pull) would re-mirror
+   * past movements — including cash-van's own pushes that were recorded under the
+   * OLD admin key — and double-count stock. Future movements sync normally. Admin only.
+   */
+  async catchUpMovements(): Promise<{ seeded: string[]; at: string }> {
+    const now = new Date();
+    const entities = new Set(
+      (await this.allStoreCodes()).map((s) => `movements:${s}`),
+    );
+    // Include any existing movements:* cursors too (e.g. stale/old store codes).
+    for (const c of await this.cursors.find()) {
+      if (c.entity.startsWith('movements:')) entities.add(c.entity);
+    }
+    for (const entity of entities) {
+      const c =
+        (await this.cursors.findOne({ where: { entity } })) ??
+        this.cursors.create({ entity });
+      c.updatedSince = now;
+      c.lastError = null;
+      await this.cursors.save(c);
+    }
+    return { seeded: [...entities], at: now.toISOString() };
+  }
 
   /** Passthrough: list ERP categories (for the item form). [] when ERP off. */
   async listErpCategories(): Promise<unknown[]> {
@@ -665,6 +702,12 @@ export class ErpSyncService {
       await this.runEntity('price_list', () => this.pullPriceLists()),
       await this.runEntity('customer_price', () => this.pullCustomerPrices()),
     ];
+    // Mirror ERP stock movements for EVERY warehouse cash-van knows — vans AND
+    // normal stores (Main Store …) — so ERP IN/OUT/TRANSFER affect cash-van
+    // stock on both the dashboard and the app. Each ERP transfer is two ledger
+    // rows (OUT of source, IN to dest); iterating all warehouses mirrors both
+    // legs, moving stock between the two cash-van stores.
+    results.push(...(await this.pullAllMovements()));
     // ERP-native customer receipts → cash-van collections (customer-scoped).
     results.push(await this.runEntity('receipts', () => this.pullReceipts()));
     return results;
@@ -1142,6 +1185,144 @@ export class ErpSyncService {
       await this.cursors.save(c);
     }
     return n;
+  }
+
+  /** Every warehouse + van-store code cash-van knows (dedup'd). */
+  private async allStoreCodes(): Promise<string[]> {
+    const [whs, reps] = await Promise.all([
+      this.whs.find({ select: { whNumber: true } }),
+      this.reps.find({ select: { code: true } }),
+    ]);
+    return [
+      ...new Set(
+        [...whs.map((w) => w.whNumber), ...reps.map((r) => r.code)].filter(
+          (c): c is string => !!c,
+        ),
+      ),
+    ];
+  }
+
+  /**
+   * Mirror the ERP stock-movement ledger for every store into cash-van (the
+   * per-store cursor + `movement` id-map make it idempotent). Runs inside
+   * `syncNow` (5-min).
+   */
+  async pullAllMovements(): Promise<SyncEntityResult[]> {
+    const cfg = await this.settings.getErpConfig();
+    if (!cfg.enabled) return [];
+    const results: SyncEntityResult[] = [];
+    for (const store of await this.allStoreCodes()) {
+      results.push(
+        await this.runEntity(`movements:${store}`, () => this.pullMovementsForStore(store)),
+      );
+    }
+    return results;
+  }
+
+  /**
+   * Inbound mirror (ERP → cash-van) for ONE warehouse (van or normal). Pulls the
+   * ERP stock-movement ledger since the per-store cursor and creates a REAL,
+   * stock-affecting cash-van voucher of the SAME kind for each movement (SALE,
+   * RETURN, TRANSFER, IN, OUT). The ERP feed already excludes cash-van's own
+   * pushes (made by the integration user), so this never echoes our outbound
+   * documents; the `ERP-MV-` prefix + a 'movement' id-map row also dedup and
+   * stop the posted-event handler from pushing them back.
+   */
+  private async pullMovementsForStore(store: string): Promise<number> {
+    const entity = `movements:${store}`;
+    const cursor = await this.cursors.findOne({ where: { entity } });
+    const since = cursor?.updatedSince ? cursor.updatedSince.toISOString() : undefined;
+    let n = 0;
+    let maxTs = cursor?.updatedSince ?? null;
+    let page = 1;
+    for (;;) {
+      const { data } = await this.erp.list<ErpMovement>('stock-movements', {
+        warehouseCode: store,
+        since,
+        page,
+        pageSize: 200,
+      });
+      if (data.length === 0) break;
+      for (const mv of data) {
+        const ts = mv.createdAt ? new Date(mv.createdAt) : null;
+        if (ts && (!maxTs || ts > maxTs)) maxTs = ts;
+        const seen = await this.idmap.findOne({ where: { entity: 'movement', erpId: mv.id } });
+        if (seen) continue;
+        await this.mirrorMovement(mv, store);
+        n += 1;
+      }
+      if (data.length < 200) break;
+      page += 1;
+      if (page > 50) break; // safety cap (10k movements / run)
+    }
+    if (maxTs) {
+      const c = cursor ?? this.cursors.create({ entity });
+      c.updatedSince = maxTs;
+      await this.cursors.save(c);
+    }
+    return n;
+  }
+
+  /** ERP movement `type` (+ sign) → cash-van voucher kind, preserving the kind. */
+  private classifyKind(type: string | null, qty: number): string {
+    const t = (type ?? '').toLowerCase();
+    if (t.includes('sale')) return 'SALE';
+    if (t.includes('return')) return 'RETURN';
+    if (t.includes('transfer')) return 'TRANSFER';
+    if (t.includes('out')) return 'OUT';
+    if (t.includes('in') || t.includes('purchase') || t.includes('receipt') || t.includes('initial'))
+      return 'IN';
+    return qty > 0 ? 'IN' : 'OUT';
+  }
+
+  /** Create a real, stock-affecting cash-van voucher mirroring one ERP movement. */
+  private async mirrorMovement(mv: ErpMovement, store: string): Promise<void> {
+    const qty = Number(mv.quantityChanged) || 0;
+    if (qty === 0) return; // cost-only / no stock effect
+    const into = qty > 0; // positive → stock enters this warehouse
+    const abs = Math.abs(qty);
+    const kind = this.classifyKind(mv.type, qty);
+    const voucherNumber = `ERP-MV-${mv.id}`;
+    const item = await this.items.findOne({ where: { itemNumber: mv.skuCode } });
+
+    const header = this.headers.create({
+      voucherNumber,
+      transKind: kind,
+      userCode: 'admin',
+      referenceVoucherNumber: null,
+      inDate: mv.createdAt ? new Date(mv.createdAt) : new Date(),
+      total: '0',
+      totalTax: '0',
+      netTotal: '0',
+      totalDiscountValue: '0',
+      totalDiscountPercentage: '0',
+      isPosted: true,
+      isEdit: false,
+    });
+    await this.headers.save(header);
+
+    // from/to stores drive the item_balance view — set the van's side by sign.
+    const txn = this.txns.create({
+      voucherNumber,
+      itemNumber: mv.skuCode,
+      itemName: item?.name ?? mv.skuCode,
+      transKind: kind,
+      storeNumber: store,
+      fromStoreNumber: into ? null : store,
+      toStoreNumber: into ? store : null,
+      itemQty: String(abs),
+      unitPrice: '0',
+      qtyOfUnit: String(abs),
+      unitBaseQty: 1,
+      signedQty: String(into ? abs : -abs),
+      taxPercentage: '0',
+      discountPercentage: '0',
+      discountValue: '0',
+      total: '0',
+      netTotal: '0',
+    });
+    await this.txns.save(txn);
+    await this.upsertIdMap('movement', mv.id, mv.skuCode, voucherNumber);
   }
 
   private async runEntity(

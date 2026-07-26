@@ -74,6 +74,17 @@ export class ErpSyncController {
     return this.sync.status();
   }
 
+  @Post('sync/movements/catch-up')
+  @ApiOperation({
+    summary: 'Skip stock-movement history (post API-key switch)',
+    description:
+      'Seeds every movements:* cursor to now so the next pull ignores past movements. Run ONCE right after moving the ERP API key to a dedicated integration user, to avoid re-mirroring history and double-counting stock. Admin only.',
+  })
+  @ApiOkResponse({ description: 'Seeded cursors + timestamp' })
+  catchUpMovements() {
+    return this.sync.catchUpMovements();
+  }
+
   @Get('export/pending')
   @ApiOperation({
     summary: 'Pending manual exports',
