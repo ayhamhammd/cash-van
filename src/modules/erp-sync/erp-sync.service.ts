@@ -276,12 +276,15 @@ export class ErpSyncService {
   }
 
   /**
-   * Wipe the van/stock baseline so the next pull re-seeds every (store, sku)
-   * quantity WITHOUT posting adjustment vouchers for it (see `pullVanStock`: a
-   * delta is only posted once a prior snapshot row exists). Run this ONCE right
-   * after switching the ERP API key to a dedicated integration user, so stock
-   * already reflected under the OLD key isn't replayed as a giant adjustment.
-   * Admin only.
+   * Wipe the van/stock baseline so the next pull treats every (store, sku) as
+   * first-sight again. Since `reconcileStockRow` now posts a real opening-balance
+   * adjustment on first sight (not a silent no-op seed — see that method), this
+   * forces a FULL corrective resync: the next `syncNow()`/webhook pull posts one
+   * adjustment voucher per (store, sku) for whatever is needed to bring cash-van's
+   * stock exactly in line with the ERP's current quantity. Use this as the "force
+   * cash-van's stock to match ERP now" tool — e.g. after suspecting drift, or
+   * after switching the ERP API key to a dedicated integration user. Expect a
+   * burst of adjustment vouchers immediately after calling this. Admin only.
    */
   async catchUpMovements(): Promise<{ seeded: number; at: string }> {
     const now = new Date();
@@ -747,6 +750,12 @@ export class ErpSyncService {
    * changed, post a generic adjustment voucher for the delta — atomically with
    * advancing the baseline, so a crash mid-way never double-posts on retry (the
    * next pull just recomputes from whatever baseline actually committed).
+   *
+   * The baseline is only advanced when the post actually succeeds. If the item
+   * isn't ID-mapped on cash-van's side yet, `postStockDelta` posts nothing and
+   * returns false — the snapshot is left untouched so the SAME delta (including
+   * a first-sight opening quantity) is recomputed and retried on the next pull
+   * instead of being silently and permanently dropped.
    */
   private async reconcileStockRow(store: string, skuCode: string, quantity: number): Promise<void> {
     await this.dataSource.transaction(async (tx) => {
@@ -754,31 +763,46 @@ export class ErpSyncService {
       const snap = await snapRepo.findOne({ where: { store, skuCode } });
       if (snap) {
         const delta = quantity - snap.quantity;
-        if (delta !== 0) await this.postStockDelta(tx, store, skuCode, delta);
+        if (delta === 0) return;
+        const posted = await this.postStockDelta(tx, store, skuCode, delta);
+        if (!posted) return; // item not mapped yet — retry this delta on the next pull
         snap.quantity = quantity;
         await snapRepo.save(snap);
+      } else if (quantity === 0) {
+        await snapRepo.save(snapRepo.create({ store, skuCode, quantity }));
       } else {
-        // First time we've ever seen this (store, sku) — seed the baseline only.
-        // Posting the full quantity as a Day-1 adjustment would just be noise.
+        // First time we've ever seen this (store, sku): post ERP's current
+        // quantity as an opening-balance adjustment so cash-van's stock actually
+        // starts matching ERP. (Previously this only seeded the baseline without
+        // posting, which permanently hid the opening quantity from cash-van's
+        // stock ledger — see catchUpMovements() below for the intentional,
+        // explicit "reset without replay" version of this seed-only behavior.)
+        const posted = await this.postStockDelta(tx, store, skuCode, quantity);
+        if (!posted) return; // item not mapped yet — retry as first-sight again next pull
         await snapRepo.save(snapRepo.create({ store, skuCode, quantity }));
       }
     });
   }
 
-  /** Post a generic IN/OUT stock-adjustment voucher for a net quantity change. */
+  /**
+   * Post a generic IN/OUT stock-adjustment voucher for a net quantity change.
+   * Returns false (and posts nothing) if the item isn't mapped on cash-van's
+   * side yet — callers must NOT advance their baseline in that case, so the
+   * delta is retried on a later sync instead of being silently lost.
+   */
   private async postStockDelta(
     tx: EntityManager,
     store: string,
     skuCode: string,
     delta: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const into = delta > 0;
     const abs = Math.abs(delta);
     const kind = into ? 'IN' : 'OUT';
     const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: skuCode } });
     const itemNumber = map?.localId ?? skuCode;
     const item = await this.items.findOne({ where: { itemNumber } });
-    if (!item) return; // unknown item on cash-van's side — nothing to post against
+    if (!item) return false; // unknown item on cash-van's side — nothing to post against
 
     const voucherNumber = `ERP-VS-${randomUUID()}`;
     const headerRepo = tx.getRepository(VoucherHeader);
@@ -821,6 +845,7 @@ export class ErpSyncService {
         netTotal: '0',
       }),
     );
+    return true;
   }
 
   /**
