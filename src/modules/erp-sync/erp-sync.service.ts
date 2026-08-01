@@ -238,8 +238,12 @@ export class ErpSyncService {
   async onVoucherPosted(p: { voucherNumber: string; transKind: string }): Promise<void> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
     if (!cfg?.enabled) return;
-    // Manual-export mode: don't auto-push — the voucher waits in the ERP Export page.
-    if (!cfg.directExport) return;
+    // Always auto-push (owner decision). `directExport` used to park the voucher
+    // in the ERP Export page instead; a voucher that posted but never reached the
+    // ERP is invisible until someone remembers to drain that queue, so the push is
+    // now unconditional. The Export page still works for re-sending by hand, and
+    // the outbox stays idempotent on externalId, so a manual re-send can't
+    // duplicate an invoice the auto-push already created.
     // Never push back a voucher we mirrored IN from the ERP (loop guard).
     if (p.voucherNumber.startsWith('ERP-')) return;
     const kind = OUTBOX_KIND_BY_TRANS[p.transKind];
@@ -396,8 +400,7 @@ export class ErpSyncService {
   async onCollectionConfirmed(p: { collectionId: string }): Promise<void> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
     if (!cfg?.enabled) return;
-    // Manual-export mode: don't auto-push — the collection waits in the ERP Export page.
-    if (!cfg.directExport) return;
+    // Always auto-push — see onVoucherPosted.
     await this.outbox.enqueue('PAYMENT', p.collectionId);
   }
 
