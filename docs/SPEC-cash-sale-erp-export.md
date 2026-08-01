@@ -287,30 +287,32 @@ The discount therefore always survives to the voucher, and `erp-outbox` has alwa
 sent the resolved per-line `discountValue` (which already includes that line's
 share of any header-level discount), so it always reaches the ERP.
 
-### Why the permission keys still exist
+### The permission is a UI switch, not enforcement
 
-Installed FlowVan builds decide whether to even RENDER the discount input from
-`session.can("vouchers.discount.direct")`. Deleting the server check alone would
-have left older APKs hiding the field. So `AuthService` projects the key set on
-the way out (`effectiveSalesmanPermKeys`): `direct` is always advertised, and the
-`approval` / `max:` keys are stripped. Stored `users.permissions` is untouched —
-this is a read-time projection, so re-gating later is a one-line revert with no
-data migration.
+`vouchers.discount.direct` still exists and still matters — it decides whether
+the app SHOWS the discount fields in the item dialog. What it no longer does is
+gate the save: a discount that reaches the server is accepted from any rep.
 
-`VoucherViewModel` also hardcodes `canDiscount = true` so future builds don't
-depend on the projection.
+The two halves are deliberately separate:
 
-### Trade-off accepted
+| Layer | Behaviour |
+|---|---|
+| Dashboard toggle → `users.permissions` | Admin decides whether the rep sees the field |
+| App (`VoucherState.canDiscount`) | Reads that key; hides the fields when absent |
+| Backend (`enforceSalesmanPolicy`) | Never rejects a discount, whatever the key says |
 
-There is now **no margin control and no approval trail on discounts**. A rep can
-discount 100% and it posts, mirrors to the ERP, and reduces revenue with no
-second pair of eyes. Reinstating the control means restoring section 2 of
-`enforceSalesmanPolicy`, dropping the projection, and re-listing the two keys in
-`SalesmanDrawer` — the tests in `vouchers/discount-policy.spec.ts` and
-`common/constants/permissions.spec.ts` document the current behaviour precisely
-enough to invert.
+Permission keys are handed to the app exactly as stored — there is no projection
+rewriting them — so toggling the switch in the dashboard reaches the rep on their
+next login or catalog refresh.
+
+An earlier iteration force-added the key in `AuthService` so the field would show
+everywhere. That was wrong: it took the switch away from the admin. Removed.
 
 ### Dashboard
 
-The two discount toggles and the max-% input were removed from the rep/user
-drawers. A toggle that cannot change the outcome is worse than no toggle.
+The "Apply discounts" toggle (`vouchers.discount.direct`) remains, and its hint
+says what it now means: *show discount fields in the app*.
+
+The "needs approval" toggle and the max-% input were removed. That approval flow
+no longer exists and the cap is enforced nowhere, so listing them would promise
+enforcement nothing implements.
