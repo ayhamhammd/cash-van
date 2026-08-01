@@ -483,8 +483,9 @@ export class OffersEngineService {
    * ignores the multiplier. Capped at `maxAmountFils` (no natural upper bound
    * otherwise); the per-line clamp to the line gross still prevents a negative net.
    *
-   * BUNDLE pays a LUMP SUM per completed group instead of a per-unit rate:
-   * `total = base × floor(count / itemsPerStep)`, capped at `maxAmountFils` as a
+   * BUNDLE pays a LUMP SUM per completed group instead of a per-unit rate: the
+   * first group lands at the reward's minQty and each `itemsPerStep` above it
+   * adds another, capped at `maxAmountFils` as a
    * TOTAL. It is returned divided by `count` so the caller's existing per-line
    * `perUnit × lineQty` machinery distributes the lump sum across the offer's lines
    * proportionally (and every line/gross clamp still applies). The division is left
@@ -500,7 +501,13 @@ export class OffersEngineService {
   ): number {
     if (reward.mode === 'BUNDLE') {
       const per = reward.itemsPerStep && reward.itemsPerStep > 0 ? reward.itemsPerStep : 1;
-      const groups = Math.floor(count / per);
+      // The FIRST group completes at `anchor` (the reward's minQty), and every
+      // `per` items after that adds another. Counting plain floor(count / per)
+      // ignored minQty entirely, so an offer set to start at 1 with a step of 2
+      // paid nothing until the 2nd unit. Falling back to `per` when there is no
+      // anchor keeps the old floor(count / per) behaviour exactly.
+      const firstAt = anchor >= 1 ? anchor : per;
+      const groups = count < firstAt ? 0 : 1 + Math.floor((count - firstAt) / per);
       if (groups <= 0 || count <= 0) return 0;
       const total = reward.baseAmountFils * groups;
       const cap = reward.maxAmountFils ?? Number.POSITIVE_INFINITY;

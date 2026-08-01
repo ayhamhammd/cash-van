@@ -378,6 +378,51 @@ describe('OffersEngineService', () => {
     ).toHaveLength(0);
   });
 
+  it('BUNDLE with minQty 1 pays from the FIRST unit, not the second', async () => {
+    // Reported from the field: an offer set to start at 1 paid nothing until the
+    // 2nd unit, because groups were counted as floor(qty / itemsPerStep) and so
+    // ignored minQty completely.
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: {
+        kind: 'ITEM_AMOUNT_DISCOUNT',
+        minQty: 1,
+        // 400 rather than the live 1050: at qty 1 the line gross is only 1000
+        // fils, and the per-line clamp would cap the discount and hide the bug.
+        baseAmountFils: 400,
+        mode: 'BUNDLE',
+        itemsPerStep: 2,
+      },
+    };
+    const disc = async (q: number) =>
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: q }])).lines[0]
+        ?.lineDiscountFils ?? 0;
+    expect(await disc(1)).toBe(400); // was 0
+    expect(await disc(2)).toBe(400);
+    expect(await disc(3)).toBe(800); // one full step past the anchor
+    expect(await disc(5)).toBe(1200);
+  });
+
+  it('BUNDLE with minQty 1 and step 1 pays on every unit', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: {
+        kind: 'ITEM_AMOUNT_DISCOUNT',
+        minQty: 1,
+        baseAmountFils: 500,
+        mode: 'BUNDLE',
+        itemsPerStep: 1,
+      },
+    };
+    const disc = async (q: number) =>
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: q }])).lines[0]
+        ?.lineDiscountFils ?? 0;
+    expect(await disc(1)).toBe(500);
+    expect(await disc(3)).toBe(1500);
+  });
+
   it('ITEM_AMOUNT_DISCOUNT BUNDLE spreads ONE lump sum across the whole item set', async () => {
     const offer: Partial<Offer> = {
       type: 'ITEM_QTY_REWARD',
