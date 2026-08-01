@@ -104,15 +104,30 @@ export class ErpOutboxService {
   @Interval(DRAIN_INTERVAL_MS)
   async drain(): Promise<void> {
     if (this.draining) return;
-    const cfg = await this.settings.getErpConfig().catch(() => null);
+    // Keep the error. getErpConfig() THROWS when the stored API key can't be
+    // decrypted — which is what happens if JWT_SECRET or the KMS key changes
+    // between deploys. Swallowing it into `null` made that indistinguishable
+    // from "ERP is switched off", so a redeploy could silently stall every
+    // voucher in the queue and point the operator at the wrong setting.
+    let cfg: Awaited<ReturnType<SettingsService['getErpConfig']>> | null = null;
+    let cfgError: string | null = null;
+    try {
+      cfg = await this.settings.getErpConfig();
+    } catch (e) {
+      cfgError = e instanceof Error ? e.message : String(e);
+    }
     if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) {
       const waiting = await this.outbox.count({ where: { status: 'pending' } }).catch(() => 0);
       if (waiting > 0) {
-        const missing = !cfg?.enabled
-          ? 'ERP sync is switched OFF in Settings'
-          : !cfg.baseUrl
-            ? 'ERP base URL is not set'
-            : 'ERP API key is not set';
+        const missing = cfgError
+          ? `the ERP settings could not be read (${cfgError}). If the API key ` +
+            'cannot be decrypted, re-enter it in Settings → ERP — a changed ' +
+            'JWT_SECRET or KMS key invalidates the stored value'
+          : !cfg?.enabled
+            ? 'ERP sync is switched OFF in Settings'
+            : !cfg.baseUrl
+              ? 'ERP base URL is not set'
+              : 'ERP API key is not set';
         this.logger.warn(
           `${waiting} voucher(s) stuck in the outbox: ${missing}. ` +
             'They will push automatically once the ERP connection is complete.',
