@@ -92,12 +92,34 @@ export class ErpOutboxService {
     return this.outbox.findOneByOrFail({ id });
   }
 
-  /** Drain due rows every 30s when ERP mode is on. */
+  /**
+   * Drain due rows on the ERP_OUTBOX_DRAIN_MS interval.
+   *
+   * When the ERP connection is incomplete this used to return silently, so a
+   * queue full of `pending` vouchers looked identical to an empty one: nothing
+   * reached the ERP and nothing said why. It now names the missing piece — but
+   * only when rows are actually waiting, so a site with ERP switched off on
+   * purpose doesn't spam its log every interval.
+   */
   @Interval(DRAIN_INTERVAL_MS)
   async drain(): Promise<void> {
     if (this.draining) return;
     const cfg = await this.settings.getErpConfig().catch(() => null);
-    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return;
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) {
+      const waiting = await this.outbox.count({ where: { status: 'pending' } }).catch(() => 0);
+      if (waiting > 0) {
+        const missing = !cfg?.enabled
+          ? 'ERP sync is switched OFF in Settings'
+          : !cfg.baseUrl
+            ? 'ERP base URL is not set'
+            : 'ERP API key is not set';
+        this.logger.warn(
+          `${waiting} voucher(s) stuck in the outbox: ${missing}. ` +
+            'They will push automatically once the ERP connection is complete.',
+        );
+      }
+      return;
+    }
     this.draining = true;
     try {
       const due = await this.outbox.find({
