@@ -745,9 +745,16 @@ export class VouchersService implements OnModuleInit {
           unitBaseQty: p.unitFactor,
           signedQty: p.move.signedQty.toString(),
           total: filsToJod(p.res.netFils), // line net (tax base, post-discount)
-          // Tobacco line total = discounted net + tobacco NET tax (added on top);
-          // otherwise the GST-inclusive line total from the money engine.
-          netTotal: filsToJod(tob ? p.res.netFils + tob.netTaxAmount : p.res.totalFils),
+          // Tobacco line total = discounted net + tobacco NET tax, but ONLY under
+          // EXCLUSIVE — under INCLUSIVE the entered price already contains it, so
+          // adding it here would make the lines sum higher than the header (which
+          // gates the same way). Non-tobacco uses the money engine's line total,
+          // which is already tax-inclusive in both modes.
+          netTotal: filsToJod(
+            tob
+              ? p.res.netFils + (taxMode === 'INCLUSIVE' ? 0 : tob.netTaxAmount)
+              : p.res.totalFils,
+          ),
           // ── Tobacco snapshot (frozen at sale time) ──────────────────────────
           isTobaccoLine: tob !== null,
           tobaccoTaxProfileId: ctx?.profile.id ?? null,
