@@ -464,14 +464,23 @@ export class OffersService {
     }
   }
 
-  /** Validation for the amount-off fields (base/mode/dynamic), mirroring the
-   *  percentage rules but in fils. */
+  /**
+   * Validation for the amount-off fields (base/mode/dynamic), mirroring the
+   * percentage rules but in fils. BUNDLE is amount-only (a lump sum per completed
+   * group has no percentage analogue), so it's not accepted by assertPercentFields.
+   */
   private assertAmountFields(reward: OfferRewardDto): void {
     if (reward.baseAmountFils == null || reward.baseAmountFils < 0) {
       throw new BadRequestException('reward.baseAmountFils must be ≥ 0 (fils)');
     }
-    if (reward.mode !== 'STATIC' && reward.mode !== 'DYNAMIC') {
-      throw new BadRequestException('reward.mode must be STATIC or DYNAMIC');
+    if (
+      reward.mode !== 'STATIC' &&
+      reward.mode !== 'DYNAMIC' &&
+      reward.mode !== 'BUNDLE'
+    ) {
+      throw new BadRequestException(
+        'reward.mode must be STATIC, DYNAMIC or BUNDLE',
+      );
     }
     if (reward.mode === 'DYNAMIC') {
       if (reward.multiplier == null || reward.multiplier <= 0) {
@@ -490,6 +499,13 @@ export class OffersService {
       ) {
         throw new BadRequestException(
           'reward.maxAmountFils must be ≥ baseAmountFils (fils)',
+        );
+      }
+    }
+    if (reward.mode === 'BUNDLE') {
+      if (reward.itemsPerStep == null || reward.itemsPerStep < 1) {
+        throw new BadRequestException(
+          'BUNDLE reward requires reward.itemsPerStep ≥ 1',
         );
       }
     }

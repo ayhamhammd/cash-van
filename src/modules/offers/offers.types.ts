@@ -32,8 +32,18 @@ export const PAYMENT_TYPES: PaymentType[] = [
 export type PaymentCondition = 'CASH' | 'CREDIT';
 export const PAYMENT_CONDITIONS: PaymentCondition[] = ['CASH', 'CREDIT'];
 
-export type DiscountMode = 'STATIC' | 'DYNAMIC';
-export const DISCOUNT_MODES: DiscountMode[] = ['STATIC', 'DYNAMIC'];
+/**
+ * How an amount/percent reward scales with quantity:
+ * - `STATIC`  — flat rate, never scales.
+ * - `DYNAMIC` — the PER-UNIT rate steps up every `itemsPerStep` units above the
+ *   threshold, so the line total grows with every extra unit.
+ * - `BUNDLE`  — a LUMP SUM per completed group of `itemsPerStep` units: the line
+ *   total is `base × floor(qty / itemsPerStep)` and only changes when a new group
+ *   completes (qty 2→1×, 3→1×, 4→2×, 5→2×). Amount rewards only; percent rewards
+ *   treat it as STATIC.
+ */
+export type DiscountMode = 'STATIC' | 'DYNAMIC' | 'BUNDLE';
+export const DISCOUNT_MODES: DiscountMode[] = ['STATIC', 'DYNAMIC', 'BUNDLE'];
 
 export type RewardKind =
   | 'LINE_PERCENT_DISCOUNT'
@@ -211,24 +221,26 @@ export interface ItemPercentDiscountReward {
 
 /**
  * ITEM_QTY_REWARD discount: once the combined selected-item qty reaches `minQty`,
- * a fixed amount (fils) comes off EACH UNIT of the selected items — the amount-off
- * twin of ItemPercentDiscountReward. STATIC = flat baseAmountFils per unit;
+ * a fixed amount (fils) comes off the selected items — the amount-off twin of
+ * ItemPercentDiscountReward. STATIC = flat baseAmountFils per unit;
  * DYNAMIC = baseAmountFils × (1 + multiplier × floor((qty − minQty) / itemsPerStep))
- * capped at `maxAmountFils`. The per-line discount is amount × line qty, clamped to
- * the line gross so it can never drive the line below zero.
+ * per unit, capped at `maxAmountFils`; BUNDLE = a LUMP SUM of
+ * baseAmountFils × floor(qty / itemsPerStep) for the whole selected set (see
+ * {@link DiscountMode}), capped at `maxAmountFils` as a TOTAL. The per-line discount
+ * is clamped to the line gross so it can never drive the line below zero.
  */
 export interface ItemAmountDiscountReward {
   kind: 'ITEM_AMOUNT_DISCOUNT';
   /** Threshold on the combined selected-item qty. */
   minQty: number;
-  /** Amount off per unit, in fils. */
+  /** STATIC/DYNAMIC: amount off per unit, in fils. BUNDLE: amount per completed group. */
   baseAmountFils: number;
   mode: DiscountMode;
   /** DYNAMIC only: fraction of base added per step, e.g. 0.5. */
   multiplier?: number;
-  /** DYNAMIC only: items per multiplication step, e.g. 6. */
+  /** DYNAMIC: units per multiplication step. BUNDLE: units per paid group, e.g. 2. */
   itemsPerStep?: number;
-  /** DYNAMIC only: cap on the effective per-unit amount, in fils (absolute cap). */
+  /** DYNAMIC: cap on the per-unit amount (fils). BUNDLE: cap on the TOTAL (fils). */
   maxAmountFils?: number;
   /**
    * Optional cap on the per-unit amount as a % of the item's unit price (0–100),

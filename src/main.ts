@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, VersioningType, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import {
   DocumentBuilder,
   SwaggerModule,
@@ -12,6 +13,7 @@ import compression from 'compression';
 import cookieParser from 'cookie-parser';
 
 import { AppModule } from './app.module';
+import { BODY_LIMIT } from './common/constants/body-limit';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
@@ -57,9 +59,18 @@ function applyStandardErrorResponses(doc: OpenAPIObject): void {
 async function bootstrap(): Promise<void> {
   // rawBody: keeps the exact request bytes on req.rawBody (alongside parsed body)
   // so HMAC webhook signatures can be verified over the original payload.
-  const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true,
+    rawBody: true,
+  });
   const config = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
+
+  // Express defaults to a 100 kb JSON body, which is far too small for the
+  // embedded logo data: URLs quote templates carry. Keep it bounded, but wide
+  // enough for a ~1 MB logo plus its base64 overhead and the rest of the body.
+  app.useBodyParser('json', { limit: BODY_LIMIT });
+  app.useBodyParser('urlencoded', { limit: BODY_LIMIT, extended: true });
 
   app.use(helmet());
   app.use(compression());

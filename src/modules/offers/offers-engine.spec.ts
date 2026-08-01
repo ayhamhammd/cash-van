@@ -22,6 +22,7 @@ describe('OffersEngineService', () => {
     offers: Partial<Offer>[],
     taxCalcMethod: 'INCLUSIVE' | 'EXCLUSIVE' = 'EXCLUSIVE',
     itemList: typeof items = items,
+    customer: { customerNumber: string; category?: string } | null = null,
   ): OffersEngineService {
     const full = offers.map((o, i) => ({
       id: o.id ?? `off-${i}`,
@@ -48,7 +49,7 @@ describe('OffersEngineService', () => {
     const offersRepo = { find: jest.fn().mockResolvedValue(full) } as any;
     const redemptionsRepo = { createQueryBuilder: jest.fn(() => chain) } as any;
     const itemsRepo = { find: jest.fn().mockResolvedValue(itemList) } as any;
-    const customersRepo = { findOne: jest.fn().mockResolvedValue(null) } as any;
+    const customersRepo = { findOne: jest.fn().mockResolvedValue(customer) } as any;
     const vouchersRepo = { createQueryBuilder: jest.fn(() => chain) } as any;
     const settingsRepo = {
       findOne: jest.fn().mockResolvedValue({ id: 1, taxCalcMethod }),
@@ -348,6 +349,127 @@ describe('OffersEngineService', () => {
     const res = await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 3 }]);
     expect(res.lines[0].lineDiscountFils).toBe(3000); // gross, not 6000
     expect(res.lines[0].lineNetFils).toBe(0);
+  });
+
+  it('ITEM_AMOUNT_DISCOUNT BUNDLE pays a lump sum per completed group, not per unit', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      // The live "ال دي سلفر" rule: 1.05 JOD off per 2 bought.
+      reward: {
+        kind: 'ITEM_AMOUNT_DISCOUNT',
+        minQty: 2,
+        baseAmountFils: 1050,
+        mode: 'BUNDLE',
+        itemsPerStep: 2,
+      },
+    };
+    const disc = async (q: number) =>
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: q }])).lines[0]
+        ?.lineDiscountFils ?? 0;
+    expect(await disc(2)).toBe(1050);
+    expect(await disc(3)).toBe(1050); // partial pair earns nothing extra
+    expect(await disc(4)).toBe(2100);
+    expect(await disc(5)).toBe(2100);
+    expect(await disc(6)).toBe(3150);
+    // Below minQty the offer does not apply at all.
+    expect(
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 1 }])).appliedOffers,
+    ).toHaveLength(0);
+  });
+
+  it('ITEM_AMOUNT_DISCOUNT BUNDLE spreads ONE lump sum across the whole item set', async () => {
+    const offer: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A', 'B'] },
+      reward: {
+        kind: 'ITEM_AMOUNT_DISCOUNT',
+        minQty: 2,
+        baseAmountFils: 400,
+        mode: 'BUNDLE',
+        itemsPerStep: 2,
+      },
+    };
+    // Combined qty 4 → 2 groups → 800 total, split across the lines (not 800 each).
+    const res = await makeEngine([offer]).evaluate([
+      { itemNumber: 'A', qty: 2 },
+      { itemNumber: 'B', qty: 2 },
+    ]);
+    expect(res.totals.lineDiscountFils).toBe(800);
+    expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(400);
+    expect(res.lines.find((l) => l.itemNumber === 'B')!.lineDiscountFils).toBe(400);
+  });
+
+  it('a customer-SPECIFIC offer beats a general ALL offer even when its discount is LOWER', async () => {
+    // Mirrors the live setup: the same item is covered by a general table offer and
+    // a customer-scoped one. The specific offer must win for that customer even
+    // though it discounts less, otherwise scoping an offer to a customer is pointless.
+    const general: Partial<Offer> = {
+      id: 'general',
+      name: 'general',
+      type: 'PAYMENT_METHOD_DISCOUNT',
+      trigger: { paymentCondition: 'CASH' },
+      reward: {
+        kind: 'TABLE_AMOUNT_DISCOUNT',
+        entries: [{ itemNumber: 'A', amountFils: 300 }],
+      },
+      eligibility: { customerScope: 'ALL' },
+    };
+    const specific: Partial<Offer> = {
+      id: 'specific',
+      name: 'specific',
+      type: 'PAYMENT_METHOD_DISCOUNT',
+      trigger: { paymentCondition: 'CASH' },
+      reward: {
+        kind: 'TABLE_AMOUNT_DISCOUNT',
+        entries: [{ itemNumber: 'A', amountFils: 200 }],
+      },
+      eligibility: { customerScope: 'SPECIFIC', customerNumbers: ['1370'] },
+    };
+    const engine = makeEngine([general, specific], 'EXCLUSIVE', items, {
+      customerNumber: '1370',
+    });
+    const res = await engine.evaluate([{ itemNumber: 'A', qty: 2 }], {
+      paymentMethod: 'CASH',
+      customerNumber: '1370',
+    });
+    expect(res.lines[0].lineDiscountFils).toBe(400); // 200/unit × 2, NOT 600
+    expect(res.appliedOffers.map((o) => o.offerId)).toEqual(['specific']);
+  });
+
+  it('a general offer still applies to a customer the specific offer does not target', async () => {
+    const general: Partial<Offer> = {
+      id: 'general',
+      name: 'general',
+      type: 'PAYMENT_METHOD_DISCOUNT',
+      trigger: { paymentCondition: 'CASH' },
+      reward: {
+        kind: 'TABLE_AMOUNT_DISCOUNT',
+        entries: [{ itemNumber: 'A', amountFils: 300 }],
+      },
+      eligibility: { customerScope: 'ALL' },
+    };
+    const specific: Partial<Offer> = {
+      id: 'specific',
+      name: 'specific',
+      type: 'PAYMENT_METHOD_DISCOUNT',
+      trigger: { paymentCondition: 'CASH' },
+      reward: {
+        kind: 'TABLE_AMOUNT_DISCOUNT',
+        entries: [{ itemNumber: 'A', amountFils: 200 }],
+      },
+      eligibility: { customerScope: 'SPECIFIC', customerNumbers: ['1370'] },
+    };
+    // A different customer → the SPECIFIC offer is filtered out by eligibility.
+    const engine = makeEngine([general, specific], 'EXCLUSIVE', items, {
+      customerNumber: '9999',
+    });
+    const res = await engine.evaluate([{ itemNumber: 'A', qty: 2 }], {
+      paymentMethod: 'CASH',
+      customerNumber: '9999',
+    });
+    expect(res.lines[0].lineDiscountFils).toBe(600); // 300/unit × 2
+    expect(res.appliedOffers.map((o) => o.offerId)).toEqual(['general']);
   });
 
   it('ITEM_QTY_REWARD with a payment gate only applies on the matching payment', async () => {

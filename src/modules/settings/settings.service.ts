@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Repository } from 'typeorm';
@@ -9,6 +9,7 @@ import { UpdateAccountingDto } from './dto/update-accounting.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
 import { UpdateAiDto } from './dto/update-ai.dto';
+import { validateAiApiKey } from './ai-key.util';
 import {
   BASE_VOUCHER_TEMPLATE,
   VoucherTemplate,
@@ -463,6 +464,10 @@ export class SettingsService {
     if (dto.provider !== undefined) row.aiProvider = dto.provider;
     if (dto.model !== undefined) row.aiModel = dto.model.trim() || null;
     if (dto.apiKey) {
+      // Catch an obviously-wrong key here, where the admin can still see what
+      // they pasted — otherwise it surfaces as a vendor 401 mid-chat.
+      const problem = validateAiApiKey(dto.provider ?? row.aiProvider ?? undefined, dto.apiKey);
+      if (problem) throw new BadRequestException(problem);
       row.aiApiKeyEncrypted = encryptSecret(dto.apiKey);
       row.aiApiKeyLast4 = maskSecret(dto.apiKey).slice(-4);
     }

@@ -129,7 +129,15 @@ export class ErpOutboxService {
       row.status = 'posted';
       row.error = null;
       row.resultRef = this.extractResultRef(lastData);
+
+      // The ERP posts the GL entry in a savepoint: a missing posting rule skips
+      // the journal but still returns 201, so a misconfigured org would other-
+      // wise produce sales that look synced here and are invisible in the GL.
+      const posting = this.extractPostingInfo(lastData);
+      row.journalId = posting.journalId;
+      row.paymentSkipped = posting.paymentSkipped;
       await this.outbox.save(row);
+      this.warnOnPostingGap(row);
       if (row.kind === 'SALE_INVOICE' && row.resultRef) {
         await this.mapVoucher(row.ref, row.resultRef);
         // A partially-paid sale posts as CREDIT; settle its paid portion with a
@@ -441,6 +449,31 @@ export class ErpOutboxService {
     return { amount, paymentMethod: ERP_PAYMENT_METHOD[dominant] ?? 'CASH' };
   }
 
+  /**
+   * Quantity in the shape the ERP accepts: `z.number().int().positive()`.
+   *
+   * Van lines are `numeric(14,3)`, so a fractional or zero quantity is storable
+   * here but rejected outright by the ERP. Rounding it would silently desync the
+   * two systems' totals — the van's invoice and the ERP's would disagree on what
+   * was sold — so this throws instead, naming the item. pushOne turns that into a
+   * failed outbox row whose `error` says exactly what to fix, rather than the
+   * opaque "HTTP 400" the ERP would otherwise return.
+   */
+  private erpQty(raw: unknown, itemNumber: string, voucherNumber: string): number {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new Error(
+        `${voucherNumber}: item ${itemNumber} has quantity "${String(raw)}" — the ERP requires a positive quantity`,
+      );
+    }
+    if (!Number.isInteger(n)) {
+      throw new Error(
+        `${voucherNumber}: item ${itemNumber} has fractional quantity ${n} — the ERP only accepts whole units, and rounding would desync the invoice totals`,
+      );
+    }
+    return n;
+  }
+
   private async buildSale(
     voucherNumber: string,
   ): Promise<{ path: string; body: Record<string, unknown> } | null> {
@@ -454,7 +487,7 @@ export class ErpOutboxService {
         const baseQty = l.unitBaseQty && l.unitBaseQty > 0 ? l.unitBaseQty : 1;
         const base = {
           skuCode: l.itemNumber, // cash-van item_number == ERP sku (set on inbound sync)
-          quantity: Number(l.itemQty) || 0,
+          quantity: this.erpQty(l.itemQty, l.itemNumber, voucherNumber),
           unitPrice: (Number(l.unitPrice) || 0) / baseQty, // JOD major, per base piece
           discount: Number(l.discountValue) || 0, // resolved line discount (incl header share)
         };
@@ -513,7 +546,7 @@ export class ErpOutboxService {
         originalInvoiceNumber,
         lines: lines.map((l) => ({
           skuCode: l.itemNumber,
-          quantity: Number(l.itemQty) || 0,
+          quantity: this.erpQty(l.itemQty, l.itemNumber, voucherNumber),
         })),
       },
     };
@@ -616,6 +649,53 @@ export class ErpOutboxService {
         note: s.note ?? undefined,
       },
     };
+  }
+
+  /**
+   * The ERP's GL outcome for a pushed document.
+   *
+   * Both fields are documented on the sales-invoice response only, so a missing
+   * `journalId` elsewhere means "not reported", never "not posted" — which is
+   * why `warnOnPostingGap` restricts its alarm to SALE_INVOICE.
+   */
+  private extractPostingInfo(data: unknown): {
+    journalId: string | null;
+    paymentSkipped: boolean;
+  } {
+    if (!data || typeof data !== 'object') {
+      return { journalId: null, paymentSkipped: false };
+    }
+    const top = data as Record<string, unknown>;
+    const d = (top.data as Record<string, unknown> | undefined) ?? top;
+    return {
+      journalId: typeof d?.journalId === 'string' ? d.journalId : null,
+      paymentSkipped: d?.paymentSkipped === true,
+    };
+  }
+
+  /**
+   * Surface the two silent failure modes the ERP deliberately does not raise as
+   * errors. Neither is retryable — both need a human to fix ERP configuration —
+   * so this logs rather than failing the row, which is already `posted`.
+   */
+  private warnOnPostingGap(row: ErpOutbox): void {
+    if (row.kind !== 'SALE_INVOICE') return;
+    if (!row.journalId) {
+      this.logger.warn(
+        `Sale ${row.ref} (ERP ${row.resultRef ?? '?'}) posted with NO GL journal. ` +
+          'The invoice and stock committed, but nothing reached the ledger — the ' +
+          'org likely has no payment-method account mapped ' +
+          '(PAYMENT_METHOD_ACCOUNT_NOT_CONFIGURED). Fix it in the ERP under ' +
+          'Settings → Finance → Payment Method Accounts. Do NOT re-push.',
+      );
+    }
+    if (row.paymentSkipped) {
+      this.logger.warn(
+        `Sale ${row.ref} (ERP ${row.resultRef ?? '?'}) was booked as CREDIT: the ERP ` +
+          'refused the inline payment, most likely an approval workflow. Cash was ' +
+          'collected in the van but is not in the ERP books.',
+      );
+    }
   }
 
   private extractResultRef(data: unknown): string | null {

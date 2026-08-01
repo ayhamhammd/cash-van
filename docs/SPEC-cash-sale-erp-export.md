@@ -195,3 +195,122 @@ Add a unit test on `buildSale` asserting the body carries the right
 - `src/modules/erp-sync/__tests__/erp-outbox.buildSale.spec.ts` — new unit test.
 - (Phase 2) split-payment receipt companion in the outbox.
 - **ERP:** none.
+
+---
+
+## 11. Addendum — ERP posting-variant changes (ec9bfea, 3f47ac6, 668a94d)
+
+The ERP now picks a **posting variant** per invoice instead of always debiting
+A/R and then clearing it with a second journal.
+
+### Why this spec still holds
+
+The variant is chosen from `paymentType` + `paymentMethod` — and crucially,
+**`paymentType: "CASH"` alone is read as a CREDIT sale**; a payment method must
+also be present. `salePaymentFields()` has always emitted the two together for
+fully-paid sales (§5), so van cash sales pick up the new single journal:
+
+```
+DR  <payment method account>   total     ← was: DR A/R, then a second journal
+CR  Sales Revenue              net
+CR  Tax Payable                tax
+```
+
+Split sales are unaffected: the invoice still goes as `CREDIT` and the paid part
+is settled by the companion `/receipts` push, which still posts DR bank / CR A/R
+— correct, because there is a real receivable to clear.
+
+### The failure mode this addendum exists for
+
+The ERP wraps journal posting in a savepoint. If the org has no payment-method
+account mapped, it logs `PAYMENT_METHOD_ACCOUNT_NOT_CONFIGURED`, **skips the
+journal, and still returns 201** with the invoice, stock movements and payment
+row all committed. `journalId` comes back `null`.
+
+That is not retryable and must never be re-pushed — a retry would duplicate the
+invoice if `externalId` idempotency ever lapsed. It is also invisible: the push
+succeeds, the outbox row reads `posted`, and the sale simply never reaches the
+general ledger.
+
+So `erp_outbox` now records the outcome:
+
+| Column | Meaning |
+|---|---|
+| `journal_id` | ERP GL entry. `NULL` on a posted SALE_INVOICE = journal skipped. |
+| `payment_skipped` | ERP refused the inline payment (approval workflow) and booked the sale as credit. Cash was collected in the van but is not in the ERP books. |
+
+`warnOnPostingGap()` logs a warning for each case at push time. It fires **only**
+for `SALE_INVOICE`, because `journalId` is documented on that response alone — a
+missing value on `/receipts` or a sales return proves nothing (sales returns post
+no journal at all).
+
+### Finding affected sales
+
+```sql
+SELECT ref, result_ref, created_at
+FROM erp_outbox
+WHERE kind = 'SALE_INVOICE'
+  AND status = 'posted'
+  AND journal_id IS NULL
+  AND created_at >= '<date this migration was deployed>'
+ORDER BY created_at DESC;
+```
+
+The `created_at` bound is not optional: rows pushed **before** the migration also
+have `journal_id IS NULL` simply because the field wasn't captured then, and are
+indistinguishable from genuinely unposted ones. The partial index
+`idx_erp_outbox_unposted_journal` is keyed on `created_at` for exactly this.
+
+A non-empty result is an **ERP configuration** task (Settings → Finance →
+Payment Method Accounts), not a re-push.
+
+### Not adopted
+
+`4004 Sales Discount` / `4005 Purchase Discount`: the ERP can now book line
+discounts to their own account. This is opt-in per organisation and needs no
+change here — we already send per-line `discount`, and `totalDiscount` in the
+response is unchanged either way. It only affects the org's GL split.
+
+---
+
+## 12. Addendum — discounts ungated (owner decision)
+
+Discounts used to be gated three ways. All three are gone:
+
+| Was | Now |
+|---|---|
+| No `vouchers.discount.direct` → `403 DISCOUNT_NOT_ALLOWED` | Any salesman may discount |
+| Only `vouchers.discount.approval` → `403 APPROVAL_REQUIRED:VOUCHER_DISCOUNT`, routed to a manager | No approval step |
+| `vouchers.discount.max:<n>` → over-cap discounts bounced to approval | No cap |
+
+The discount therefore always survives to the voucher, and `erp-outbox` has always
+sent the resolved per-line `discountValue` (which already includes that line's
+share of any header-level discount), so it always reaches the ERP.
+
+### Why the permission keys still exist
+
+Installed FlowVan builds decide whether to even RENDER the discount input from
+`session.can("vouchers.discount.direct")`. Deleting the server check alone would
+have left older APKs hiding the field. So `AuthService` projects the key set on
+the way out (`effectiveSalesmanPermKeys`): `direct` is always advertised, and the
+`approval` / `max:` keys are stripped. Stored `users.permissions` is untouched —
+this is a read-time projection, so re-gating later is a one-line revert with no
+data migration.
+
+`VoucherViewModel` also hardcodes `canDiscount = true` so future builds don't
+depend on the projection.
+
+### Trade-off accepted
+
+There is now **no margin control and no approval trail on discounts**. A rep can
+discount 100% and it posts, mirrors to the ERP, and reduces revenue with no
+second pair of eyes. Reinstating the control means restoring section 2 of
+`enforceSalesmanPolicy`, dropping the projection, and re-listing the two keys in
+`SalesmanDrawer` — the tests in `vouchers/discount-policy.spec.ts` and
+`common/constants/permissions.spec.ts` document the current behaviour precisely
+enough to invert.
+
+### Dashboard
+
+The two discount toggles and the max-% input were removed from the rep/user
+drawers. A toggle that cannot change the outcome is worse than no toggle.

@@ -30,6 +30,27 @@ export const envValidationSchema = Joi.object({
 
   JOBS_ENABLED: Joi.boolean().default(true),
 
+  // Google Places key for the lead finder (server-side only). Optional: when
+  // absent the prospecting search endpoint reports 503 and the rest still runs.
+  GOOGLE_PLACES_API_KEY: Joi.string().allow('').default(''),
+  // ISO-3166 country used to bias free-text place lookup.
+  GOOGLE_PLACES_REGION: Joi.string().length(2).uppercase().default('JO'),
+
+  // Dashboard origin used to build public quote links inside outgoing messages.
+  PUBLIC_DASHBOARD_URL: Joi.string().uri().allow('').default(''),
+
+  // Self-hosted OpenWA gateway for WhatsApp outreach. All optional: with no
+  // URL the dashboard falls back to click-to-chat links.
+  WHATSAPP_GATEWAY_URL: Joi.string().uri().allow('').default(''),
+  WHATSAPP_API_KEY: Joi.string().allow('').default(''),
+  WHATSAPP_SESSION_ID: Joi.string().allow('').default(''),
+  WHATSAPP_COUNTRY_CODE: Joi.string()
+    .pattern(/^\d{1,4}$/)
+    .default('962'),
+  // Floors chosen to stay well inside what an unofficial session tolerates.
+  WHATSAPP_MIN_INTERVAL_MS: Joi.number().min(5000).default(20000),
+  WHATSAPP_DAILY_CAP: Joi.number().min(1).max(1000).default(150),
+
   // Rep-offline watchdog threshold (minutes of silence before alerting).
   REP_OFFLINE_THRESHOLD_MINUTES: Joi.number().min(2).default(10),
 
@@ -69,11 +90,17 @@ export const envValidationSchema = Joi.object({
   // Which LLM vendor drives the agent. The selected provider's API key is
   // required at runtime (a clean error is streamed if it's missing) — kept
   // optional in Joi so switching providers doesn't trip boot validation.
-  LLM_PROVIDER: Joi.string().valid('anthropic', 'gemini').default('anthropic'),
+  // 'openai' was missing here while configuration.ts and AiProviderResolver both
+  // supported it, so LLM_PROVIDER=openai failed Joi and the app refused to boot.
+  LLM_PROVIDER: Joi.string()
+    .valid('anthropic', 'gemini', 'openai')
+    .default('anthropic'),
   ANTHROPIC_API_KEY: Joi.string().allow('').optional(),
   AGENT_MODEL: Joi.string().default('claude-sonnet-4-6'),
   GEMINI_API_KEY: Joi.string().allow('').optional(),
   GEMINI_MODEL: Joi.string().default('gemini-2.5-flash'),
+  OPENAI_API_KEY: Joi.string().allow('').optional(),
+  OPENAI_MODEL: Joi.string().default('gpt-4o'),
   AGENT_MAX_TOKENS: Joi.number().default(4096),
   AGENT_MAX_ITERATIONS: Joi.number().default(8),
   AGENT_SQL_PREVIEW_ROWS: Joi.number().default(50),

@@ -9,6 +9,7 @@ import { RepsService } from '../reps/reps.service';
 import { LoginDto } from './dto/login.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 import { User } from '../users/entities/user.entity';
+import { effectiveSalesmanPermKeys } from '../../common/constants/permissions';
 
 export interface LoginResponse {
   accessToken: string;
@@ -61,7 +62,7 @@ export class AuthService {
     const repId = rep?.id ?? null;
 
     const permissions = this.extractPermissions(user);
-    const permKeys = user.permissions ?? [];
+    const permKeys = effectiveSalesmanPermKeys(user.permissions);
     const payload: JwtPayload = {
       sub: user.id,
       v: 2,
@@ -105,7 +106,7 @@ export class AuthService {
       role: user.role ?? 'viewer',
       userType: user.userType,
       permissions: this.extractPermissions(user),
-      permKeys: user.permissions ?? [],
+      permKeys: effectiveSalesmanPermKeys(user.permissions),
     };
   }
 

@@ -113,12 +113,14 @@ export const PERM_RETURN_DIRECT = 'vouchers.return.direct';
 export const PERM_RETURN_CREATE = 'vouchers.return.create';
 /** When set (with create), each return needs admin approval before it posts. */
 export const PERM_RETURN_APPROVAL = 'vouchers.return.approval';
-export const PERM_DISCOUNT_DIRECT = 'vouchers.discount.direct';
-/** May enter a discount, but it requires admin approval (blocks save until approved). */
-export const PERM_DISCOUNT_APPROVAL = 'vouchers.discount.approval';
 export const PERM_PRICE_OVERRIDE = 'vouchers.priceOverride';
-/** Prefix key encoding the max direct-discount %, e.g. "vouchers.discount.max:5". */
-export const PERM_DISCOUNT_MAX_PREFIX = 'vouchers.discount.max:';
+// The discount keys moved to common/constants/permissions.ts when discounts were
+// ungated — re-exported so existing importers keep working.
+export {
+  PERM_DISCOUNT_DIRECT,
+  PERM_DISCOUNT_APPROVAL,
+  PERM_DISCOUNT_MAX_PREFIX,
+} from '../../common/constants/permissions';
 
 /**
  * Canonical transaction kinds the app relies on. Ensured on every startup so a
@@ -691,12 +693,12 @@ export class VouchersService implements OnModuleInit {
       const need = new Map<string, number>();
       for (const p of prepared) {
         if (p.move.fromStoreNumber) {
-          const key = `${p.line.itemNumber} ${p.move.fromStoreNumber}`;
+          const key = `${p.line.itemNumber}\u0000${p.move.fromStoreNumber}`;
           need.set(key, (need.get(key) ?? 0) + p.baseQty);
         }
       }
       for (const [key, qty] of need) {
-        const sep = key.indexOf(' ');
+        const sep = key.indexOf('\u0000');
         const itemNumber = key.slice(0, sep);
         const store = key.slice(sep + 1);
         const available = await this.stockBalance(em, itemNumber, store);
@@ -1243,39 +1245,19 @@ export class VouchersService implements OnModuleInit {
       }
     }
 
-    // 2) Discounts (header + per-line), with an optional max-% cap
-    const gross = dto.transactions.reduce(
-      (s, l) => s + num(l.itemQty) * num(l.unitPrice),
-      0,
-    );
-    const lineDisc = dto.transactions.reduce(
-      (s, l) =>
-        s +
-        num(l.discountValue) +
-        (num(l.discountPercentage) / 100) * num(l.itemQty) * num(l.unitPrice),
-      0,
-    );
-    const headerDisc =
-      num(dto.totalDiscountValue) +
-      (num(dto.totalDiscountPercentage) / 100) * gross;
-    const totalDisc = lineDisc + headerDisc;
-    if (totalDisc > 0.0005) {
-      if (!has(PERM_DISCOUNT_DIRECT)) {
-        // No direct-discount: route to approval if allowed, else block outright.
-        if (has(PERM_DISCOUNT_APPROVAL)) {
-          throw new ForbiddenException('APPROVAL_REQUIRED:VOUCHER_DISCOUNT');
-        }
-        throw new ForbiddenException('DISCOUNT_NOT_ALLOWED');
-      }
-      const maxKey = keys.find((k) => k.startsWith(PERM_DISCOUNT_MAX_PREFIX));
-      if (maxKey) {
-        const maxPct = num(maxKey.slice(PERM_DISCOUNT_MAX_PREFIX.length));
-        const effPct = gross > 0 ? (totalDisc / gross) * 100 : 0;
-        if (effPct > maxPct + 1e-9) {
-          throw new ForbiddenException('APPROVAL_REQUIRED:VOUCHER_DISCOUNT');
-        }
-      }
-    }
+    // 2) Discounts — DELIBERATELY UNGATED (owner decision).
+    //
+    // Discounts used to require `vouchers.discount.direct`, otherwise the save
+    // was rejected with APPROVAL_REQUIRED:VOUCHER_DISCOUNT / DISCOUNT_NOT_ALLOWED
+    // and an optional `vouchers.discount.max:<n>` capped the percentage. Every
+    // salesman may now discount freely, at any amount, with no approval step, so
+    // the discount always survives to the voucher and therefore to the ERP
+    // export (erp-outbox sends the resolved per-line `discountValue`).
+    //
+    // The permission keys still exist in the catalog and are still advertised to
+    // the app (see AuthService), because installed builds read them to decide
+    // whether to even SHOW the discount inputs — removing the server check alone
+    // would leave older APKs hiding the field.
 
     // 3) Price overrides on SALE lines: flag only when the line UNDERCUTS
     // every legitimate price for the item (catalog, item-units, active price

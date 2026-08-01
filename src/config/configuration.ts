@@ -21,6 +21,11 @@ export default () => ({
   cors: {
     origins: process.env.CORS_ORIGINS ?? '*',
   },
+  // Origin of the office dashboard, used to build the public /q/<token> quote
+  // links that go out in WhatsApp messages. Deliberately NOT taken from the
+  // request: a client-supplied origin would let a caller mint links pointing
+  // anywhere while looking like they came from us.
+  publicDashboardUrl: (process.env.PUBLIC_DASHBOARD_URL ?? '').replace(/\/+$/, ''),
   storage: {
     localRoot: process.env.STORAGE_LOCAL_ROOT ?? './storage',
     publicBaseUrl: process.env.STORAGE_PUBLIC_BASE_URL ?? '/storage',
@@ -31,6 +36,33 @@ export default () => ({
   },
   jobs: {
     enabled: process.env.JOBS_ENABLED !== 'false',
+  },
+  // Google Places (lead finder). SERVER-SIDE ONLY — never expose this key to
+  // the browser. Unset = the prospecting search endpoint returns 503.
+  places: {
+    apiKey: process.env.GOOGLE_PLACES_API_KEY ?? '',
+    // Biases free-text place lookup to the country of operation, so "Sweifieh"
+    // resolves to the Amman district and not a namesake elsewhere.
+    regionCode: process.env.GOOGLE_PLACES_REGION ?? 'JO',
+  },
+  // Self-hosted OpenWA gateway (github.com/rmyndharis/OpenWA) used to send
+  // quote links on WhatsApp. Unset baseUrl = outreach falls back to
+  // click-to-chat links in the dashboard, and the send endpoint returns 503.
+  //
+  // The pacing defaults are deliberately slow. OpenWA drives an UNOFFICIAL
+  // WhatsApp session, and its own docs are blunt about it: blasting first-ever
+  // messages at numbers that never messaged you is the fastest way to get the
+  // number restricted, with no route to appeal. A few per minute is safe.
+  whatsapp: {
+    baseUrl: (process.env.WHATSAPP_GATEWAY_URL ?? '').replace(/\/+$/, ''),
+    apiKey: process.env.WHATSAPP_API_KEY ?? '',
+    sessionId: process.env.WHATSAPP_SESSION_ID ?? '',
+    /** Country code prefixed to local numbers when building a chatId. */
+    countryCode: process.env.WHATSAPP_COUNTRY_CODE ?? '962',
+    /** Floor on the gap between two sends, before jitter. */
+    minIntervalMs: parseInt(process.env.WHATSAPP_MIN_INTERVAL_MS ?? '20000', 10),
+    /** Hard stop per calendar day, counted per process. */
+    dailyCap: parseInt(process.env.WHATSAPP_DAILY_CAP ?? '150', 10),
   },
   // Rep-offline watchdog: minutes of silence (no heartbeat/ping) before an
   // active rep is alerted as offline.

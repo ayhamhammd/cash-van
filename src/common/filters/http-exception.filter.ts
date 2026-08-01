@@ -9,6 +9,8 @@ import {
 import { QueryFailedError } from 'typeorm';
 import { Request, Response } from 'express';
 
+import { BODY_LIMIT } from '../constants/body-limit';
+
 interface ErrorBody {
   statusCode: number;
   message: string | string[];
@@ -65,6 +67,27 @@ export class HttpExceptionFilter implements ExceptionFilter {
         message: (obj.message as string | string[]) ?? exception.message,
         error: (obj.error as string) ?? exception.name,
       };
+    }
+
+    // body-parser failures are plain Errors carrying an HTTP-ish `status`.
+    // Without this they fall through to the catch-all and surface as an opaque
+    // 500 — most often "request entity too large" on a big logo upload.
+    if (exception instanceof Error && 'type' in exception) {
+      const bp = exception as Error & { type?: string; status?: number };
+      if (bp.type === 'entity.too.large') {
+        return {
+          status: HttpStatus.PAYLOAD_TOO_LARGE,
+          message: `Request body is too large (limit ${BODY_LIMIT}). Use a smaller image.`,
+          error: 'PayloadTooLargeError',
+        };
+      }
+      if (bp.type === 'entity.parse.failed') {
+        return {
+          status: HttpStatus.BAD_REQUEST,
+          message: 'Request body is not valid JSON',
+          error: 'BadRequestError',
+        };
+      }
     }
 
     if (exception instanceof QueryFailedError) {

@@ -52,6 +52,25 @@ export class ErpOutbox {
   @Column({ name: 'result_ref', type: 'text', nullable: true })
   resultRef?: string | null;
 
+  /**
+   * ERP general-ledger journal created for this document, when the ERP reports
+   * one. NULL on a `posted` SALE_INVOICE means the ERP accepted the invoice but
+   * skipped the GL entry — normally because the org has no payment-method
+   * account mapped (`PAYMENT_METHOD_ACCOUNT_NOT_CONFIGURED`). That is a setup
+   * problem on the ERP side, NOT a failed push: the invoice, its stock movements
+   * and the payment record all committed, so this must never be retried.
+   */
+  @Column({ name: 'journal_id', type: 'text', nullable: true })
+  journalId?: string | null;
+
+  /**
+   * The ERP declined to record the inline payment (an approval workflow blocked
+   * it) and booked the sale as credit instead. The money is NOT in the ERP's
+   * books yet even though the van recorded it as collected.
+   */
+  @Column({ name: 'payment_skipped', type: 'boolean', default: false })
+  paymentSkipped!: boolean;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

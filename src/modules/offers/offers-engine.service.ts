@@ -294,21 +294,27 @@ export class OffersEngineService {
       };
       let bestPay: Disc | null = null;
       let bestPayFils = 0;
+      let bestPayRank = -1;
       for (const c of payOffers) {
         const d = discFor(c);
-        if (!bestPay || d > bestPayFils) {
+        const rank = this.scopeRank(c.offer);
+        if (!bestPay || rank > bestPayRank || (rank === bestPayRank && d > bestPayFils)) {
           bestPay = c;
           bestPayFils = d;
+          bestPayRank = rank;
         }
       }
       let bestItem: Disc | null = null;
       let bestItemFils = 0;
+      let bestItemRank = -1;
       for (const c of itemOffers) {
         if (!c.items!.has(itemNumber)) continue;
         const d = discFor(c);
-        if (!bestItem || d > bestItemFils) {
+        const rank = this.scopeRank(c.offer);
+        if (!bestItem || rank > bestItemRank || (rank === bestItemRank && d > bestItemFils)) {
           bestItem = c;
           bestItemFils = d;
+          bestItemRank = rank;
         }
       }
       let payFils = bestPay ? bestPayFils : 0;
@@ -476,6 +482,13 @@ export class OffersEngineService {
    * minQty); each full `itemsPerStep` above it adds one multiplier step. STATIC
    * ignores the multiplier. Capped at `maxAmountFils` (no natural upper bound
    * otherwise); the per-line clamp to the line gross still prevents a negative net.
+   *
+   * BUNDLE pays a LUMP SUM per completed group instead of a per-unit rate:
+   * `total = base × floor(count / itemsPerStep)`, capped at `maxAmountFils` as a
+   * TOTAL. It is returned divided by `count` so the caller's existing per-line
+   * `perUnit × lineQty` machinery distributes the lump sum across the offer's lines
+   * proportionally (and every line/gross clamp still applies). The division is left
+   * fractional on purpose — rounding happens once, on each line's fils total.
    */
   private effectiveAmount(
     reward: Pick<
@@ -485,6 +498,14 @@ export class OffersEngineService {
     count: number,
     anchor = 0,
   ): number {
+    if (reward.mode === 'BUNDLE') {
+      const per = reward.itemsPerStep && reward.itemsPerStep > 0 ? reward.itemsPerStep : 1;
+      const groups = Math.floor(count / per);
+      if (groups <= 0 || count <= 0) return 0;
+      const total = reward.baseAmountFils * groups;
+      const cap = reward.maxAmountFils ?? Number.POSITIVE_INFINITY;
+      return Math.max(0, Math.min(total, cap)) / count;
+    }
     const steps =
       reward.mode === 'DYNAMIC' && reward.itemsPerStep
         ? Math.floor(Math.max(0, count - anchor) / reward.itemsPerStep)
@@ -495,6 +516,18 @@ export class OffersEngineService {
   }
 
   // ---- gating ----
+
+  /**
+   * Conflict-resolution priority for the per-line "best offer wins" comparison:
+   * a targeted offer (SPECIFIC/SEGMENT/NEW_ONLY) always beats a generic ALL offer
+   * in the same category (payment-method vs item), regardless of discount value —
+   * amount only breaks a tie WITHIN the same rank. Without this, a customer-specific
+   * offer with the same or lower amount than a general one could never win, which
+   * defeats the entire point of scoping an offer to a specific customer.
+   */
+  private scopeRank(offer: Offer): number {
+    return (offer.eligibility?.customerScope ?? 'ALL') === 'ALL' ? 0 : 1;
+  }
 
   private isWithinSchedule(offer: Offer, at: Date): boolean {
     if (offer.validFrom && at < new Date(offer.validFrom)) return false;
@@ -643,6 +676,11 @@ export class OffersEngineService {
       }
       if (r?.kind === 'ITEM_AMOUNT_DISCOUNT') {
         const jod = (fils: number): string => (fils / 1000).toFixed(3);
+        if (r.mode === 'BUNDLE') {
+          return `Buy ${on} → ${jod(r.baseAmountFils)} JOD off per ${
+            r.itemsPerStep ?? 1
+          } bought`;
+        }
         const base =
           r.mode === 'DYNAMIC'
             ? `${jod(r.baseAmountFils)}→${jod(r.maxAmountFils ?? r.baseAmountFils)} JOD dynamic`
