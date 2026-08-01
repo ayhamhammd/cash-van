@@ -44,6 +44,15 @@ interface ItemInfo {
  * ends the chain (nothing applies after it). Schedule, eligibility and limits
  * are all checked before an offer can apply.
  */
+/**
+ * The reward's minimum quantity, normalized. Absent / 0 / negative all mean
+ * "applies from the first unit" — never "never applies".
+ */
+function minQtyOf(reward: { minQty?: number | null }): number {
+  const n = Number(reward.minQty);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
 @Injectable()
 export class OffersEngineService {
   constructor(

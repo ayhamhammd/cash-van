@@ -404,6 +404,48 @@ describe('OffersEngineService', () => {
     expect(await disc(5)).toBe(1200);
   });
 
+  // `undefined` is unreachable: offers.service.ts rejects a save without minQty.
+  // null / 0 can still reach the engine from older rows.
+  it.each([[null], [0]])(
+    'an offer stored with minQty=%s still applies from the first unit',
+    async (bad) => {
+      // minQty is required by the type but optional in the DTO, so it can be
+      // stored missing — and `qty >= undefined` is false, which silently
+      // disabled the offer at EVERY quantity.
+      const offer: Partial<Offer> = {
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['A'] },
+        reward: {
+          kind: 'ITEM_AMOUNT_DISCOUNT',
+          minQty: bad as unknown as number,
+          baseAmountFils: 300,
+          mode: 'STATIC',
+        },
+      };
+      const res = await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 1 }]);
+      expect(res.lines[0]?.lineDiscountFils).toBe(300);
+    },
+  );
+
+  it('minQty 1 applies on a single item for every reward mode', async () => {
+    for (const mode of ['STATIC', 'DYNAMIC', 'BUNDLE'] as const) {
+      const offer: Partial<Offer> = {
+        type: 'ITEM_QTY_REWARD',
+        trigger: { itemNumbers: ['A'] },
+        reward: {
+          kind: 'ITEM_AMOUNT_DISCOUNT',
+          minQty: 1,
+          baseAmountFils: 300,
+          mode,
+          itemsPerStep: 2,
+          multiplier: 1,
+        },
+      };
+      const res = await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 1 }]);
+      expect(res.lines[0]?.lineDiscountFils).toBe(300);
+    }
+  });
+
   it('BUNDLE with minQty 1 and step 1 pays on every unit', async () => {
     const offer: Partial<Offer> = {
       type: 'ITEM_QTY_REWARD',
