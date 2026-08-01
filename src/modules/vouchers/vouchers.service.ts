@@ -644,6 +644,10 @@ export class VouchersService implements OnModuleInit {
       });
       const tobaccoTaxTotalFils = tobaccoResults.reduce((s, r) => s + (r?.netTaxAmount ?? 0), 0);
 
+      // Tobacco tax is added ON TOP of the sale only in EXCLUSIVE mode; see the
+      // netTotal comment below.
+      const tobaccoOnTopFils = taxMode === 'INCLUSIVE' ? 0 : tobaccoTaxTotalFils;
+
       // Per-line results aligned 1:1 with dto.transactions.
       const computed = dto.transactions.map((line, i) => ({ line, res: calc.lines[i] }));
 
@@ -656,8 +660,15 @@ export class VouchersService implements OnModuleInit {
         referenceVoucherNumber,
         inDate: dto.inDate ? new Date(dto.inDate) : new Date(),
         total: filsToJod(calc.totalNetFils), // net (tax base)
+        // totalTax always reports the full tobacco tax content, informationally.
         totalTax: filsToJod(calc.totalTaxFils + tobaccoTaxTotalFils), // GST + tobacco net
-        netTotal: filsToJod(calc.grandTotalFils + tobaccoTaxTotalFils), // grand total (with tax)
+        // ...but the grand total only ADDS it under EXCLUSIVE. Under INCLUSIVE the
+        // entered price already contains the tobacco tax, so adding it again
+        // double-charges the customer: the rep's phone showed the price as typed
+        // while the saved voucher was higher by the whole tobacco tax. Matches
+        // InvoiceTaxCalculator on the app and the ERP's own invoice builder,
+        // which gate the same way on the document tax mode.
+        netTotal: filsToJod(calc.grandTotalFils + tobaccoOnTopFils), // grand total (with tax)
         totalDiscountValue: filsToJod(calc.headerDiscountFils),
         totalDiscountPercentage: (dto.totalDiscountPercentage ?? '0').toString(),
         appliedOfferIds: dto.appliedOfferIds ?? [],

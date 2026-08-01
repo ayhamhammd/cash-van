@@ -38,11 +38,11 @@ interface Line {
 }
 
 /** Reproduce the exact composition from createUnchecked. */
-function post(lines: Line[]) {
+function post(lines: Line[], taxMode: 'EXCLUSIVE' | 'INCLUSIVE' = 'EXCLUSIVE') {
   const tobaccoLines = lines.map((l) => l.tobacco ?? null);
 
   const calc = calcVoucher({
-    taxMode: 'EXCLUSIVE',
+    taxMode,
     lines: lines.map((l, i) => ({
       unitPriceFils: toFils(l.unitPrice),
       qty: Number(l.itemQty) || 0,
@@ -73,10 +73,14 @@ function post(lines: Line[]) {
     };
   });
 
+  // Mirrors createUnchecked: tobacco tax is reported in full on headerTax, but
+  // only ADDED to the grand total in EXCLUSIVE mode.
+  const tobaccoOnTop = taxMode === 'INCLUSIVE' ? 0 : tobaccoTotal;
+
   return {
     headerNetFils: calc.totalNetFils,
     headerTaxFils: calc.totalTaxFils + tobaccoTotal,
-    headerGrandFils: calc.grandTotalFils + tobaccoTotal,
+    headerGrandFils: calc.grandTotalFils + tobaccoOnTop,
     lineTotals,
     tobaccoResults,
   };
@@ -120,5 +124,46 @@ describe('tobacco voucher integration', () => {
     expect(r.tobaccoResults[0]!.specialTaxAmount).toBe(36000);
     expect(r.tobaccoResults[0]!.netTaxAmount).toBe(31500);
     expect(r.lineTotals[0]!.netTotal).toBe(120000 + 31500);
+  });
+});
+
+/**
+ * INCLUSIVE mode: the entered price already contains the tobacco tax, so adding
+ * it on top double-charges the customer. The van backend used to add it
+ * unconditionally, so a tobacco sale saved a grand total HIGHER than the amount
+ * the rep's phone showed and actually collected.
+ *
+ * The app (InvoiceTaxCalculator) and the ERP's own invoice builder both gate on
+ * the document tax mode; this pins the backend to the same rule.
+ */
+describe('tobacco under INCLUSIVE tax mode', () => {
+  const line = { unitPrice: '3.000', itemQty: '10', tobacco: { consumerFils: 3000 } };
+
+  it('does NOT add tobacco tax on top of the grand total', () => {
+    const inc = post([line], 'INCLUSIVE');
+    const calcGrand = inc.headerGrandFils;
+    // Grand total is exactly the entered price line, tax already inside.
+    expect(calcGrand).toBe(toFils('3.000') * 10);
+  });
+
+  it('still reports the full tobacco tax on the header, informationally', () => {
+    const inc = post([line], 'INCLUSIVE');
+    expect(inc.tobaccoResults[0]!.netTaxAmount).toBeGreaterThan(0);
+    expect(inc.headerTaxFils).toBe(inc.tobaccoResults[0]!.netTaxAmount);
+  });
+
+  it('EXCLUSIVE still adds it on top — the fix is mode-specific', () => {
+    const exc = post([line], 'EXCLUSIVE');
+    const inc = post([line], 'INCLUSIVE');
+    const tobaccoTax = exc.tobaccoResults[0]!.netTaxAmount;
+    expect(exc.headerGrandFils).toBe(inc.headerGrandFils + tobaccoTax);
+  });
+
+  it('the difference is exactly the tobacco tax — what was being over-charged', () => {
+    const exc = post([line], 'EXCLUSIVE');
+    const inc = post([line], 'INCLUSIVE');
+    expect(exc.headerGrandFils - inc.headerGrandFils).toBe(
+      exc.tobaccoResults[0]!.netTaxAmount,
+    );
   });
 });
