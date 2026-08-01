@@ -28,6 +28,10 @@ import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
 import { ErpOutboxKind } from './entities/erp-outbox.entity';
 
 /** cash-van voucher kind → ERP outbox kind (per-kind outbound, same kind preserved). */
+// Read from process.env for the same reason as ERP_OUTBOX_DRAIN_MS: @Interval()
+// runs at class-definition time, before DI. Validated in validation.schema.ts.
+const PULL_INTERVAL_MS = parseInt(process.env.ERP_PULL_INTERVAL_MS ?? '300000', 10);
+
 const OUTBOX_KIND_BY_TRANS: Record<string, ErpOutboxKind | undefined> = {
   SALE: 'SALE_INVOICE',
   RETURN: 'SALES_RETURN',
@@ -649,7 +653,7 @@ export class ErpSyncService {
    * webhook would have dropped. (Outbound is automatic via events + the outbox
    * drain.) Guarded against overlap with itself and a manual sync.
    */
-  @Interval(300000)
+  @Interval(PULL_INTERVAL_MS)
   async scheduledPull(): Promise<void> {
     if (this.pulling) return;
     const cfg = await this.settings.getErpConfig().catch(() => null);

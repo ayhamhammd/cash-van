@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 
 import { SettingsService } from '../settings/settings.service';
 
@@ -28,7 +29,15 @@ export interface ErpListResult<T> {
 @Injectable()
 export class ErpHttpClient {
   private readonly logger = new Logger('ERP-HTTP');
-  constructor(private readonly settings: SettingsService) {}
+  constructor(
+    private readonly settings: SettingsService,
+    private readonly config: ConfigService,
+  ) {}
+
+  /** Per-request timeout (ms), from ERP_HTTP_TIMEOUT_MS. */
+  private timeout(): number {
+    return this.config.get<number>('erp.httpTimeoutMs', 20000);
+  }
 
   async list<T>(
     path: string,
@@ -47,7 +56,7 @@ export class ErpHttpClient {
     this.logger.log(`→ GET ${url}`);
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(this.timeout()),
     });
     this.logger.log(`← GET ${path} ${res.status}`);
     if (res.status === 401 || res.status === 403) {
@@ -81,7 +90,7 @@ export class ErpHttpClient {
     this.logger.log(`→ GET ${url}`);
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(this.timeout()),
     });
     this.logger.log(`← GET ${path} ${res.status}`);
     if (!res.ok) throw new Error(`ERP ${path} failed (HTTP ${res.status})`);
@@ -96,7 +105,7 @@ export class ErpHttpClient {
     this.logger.log(`→ GET ${base}/api/v1/${path}`);
     const res = await fetch(`${base}/api/v1/${path}`, {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(this.timeout()),
     });
     this.logger.log(`← GET ${path} ${res.status}`);
     if (!res.ok) return null;
@@ -128,7 +137,7 @@ export class ErpHttpClient {
         'Idempotency-Key': idempotencyKey,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(this.timeout()),
     });
     const json: unknown = await res.json().catch(() => null);
     this.logger.log(`← POST ${path} ${res.status} res=${brief(json)}`);
@@ -155,7 +164,7 @@ export class ErpHttpClient {
         Authorization: `Bearer ${cfg.apiKey}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(this.timeout()),
     });
     this.logger.log(`← PATCH ${path} ${res.status}`);
     if (!res.ok) throw new Error(`ERP PATCH ${path} failed (HTTP ${res.status})`);

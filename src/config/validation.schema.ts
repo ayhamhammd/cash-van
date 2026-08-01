@@ -36,6 +36,13 @@ export const envValidationSchema = Joi.object({
   // ISO-3166 country used to bias free-text place lookup.
   GOOGLE_PLACES_REGION: Joi.string().length(2).uppercase().default('JO'),
 
+  // ERP sync timings (ms). The two interval values are read from process.env
+  // directly at class-definition time, because @Interval() is evaluated before
+  // DI exists — they are validated here so a bad value still fails at boot.
+  ERP_HTTP_TIMEOUT_MS: Joi.number().min(1000).default(20000),
+  ERP_OUTBOX_DRAIN_MS: Joi.number().min(5000).default(30000),
+  ERP_PULL_INTERVAL_MS: Joi.number().min(30000).default(300000),
+
   // Dashboard origin used to build public quote links inside outgoing messages.
   PUBLIC_DASHBOARD_URL: Joi.string().uri().allow('').default(''),
 

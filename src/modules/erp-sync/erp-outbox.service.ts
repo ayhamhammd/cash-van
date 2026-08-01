@@ -21,6 +21,9 @@ import {
 } from './entities/erp-outbox.entity';
 
 const MAX_ATTEMPTS = 6;
+// Read from process.env, not ConfigService: @Interval() is evaluated when the
+// class is defined, before DI exists. Validated in validation.schema.ts.
+const DRAIN_INTERVAL_MS = parseInt(process.env.ERP_OUTBOX_DRAIN_MS ?? '30000', 10);
 const BATCH = 20;
 // A 429 is transient (the ERP per-key window resets in 60s), so we reschedule past
 // the window WITHOUT consuming a dead-letter attempt — rate limiting must never
@@ -90,7 +93,7 @@ export class ErpOutboxService {
   }
 
   /** Drain due rows every 30s when ERP mode is on. */
-  @Interval(30000)
+  @Interval(DRAIN_INTERVAL_MS)
   async drain(): Promise<void> {
     if (this.draining) return;
     const cfg = await this.settings.getErpConfig().catch(() => null);

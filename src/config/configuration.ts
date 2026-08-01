@@ -45,6 +45,12 @@ export default () => ({
     // resolves to the Amman district and not a namesake elsewhere.
     regionCode: process.env.GOOGLE_PLACES_REGION ?? 'JO',
   },
+  // ERP sync timings. All millisecond values, all overridable from .env so a
+  // slow or distant ERP can be accommodated without a rebuild.
+  erp: {
+    /** Per-request timeout for every ERP HTTP call. */
+    httpTimeoutMs: parseInt(process.env.ERP_HTTP_TIMEOUT_MS ?? '20000', 10),
+  },
   // Self-hosted OpenWA gateway (github.com/rmyndharis/OpenWA) used to send
   // quote links on WhatsApp. Unset baseUrl = outreach falls back to
   // click-to-chat links in the dashboard, and the send endpoint returns 503.
