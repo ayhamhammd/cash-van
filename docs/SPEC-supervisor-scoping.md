@@ -1,6 +1,7 @@
 # SPEC — Supervisor scoping (per-salesman data isolation)
 
-**Status:** draft, not started
+**Status:** phase 1 landed (migration + `ScopeService` + assignment API).
+Nothing is enforced yet — see §9.
 **Repos:** `cash-van-dashboard` (backend), `cash-van-dashboard-frontend` (dashboard)
 **Not affected:** FlowVan app, ERP
 
@@ -86,9 +87,28 @@ Rule 3 is the important one: **deny by default**. A user who should be scoped
 but has no assignment yet sees an empty dashboard, never the whole company. The
 opposite default is the kind of mistake that only surfaces after a leak.
 
-Resolved once per request (interceptor → `UserContextService`, alongside the
-existing user context), not per query, so a report touching six tables resolves
-once.
+Resolved once per request (memoised in CLS alongside the existing user context),
+not per query, so a report touching six tables resolves once.
+
+**Implemented:** `src/common/scope/` — `scope.types.ts` (the `Scope` union,
+frozen `EMPTY_SCOPE`, `isUnscoped` / `isEmptyScope`), `scope.service.ts`
+(`forCurrentUser()` memoised + `forUser(userId, role)` pure), `scope.module.ts`
+(global, so no module can leak by forgetting to import it). Unit tests in
+`scope.service.spec.ts` cover all three rules plus fail-closed and memoisation.
+
+**Consequence of rule 3, to settle before the sweep (this is the real content of
+Q1):** today a `manager` or `viewer` sees every rep. Once enforcement lands they
+resolve to the *empty* scope unless assigned, so those accounts go blank. Three
+ways out, in order of preference:
+
+1. Assign reps to every existing manager/viewer before flipping enforcement on
+   — explicit, and forces someone to decide what each account should see.
+2. Treat `manager` as unscoped like `admin` — one line in rule 1, but it means a
+   manager keeps company-wide sight by default.
+3. Grandfather existing accounts by seeding assignments in a migration.
+
+Option 1 is the safe reading and the one this spec assumes. Whichever is chosen,
+it must be decided *before* step 2 of §9, not discovered afterwards.
 
 ## 6. Enforcement
 
@@ -199,7 +219,10 @@ every existing user resolves to `ALL` (admin) or is untouched.
 
 Sequence:
 
-1. Migration + `ScopeService` + assignment API. No behaviour change.
+1. ~~Migration + `ScopeService` + assignment API. No behaviour change.~~ **DONE.**
+   `supervisor_reps` (migration `1722000000000`), `src/common/scope/`, and
+   `PUT|GET /api/v1/users/:id/reps` (admin-only, audited by the global
+   interceptor). Nothing consumes `Scope` yet, by design.
 2. Enforcement sweep, module by module, each with its two tests.
 3. Frontend assignment UI + scope indicator.
 4. Flip on: create the first supervisor, verify against a known rep set.

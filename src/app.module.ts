@@ -16,6 +16,7 @@ import { PermissionsGuard } from './common/guards/permissions.guard';
 
 import { UserContextModule } from './common/context/user-context.module';
 import { StorageModule } from './common/storage/storage.module';
+import { ScopeModule } from './common/scope/scope.module';
 import { CacheModule } from './common/cache/cache.module';
 import { JobsModule } from './common/jobs/jobs.module';
 
@@ -77,6 +78,7 @@ import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module
 
     // Preflight foundations (00.5) — must load before feature modules.
     UserContextModule,
+    ScopeModule,
     StorageModule,
     CacheModule,
     JobsModule,
