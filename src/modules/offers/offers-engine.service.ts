@@ -244,15 +244,20 @@ export class OffersEngineService {
           const freeQty = this.giftFreeQty(reward, qty);
           if (freeQty > 0) gifts.push({ offer, reward, freeQty });
         } else if (reward?.kind === 'ITEM_PERCENT_DISCOUNT') {
-          if (qty >= reward.minQty) {
+          // minQtyOf, not reward.minQty: rewards come out of JSONB, so the field
+          // can be absent at runtime whatever the type says, and `qty >= undefined`
+          // is false — the offer would silently never apply.
+          const min = minQtyOf(reward);
+          if (qty >= min) {
             // Base applies at minQty; steps accrue per itemsPerStep above it.
-            const pct = this.effectivePercent(reward, qty, reward.minQty ?? 0);
+            const pct = this.effectivePercent(reward, qty, min);
             if (pct > 0) itemOffers.push({ offer, pct, items: new Set(items) });
           }
         } else if (reward?.kind === 'ITEM_AMOUNT_DISCOUNT') {
-          if (qty >= reward.minQty) {
+          const min = minQtyOf(reward);
+          if (qty >= min) {
             // Same stepping as the percent twin, but the base is fils-per-unit.
-            const amt = this.effectiveAmount(reward, qty, reward.minQty ?? 0);
+            const amt = this.effectiveAmount(reward, qty, min);
             if (amt > 0) {
               itemOffers.push({
                 offer,

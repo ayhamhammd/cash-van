@@ -286,6 +286,51 @@ describe('OffersEngineService', () => {
     expect(await free(50)).toBe(3); // 5 steps × 3 = 15, capped at 3
   });
 
+  // The reported field bug: an offer set to start at 1 must pay on a single
+  // unit. Both reward kinds, because the client hit it on a discount offer.
+  it('minQty 1 pays on a single item for both percent and amount rewards', async () => {
+    const pct: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: { kind: 'ITEM_PERCENT_DISCOUNT', minQty: 1, basePercent: 10, mode: 'STATIC' },
+    };
+    const resPct = await makeEngine([pct]).evaluate([{ itemNumber: 'A', qty: 1 }]);
+    expect(resPct.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(100);
+
+    const amt: Partial<Offer> = {
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      reward: { kind: 'ITEM_AMOUNT_DISCOUNT', minQty: 1, baseAmountFils: 250, mode: 'STATIC' },
+    };
+    const resAmt = await makeEngine([amt]).evaluate([{ itemNumber: 'A', qty: 1 }]);
+    expect(resAmt.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(250);
+  });
+
+  // Rewards are stored as JSONB, so minQty can be missing at runtime whatever
+  // the TS type claims. `qty >= undefined` is false, which silently disabled the
+  // offer entirely — the reason minQtyOf() exists.
+  it('treats an absent or zero minQty as "from the first unit", not "never"', async () => {
+    const mk = (minQty: unknown): Partial<Offer> => ({
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'] },
+      // Cast on purpose: the TS type says minQty is required, but the column is
+      // JSONB and the DB will happily hand back a row without it. That gap is
+      // the bug being pinned here.
+      reward: {
+        kind: 'ITEM_PERCENT_DISCOUNT',
+        basePercent: 10,
+        mode: 'STATIC',
+        ...(minQty === undefined ? {} : { minQty }),
+      } as unknown as Offer['reward'],
+    });
+    for (const minQty of [undefined, 0, -3]) {
+      const res = await makeEngine([mk(minQty)]).evaluate([
+        { itemNumber: 'A', qty: 1 },
+      ]);
+      expect(res.lines.find((l) => l.itemNumber === 'A')!.lineDiscountFils).toBe(100);
+    }
+  });
+
   it('ITEM_QTY_REWARD discount applies % to the selected items only, above minQty', async () => {
     const offer: Partial<Offer> = {
       type: 'ITEM_QTY_REWARD',
