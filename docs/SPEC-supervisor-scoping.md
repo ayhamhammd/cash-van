@@ -116,10 +116,14 @@ Two link shapes exist — `rep_id` and `user_code`. The scope resolver must expo
 **both** (`repIds` and the corresponding `userCodes`), resolved together, so a
 query never has to join `reps` just to filter.
 
-**Decision needed (Q2):** customers. Is a customer owned by a rep, or shared? If
-a supervisor should see only their reps' customers, `customer.rep_id` scopes it —
-but a customer served by two reps in different segments then appears for both.
-Confirm the intent. See §11.
+**DECIDED (Q2):** customers are **rep-owned**, so `customer.rep_id` scopes them:
+a supervisor sees only their reps' customers. The main admin is unscoped and can
+see and reassign any customer, including moving one between segments.
+
+Consequence to handle: a customer whose `rep_id` changes moves between
+supervisors, and their history moves with them — a supervisor loses sight of
+past vouchers for a customer reassigned away. That is the correct reading of
+"owned", but it means reassignment is a meaningful act and must be audited.
 
 ### 6.2 How, not just where
 
@@ -142,16 +146,25 @@ another segment's request by posting its id directly.
 Scoped writes: approvals (approve/reject), voucher edits, target edits, route
 assignment, rep edits, collection confirmation.
 
-**Decision needed (Q3):** how much may a supervisor *do* versus *see*? Your
-message said "just show … and approvals also", which reads two ways. Options:
+**DECIDED (Q3): option B — full admin within scope.** A supervisor may do
+everything the main admin can, but only for their own reps: approve/reject their
+requests, edit those reps, set their targets, assign their routes, confirm their
+collections, edit their vouchers, and manage their customers.
 
-- **A — read-only + approvals.** Sees everything for their reps, may approve
-  their reps' requests, changes nothing else.
-- **B — full admin within scope.** Everything the main admin can do, but only
-  for their own reps: edit reps, set targets, assign routes, confirm collections.
+This makes writes as security-critical as reads. Every scoped write must verify
+the target's rep is in scope BEFORE mutating, and reject with 404 (not 403) for
+an out-of-scope id — same reasoning as single-record reads.
 
-B is what "make him admin on these salesmen" implies; A is what "just can show"
-implies. This changes roughly half the work. See §11.
+Two write paths need particular care because the rep link is indirect:
+
+- **Approvals** — the request's `rep_id` is the check, not the requesting user.
+- **Vouchers** — `user_code`, not `rep_id`; resolve through the scope's
+  `userCodes` set rather than joining.
+
+A supervisor may NOT: create or delete dashboard users, assign reps to
+supervisors, change company/ERP/tax settings, or act on an unassigned rep. Those
+stay main-admin only — otherwise a supervisor could widen their own scope, which
+defeats the feature.
 
 ## 7. Frontend
 
@@ -208,9 +221,15 @@ half-swept build looks enforced and is not.
 | # | Question | Why it matters |
 |---|---|---|
 | **Q1** | Scope by `supervisor` role, or an independent assignment any role can carry? | Role-based is simpler; independent allows a scoped `manager`. |
-| **Q2** | Are customers rep-owned or shared? | Decides whether the customer list is scoped, and what happens to a customer served by two segments. |
-| **Q3** | Read-only + approvals, or full admin within scope? | Roughly doubles the work if writes are included. |
+| ~~Q2~~ | ~~Customers rep-owned or shared?~~ | **DECIDED: rep-owned; main admin can reassign. See §6.1.** |
+| ~~Q3~~ | ~~Read-only or full admin within scope?~~ | **DECIDED: full admin within scope. See §6.3.** |
 | **Q4** | Should a supervisor see **aggregate** company figures (e.g. total sales) or only their slice? | Dashboard KPIs and reports differ; "their slice" is assumed here. |
 | **Q5** | Unassigned reps — visible to main admin only, or to nobody until assigned? | Assumed main-admin-only. |
 
-Q3 is the blocker; the rest can default to the assumptions stated above.
+Q2 and Q3 are decided. Q1, Q4 and Q5 stand on the assumptions above unless
+contradicted — none of them blocks a start.
+
+**Scope of work after these decisions:** writes are in, so the sweep covers both
+directions and the estimate is the larger of the two options. The privilege
+boundary above (a supervisor cannot manage users or assignments) is what keeps
+"full admin within scope" from becoming "full admin".
