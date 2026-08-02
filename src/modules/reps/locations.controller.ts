@@ -132,6 +132,20 @@ export class LocationsController {
     return this.locations.visitsForRep(id, query.from, query.to);
   }
 
+  @Get(':id/sale-points')
+  @ApiOperation({
+    summary: "Rep's sale locations in a range",
+    description:
+      "Vouchers the rep saved with a GPS fix, within [from,to] (defaults last 30d) — the sale markers for the tracking map. Vouchers saved without a fix (indoors, location off, raised from the dashboard) are simply absent.",
+  })
+  @ApiOkResponse({ description: 'Ordered list of located sales in the window' })
+  salePoints(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListLocationsQuery,
+  ) {
+    return this.locations.salePointsForRep(id, query.from, query.to);
+  }
+
   @Get(':id/tracking-summary')
   @ApiOperation({
     summary: 'Per-day / per-month tracking summary',

@@ -32,6 +32,27 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'in_date', type: 'timestamptz', default: () => 'now()' })
   inDate!: Date;
 
+  /**
+   * Where the rep was when this voucher was SAVED — the same fix that drives the
+   * proximity geofence, kept so the sale can be drawn on the tracking map.
+   *
+   * Null is normal, not a defect: every voucher predating the feature, any sale
+   * made indoors or with location off, and every voucher raised from the
+   * dashboard has no rep position. Stored as a pair or not at all — half a
+   * coordinate is not a location.
+   *
+   * Taken on the DEVICE at save time, so an offline sale promoted hours later
+   * still carries the position it was made at.
+   */
+  @Column({ name: 'sale_lat', type: 'double precision', nullable: true })
+  saleLat?: number | null;
+
+  @Column({ name: 'sale_lng', type: 'double precision', nullable: true })
+  saleLng?: number | null;
+
+  @Column({ name: 'sale_accuracy_m', type: 'real', nullable: true })
+  saleAccuracyM?: number | null;
+
   @ManyToOne(() => TransactionKind, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'trans_kind', referencedColumnName: 'transKind' })
   transactionKind!: TransactionKind;

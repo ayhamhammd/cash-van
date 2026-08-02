@@ -147,6 +147,27 @@ const STANDARD_TRANS_KINDS: ReadonlyArray<{
   { transKind: 'PAYMENT_OUT', transName: 'سند صرف', sign: 0 },
 ];
 
+/**
+ * The rep's position at save time, as a pair or not at all.
+ *
+ * A lat with no lng is not a location — storing one half would put a
+ * confident-looking marker on the equator or the meridian. Coordinate RANGES are
+ * already enforced by CreateVoucherDto; this only decides pair-or-nothing.
+ */
+export function saleLocationOf(dto: {
+  repLat?: number | null;
+  repLng?: number | null;
+}): { saleLat: number | null; saleLng: number | null } {
+  const lat = Number(dto.repLat);
+  const lng = Number(dto.repLng);
+  const ok =
+    dto.repLat != null &&
+    dto.repLng != null &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng);
+  return ok ? { saleLat: lat, saleLng: lng } : { saleLat: null, saleLng: null };
+}
+
 @Injectable()
 export class VouchersService implements OnModuleInit {
   constructor(
@@ -651,6 +672,7 @@ export class VouchersService implements OnModuleInit {
       // Per-line results aligned 1:1 with dto.transactions.
       const computed = dto.transactions.map((line, i) => ({ line, res: calc.lines[i] }));
 
+      const saleLoc = saleLocationOf(dto);
       const header = em.getRepository(VoucherHeader).create({
         voucherNumber: dto.voucherNumber,
         transKind: dto.transKind,
@@ -659,6 +681,11 @@ export class VouchersService implements OnModuleInit {
         vendorNumber: dto.vendorNumber ?? null,
         referenceVoucherNumber,
         inDate: dto.inDate ? new Date(dto.inDate) : new Date(),
+        // Where the rep stood when this was saved. Pair-or-nothing; see
+        // saleLocationOf(). Named explicitly rather than spread, because a
+        // spread makes TypeScript pick create()'s array overload.
+        saleLat: saleLoc.saleLat,
+        saleLng: saleLoc.saleLng,
         total: filsToJod(calc.totalNetFils), // net (tax base)
         // totalTax always reports the full tobacco tax content, informationally.
         totalTax: filsToJod(calc.totalTaxFils + tobaccoTaxTotalFils), // GST + tobacco net
