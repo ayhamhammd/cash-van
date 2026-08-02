@@ -10,16 +10,30 @@ import { Server, Socket } from 'socket.io';
 
 import { ACCESS_TOKEN_COOKIE } from '../common/auth/auth-cookie';
 
+/** Room every salesman socket joins, so a signal can reach all vans at once. */
+export const REPS_ROOM = 'reps';
+/** Per-salesman room: only this rep's device(s) receive the message. */
+export const repRoom = (repId: string) => `rep:${repId}`;
+
 /**
- * Operational realtime stream for dashboard clients.
+ * Operational realtime stream.
  *
- * Single-tenant / single-instance: every authenticated client belongs to the
- * one company, so events are broadcast to all connected sockets. JWT auth is
- * enforced at handshake time — a missing/invalid token disconnects the socket.
+ * Two kinds of client share the namespace:
+ *
+ *   - **Dashboard** — receives the operational broadcast (rep locations, invoice
+ *     events…). Unchanged: single-tenant, so those go to every socket.
+ *   - **Salesman app** — additionally joins `rep:<id>` and `reps`, so the server
+ *     can tell ONE van "your data changed" without waking the other nine.
+ *
+ * Rooms are assigned from the JWT's own `repId` claim at handshake, never from
+ * anything the client sends. A device cannot ask to join another rep's room —
+ * that would be a data leak dressed as a subscription.
+ *
+ * JWT auth is enforced at handshake; a missing or invalid token disconnects.
  *
  * Client:
  *   const socket = io('http://host/ws/ops', { auth: { token: jwt } });
- *   socket.on('rep.location', (p) => ...);
+ *   socket.on('sync.required', (p) => refresh(p.resource));
  */
 @WebSocketGateway({ namespace: '/ws/ops', cors: { origin: true, credentials: true } })
 export class EventsGateway implements OnGatewayConnection {
@@ -43,19 +57,46 @@ export class EventsGateway implements OnGatewayConnection {
     try {
       const payload = this.jwt.verify(token, {
         secret: this.config.getOrThrow<string>('jwt.secret'),
-      }) as { sub: string; role?: string };
+      }) as { sub: string; role?: string; repId?: string | null };
       client.data.userId = payload.sub;
       client.data.role = payload.role ?? 'viewer';
+
+      // Room membership comes from the token, not from the client. A socket that
+      // could name its own room could subscribe to a rival van's stock.
+      const repId = payload.repId ?? null;
+      client.data.repId = repId;
+      if (repId) {
+        void client.join(repRoom(repId));
+        void client.join(REPS_ROOM);
+      }
     } catch {
       this.logger.warn(`WS connection refused (bad token): ${client.id}`);
       client.disconnect(true);
     }
   }
 
-  /** Broadcast an event to every connected dashboard client. */
+  /** Broadcast an event to every connected client. */
   broadcast(event: string, payload: unknown): void {
     if (!this.server) return;
     this.server.emit(event, payload);
+  }
+
+  /**
+   * Send to one salesman's device(s) only.
+   *
+   * A no-op when that rep has nothing connected — which is the normal case for a
+   * van that is offline or asleep. Nothing is queued: the app reconciles by
+   * pulling on next foreground, so a missed signal costs freshness, not data.
+   */
+  emitToRep(repId: string, event: string, payload: unknown): void {
+    if (!this.server || !repId) return;
+    this.server.to(repRoom(repId)).emit(event, payload);
+  }
+
+  /** Send to every connected salesman, but not to dashboard-only sockets. */
+  emitToAllReps(event: string, payload: unknown): void {
+    if (!this.server) return;
+    this.server.to(REPS_ROOM).emit(event, payload);
   }
 
   private extractToken(client: Socket): string | null {

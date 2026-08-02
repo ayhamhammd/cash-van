@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -235,6 +236,7 @@ export class ErpSyncService {
     @InjectRepository(ErpSyncCursor) private readonly cursors: Repository<ErpSyncCursor>,
     private readonly vouchers: VouchersService,
     private readonly outbox: ErpOutboxService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /** Queue a posted cash-van voucher for push to the ERP, by kind. */
@@ -891,6 +893,12 @@ export class ErpSyncService {
       this.logger.warn(
         `AR balance mirror skipped: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+    // An ERP pull can touch any rep's customers, and the batch does not track
+    // which. Signal with no repId so every van re-pulls, rather than guessing
+    // and leaving one holding stale credit limits or prices.
+    if (processed > 0) {
+      this.events.emit('customer.changed', { reason: 'erp.customers.pulled' });
     }
     return processed;
   }

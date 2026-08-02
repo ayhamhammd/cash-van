@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
@@ -27,6 +28,7 @@ export class VanStockService {
     private readonly reps: Repository<Rep>,
     @InjectRepository(ItemCart)
     private readonly products: Repository<ItemCart>,
+    private readonly events: EventEmitter2,
   ) {}
 
   /**
@@ -194,6 +196,9 @@ export class VanStockService {
         }
       }
     });
+    // The van's stock moved from OUTSIDE the app — a warehouse load or return
+    // booked in the office. The device has no way to know, so it is told.
+    this.events.emit('stock.changed', { repId, reason: 'van.stock.adjusted' });
     return { updated: items.length };
   }
 

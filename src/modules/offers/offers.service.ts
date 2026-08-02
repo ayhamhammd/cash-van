@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
@@ -46,7 +47,19 @@ export class OffersService {
     @InjectRepository(OfferRedemption)
     private readonly redemptionsRepo: Repository<OfferRedemption>,
     private readonly engine: OffersEngineService,
+    private readonly events: EventEmitter2,
   ) {}
+
+  /**
+   * Nudge every van to re-pull offers.
+   *
+   * Fired after the write has committed, never before: a rep who pulled on an
+   * early signal would race the transaction and fetch the pre-change rows, then
+   * sit on them until the next foreground.
+   */
+  private signalOffersChanged(reason: string): void {
+    this.events.emit('offers.changed', { reason });
+  }
 
   // ---- CRUD ----
 
@@ -70,7 +83,9 @@ export class OffersService {
       stackable: dto.stackable ?? false,
       isActive: dto.isActive ?? true,
     });
-    return this.toView(await this.offersRepo.save(offer));
+    const saved = await this.offersRepo.save(offer);
+    this.signalOffersChanged('offer.created');
+    return this.toView(saved);
   }
 
   async findAll(query: ListOffersQueryDto): Promise<OfferListResult> {
@@ -175,18 +190,25 @@ export class OffersService {
       stackable: dto.stackable ?? offer.stackable,
       isActive: dto.isActive ?? offer.isActive,
     });
-    return this.toView(await this.offersRepo.save(offer));
+    const updated = await this.offersRepo.save(offer);
+    this.signalOffersChanged('offer.updated');
+    return this.toView(updated);
   }
 
   async toggle(id: string): Promise<OfferView> {
     const offer = await this.findOneOrThrow(id);
     offer.isActive = !offer.isActive;
-    return this.toView(await this.offersRepo.save(offer));
+    const toggled = await this.offersRepo.save(offer);
+    // An offer switched off matters as much as one switched on: a van still
+    // holding it would keep discounting after the company stopped.
+    this.signalOffersChanged('offer.toggled');
+    return this.toView(toggled);
   }
 
   async remove(id: string): Promise<void> {
     await this.findOneOrThrow(id);
     await this.offersRepo.softDelete(id);
+    this.signalOffersChanged('offer.removed');
   }
 
   // ---- redemptions report ----

@@ -83,6 +83,12 @@ export class CustomersService {
       phoneHash: hashPhone(dto.phone),
     });
     const saved = await this.customers.save(entity);
+    // Tell the owning van to pull it, so a customer added from the office is
+    // sellable in the field without waiting for the next home-screen refresh.
+    this.events.emit('customer.changed', {
+      repId: saved.repId ?? null,
+      reason: 'customer.created',
+    });
     // Mirror to the ERP (handled by ErpSyncService listener; no-op when ERP off).
     this.events.emit('erp.customer.created', {
       code: saved.customerNumber,
@@ -110,6 +116,10 @@ export class CustomersService {
       customer.phoneHash = hashPhone(dto.phone);
     }
     const saved = await this.customers.save(customer);
+    this.events.emit('customer.changed', {
+      repId: saved.repId ?? null,
+      reason: 'customer.updated',
+    });
     // Mirror the update to the ERP (ErpSyncService listener; no-op when ERP off).
     this.events.emit('erp.customer.updated', {
       code: saved.customerNumber,
@@ -232,8 +242,18 @@ export class CustomersService {
 
   async reassign(id: string, newRepId: string): Promise<Customer> {
     const customer = await this.findOneOrThrow(id);
+    const previousRepId = customer.repId ?? null;
     customer.repId = newRepId;
-    return this.customers.save(customer);
+    const saved = await this.customers.save(customer);
+    // BOTH vans are told: the new owner to pick the customer up, the previous
+    // one to let go. Signalling only the new owner leaves the old van still
+    // holding — and still selling to — a customer it no longer owns.
+    this.events.emit('customer.changed', {
+      repId: newRepId,
+      previousRepId,
+      reason: 'customer.reassigned',
+    });
+    return saved;
   }
 
   async addVisit(customerId: string, dto: CreateVisitDto): Promise<CustomerVisit> {
