@@ -6,6 +6,8 @@ import { VanStock } from './entities/van-stock.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { VanStockLineDto } from './dto/van-stock.dto';
+import { ScopeService } from '../../common/scope/scope.service';
+import { assertRepInScope } from '../../common/scope/scope.util';
 
 export interface VanStockRow {
   productId: string;
@@ -27,6 +29,7 @@ export class VanStockService {
     private readonly reps: Repository<Rep>,
     @InjectRepository(ItemCart)
     private readonly products: Repository<ItemCart>,
+    private readonly scope: ScopeService,
   ) {}
 
   /**
@@ -197,10 +200,20 @@ export class VanStockService {
     return { updated: items.length };
   }
 
+  /**
+   * The single gate for every van-stock entry point — forRep(), load() and
+   * return() all pass through here, so the scope check lands on the two writes
+   * as well as the read.
+   */
   private async assertRep(repId: string): Promise<void> {
     if (!(await this.reps.exist({ where: { id: repId } }))) {
       throw new NotFoundException(`Rep ${repId} not found`);
     }
+    assertRepInScope(
+      await this.scope.forCurrentUser(),
+      repId,
+      `Rep ${repId}`,
+    );
   }
 
   private async assertProducts(ids: string[]): Promise<void> {

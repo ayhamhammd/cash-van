@@ -15,6 +15,8 @@ import { provisionRep } from './rep-provision';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
+import { ScopeService } from '../../common/scope/scope.service';
+import { applyRepScope, assertRepInScope } from '../../common/scope/scope.util';
 
 export interface RepKpis {
   todayRevenueFils: number;
@@ -33,6 +35,7 @@ export class RepsService {
     private readonly erpSync: ErpSyncService,
     private readonly settings: SettingsService,
     private readonly users: UsersService,
+    private readonly scope: ScopeService,
   ) {}
 
   async list(query: ListRepsQuery): Promise<{ items: Rep[]; total: number }> {
@@ -60,15 +63,28 @@ export class RepsService {
       );
     }
 
+    // The rep list is the one every rep picker in the dashboard reads from, so
+    // scoping it here narrows every dropdown at once.
+    applyRepScope(qb, await this.scope.forCurrentUser(), 'rep.id');
+
     const [items, total] = await qb.getManyAndCount();
     return { items, total };
   }
 
+  /**
+   * Dashboard single-rep read, and the gate that update()/softDelete()/kpis()
+   * route through.
+   *
+   * Note the pair below — findByUserId/findByCode — is deliberately NOT scoped:
+   * those resolve a rep from their own login for /reps/me and the mobile BFF.
+   * Scoping them would lock a salesman out of their own record.
+   */
   async findOne(id: string): Promise<Rep> {
     const rep = await this.repo.findOne({
       where: { id, deletedAt: IsNull() },
     });
     if (!rep) throw new NotFoundException(`Rep ${id} not found`);
+    assertRepInScope(await this.scope.forCurrentUser(), rep.id, `Rep ${id}`);
     return rep;
   }
 
@@ -203,6 +219,9 @@ export class RepsService {
   }
 
   async softDelete(id: string): Promise<void> {
+    // Deletes by id without loading, so it needs its own check rather than
+    // inheriting findOne()'s — and it must run before the delete, not after.
+    await this.findOne(id);
     const result = await this.repo.softDelete({ id });
     if (!result.affected) {
       throw new NotFoundException(`Rep ${id} not found`);

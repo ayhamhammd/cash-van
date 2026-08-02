@@ -30,6 +30,8 @@ import { PreviewVoucherNumberQueryDto } from './dto/preview-number.query';
 import { CreateChequeDto } from './dto/create-cheque.dto';
 import { CreateTransactionKindDto } from './dto/create-transaction-kind.dto';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
+import { ScopeService } from '../../common/scope/scope.service';
+import { assertUserCodeInScope } from '../../common/scope/scope.util';
 
 @ApiTags('vouchers')
 @ApiBearerAuth()
@@ -38,6 +40,7 @@ export class VouchersController {
   constructor(
     private readonly vouchersService: VouchersService,
     private readonly transactionKindsService: TransactionKindsService,
+    private readonly scope: ScopeService,
   ) {}
 
   // ---- Transaction kinds (lookup) -------------------------------------------
@@ -77,7 +80,16 @@ export class VouchersController {
     description: 'Create a voucher (header + lines + payments) atomically. Requires canMakeVoucher.',
   })
   @ApiCreatedResponse({ description: 'Voucher created' })
-  create(@Body() dto: CreateVoucherDto) {
+  async create(@Body() dto: CreateVoucherDto) {
+    // Gated here rather than in the service: VouchersService.create() is also
+    // the intake path for the mobile sync inbox and for approved requests,
+    // which run under the rep's own (unassigned, therefore empty) scope. A
+    // check inside the service would lock the app out of its own vouchers.
+    assertUserCodeInScope(
+      await this.scope.forCurrentUser(),
+      dto.userCode,
+      `Salesman ${dto.userCode}`,
+    );
     return this.vouchersService.create(dto);
   }
 

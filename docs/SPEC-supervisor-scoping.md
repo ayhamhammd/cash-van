@@ -1,7 +1,7 @@
 # SPEC — Supervisor scoping (per-salesman data isolation)
 
-**Status:** phase 1 landed (migration + `ScopeService` + assignment API).
-Nothing is enforced yet — see §9.
+**Status:** phase 1 done. Phase 2 (enforcement sweep) **partially done** — 7 of
+13 modules. **Do not create supervisor accounts yet**; see §9 for what is left.
 **Repos:** `cash-van-dashboard` (backend), `cash-van-dashboard-frontend` (dashboard)
 **Not affected:** FlowVan app, ERP
 
@@ -72,7 +72,7 @@ One service, one method, one meaning. Everything else consumes it.
 ```ts
 type Scope =
   | { kind: 'ALL' }                 // main admin — no filtering
-  | { kind: 'REPS'; repIds: string[] };  // scoped user
+  | { kind: 'REPS'; repIds: readonly string[]; userCodes: readonly string[] };
 ```
 
 `ScopeService.forCurrentUser(): Promise<Scope>`
@@ -81,9 +81,10 @@ Rules, in order:
 
 1. `role === 'admin'` → `ALL`.
 2. Has ≥1 row in `supervisor_reps` → `REPS` with those ids.
-3. Otherwise → **`REPS` with an empty list**, i.e. sees nothing.
+3. Is themselves a rep → `REPS` with just their own id.
+4. Otherwise → **`REPS` with an empty list**, i.e. sees nothing.
 
-Rule 3 is the important one: **deny by default**. A user who should be scoped
+Rule 4 is the important one: **deny by default**. A user who should be scoped
 but has no assignment yet sees an empty dashboard, never the whole company. The
 opposite default is the kind of mistake that only surfaces after a leak.
 
@@ -94,10 +95,18 @@ not per query, so a report touching six tables resolves once.
 frozen `EMPTY_SCOPE`, `isUnscoped` / `isEmptyScope`), `scope.service.ts`
 (`forCurrentUser()` memoised + `forUser(userId, role)` pure), `scope.module.ts`
 (global, so no module can leak by forgetting to import it). Unit tests in
-`scope.service.spec.ts` cover all three rules plus fail-closed and memoisation.
+`scope.service.spec.ts` cover all four rules plus fail-closed and memoisation,
+and `scope.util.spec.ts` covers the query helpers.
 
-**Consequence of rule 3, to settle before the sweep (this is the real content of
-Q1):** today a `manager` or `viewer` sees every rep. Once enforcement lands they
+**Rule 3 was added during the sweep** (a user who *is* a rep resolves to their
+own rep id). It is not a widening — it is what keeps the mobile app working.
+A salesman's login is not an admin and has no assignment, so without it they
+resolve to nothing and the app loses access to its own vouchers, stock and
+collections. It is also strictly tighter than the status quo, where a rep's
+token can read *any* rep's data through the dashboard endpoints.
+
+**Consequence of the deny-by-default rule, to settle before finishing the sweep
+(this is the real content of Q1):** today a `manager` or `viewer` sees every rep. Once enforcement lands they
 resolve to the *empty* scope unless assigned, so those accounts go blank. Three
 ways out, in order of preference:
 
@@ -129,8 +138,8 @@ it must be decided *before* step 2 of §9, not discovered afterwards.
 | approvals | `approval_request` | `rep_id` |
 | customers | `customer`, `customer_visit` | `rep_id` |
 | cash-accounts | `cash_account`, `account_transaction` | `rep_id` |
-| invoices | `invoice` | `user_code` |
-| tax | `credit_note` | `user_code` |
+| invoices | `invoice` | `rep_id` |
+| tax | `credit_note` | `rep_id` |
 
 Two link shapes exist — `rep_id` and `user_code`. The scope resolver must expose
 **both** (`repIds` and the corresponding `userCodes`), resolved together, so a
@@ -144,6 +153,22 @@ Consequence to handle: a customer whose `rep_id` changes moves between
 supervisors, and their history moves with them — a supervisor loses sight of
 past vouchers for a customer reassigned away. That is the correct reading of
 "owned", but it means reassignment is a meaningful act and must be audited.
+
+**Two further consequences, surfaced by implementing it — both need a decision
+before step 4:**
+
+1. A customer with `rep_id IS NULL` (house account, imported, not yet assigned)
+   becomes visible to the **main admin only**. This is Q5 applied to customers.
+   If the client has such customers, someone must assign them or accept that
+   supervisors cannot see them.
+2. A rep can no longer act on another rep's customer — including recording a
+   visit. If reps in the field genuinely share customers (cover, holidays, a
+   second van on the same street), this will read as a regression. Ownership by
+   `rep_id` is what "owned" means, but it is stricter than how field teams often
+   actually work, so it is worth checking against the client before flipping on.
+
+The spec table above also had two entries wrong: `invoice` and `credit_note`
+carry `rep_id`, not `user_code`. Corrected in the table.
 
 ### 6.2 How, not just where
 
@@ -223,7 +248,35 @@ Sequence:
    `supervisor_reps` (migration `1722000000000`), `src/common/scope/`, and
    `PUT|GET /api/v1/users/:id/reps` (admin-only, audited by the global
    interceptor). Nothing consumes `Scope` yet, by design.
-2. Enforcement sweep, module by module, each with its two tests.
+2. Enforcement sweep, module by module. **IN PROGRESS — 7 of 13.**
+
+   | Module | Entry points scoped | Status |
+   |---|---|---|
+   | vouchers | `list`, `findOneOrThrow` (covers `update`/`remove`), `post`, `fulfill`, controller `create` | done |
+   | reps | `list`, `findOne` (covers `update`/`kpis`), `softDelete` | done |
+   | reps/locations | `list`, `visitsForRep`, `trackingSummary`, `latestPerRep` (live map) | done |
+   | approvals | `list`, `findInScopeOrThrow` (covers `approve`/`reject`) | done |
+   | targets | `list`, `upsert`, `remove` | done |
+   | products/van-stock | `assertRep` (covers `forRep`/`load`/`return`) | done |
+   | collections | `list`, `findOne` (covers `confirm`/`update`), `create`, `summary`, `batchDeposit` | done |
+   | customers | `list`, `findOneOrThrow` (covers most), `reassign` (both ends) | done |
+   | **invoices** | — | **TODO** |
+   | **tax / credit-notes** | — | **TODO** |
+   | **cash-accounts** | — | **TODO** |
+   | **routes** (`route_plan`, `journey_plan_entry`) | — | **TODO** |
+   | **sync** (`voucher_inbox`) | — | **TODO** |
+   | **reports** | — | **TODO**, and blocked on Q4 |
+
+   Not yet written: the per-module default-deny and cross-scope tests §6.2 calls
+   for. `ScopeService` and `scope.util` have full unit coverage; the modules do
+   not. Both must exist before step 4.
+
+   Also unscoped and deliberately so — these are mobile intake paths that run
+   under the salesman's own scope: `VouchersService.create` (gated at the
+   dashboard controller instead), `LocationsService.record`/`recordBulk`,
+   `ApprovalsService.findOneOrThrow`/`mine`/`cancel`,
+   `RepsService.findByUserId`/`findByCode`, `TargetsService.getForRep`.
+
 3. Frontend assignment UI + scope indicator.
 4. Flip on: create the first supervisor, verify against a known rep set.
 

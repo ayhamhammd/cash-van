@@ -22,6 +22,8 @@ import { hashPhone } from '../../common/utils/phone-hash.util';
 import { JobsService } from '../../common/jobs/jobs.service';
 import { StorageService } from '../../common/storage/storage.service';
 import { randomUUID } from 'crypto';
+import { ScopeService } from '../../common/scope/scope.service';
+import { applyRepScope, assertRepInScope } from '../../common/scope/scope.util';
 
 export interface CustomerInsights {
   customer: Customer;
@@ -67,6 +69,7 @@ export class CustomersService {
     private readonly jobs: JobsService,
     private readonly storage: StorageService,
     private readonly events: EventEmitter2,
+    private readonly scope: ScopeService,
   ) {}
 
   async create(dto: CreateCustomerDto): Promise<Customer> {
@@ -159,9 +162,22 @@ export class CustomersService {
     return customer;
   }
 
+  /**
+   * The gate almost every customer operation routes through — update, visits,
+   * insights, attachments, reassign, remove.
+   *
+   * Q2 made customers rep-owned, so ownership is `customer.rep_id`. Two
+   * consequences worth knowing: a customer with no rep_id is visible only to
+   * the main admin, and a rep can no longer act on another rep's customer.
+   */
   async findOneOrThrow(id: string): Promise<Customer> {
     const c = await this.customers.findOne({ where: { id } });
     if (!c) throw new NotFoundException(`Customer ${id} not found`);
+    assertRepInScope(
+      await this.scope.forCurrentUser(),
+      c.repId,
+      `Customer ${id}`,
+    );
     return c;
   }
 
@@ -172,6 +188,8 @@ export class CustomersService {
       .orderBy('c.created_at', 'DESC')
       .take(query.limit ?? 25)
       .skip(query.offset ?? 0);
+
+    applyRepScope(qb, await this.scope.forCurrentUser(), 'c.rep_id');
 
     if (query.unassigned) qb.andWhere('c.rep_id IS NULL');
     else if (query.repId) qb.andWhere('c.rep_id = :repId', { repId: query.repId });
@@ -231,7 +249,15 @@ export class CustomersService {
   }
 
   async reassign(id: string, newRepId: string): Promise<Customer> {
+    // Both ends: findOneOrThrow gates the customer they're moving FROM, this
+    // gates who they can move it TO. Without the second check a supervisor
+    // could push a customer out of their own scope and lose it.
     const customer = await this.findOneOrThrow(id);
+    assertRepInScope(
+      await this.scope.forCurrentUser(),
+      newRepId,
+      `Rep ${newRepId}`,
+    );
     customer.repId = newRepId;
     return this.customers.save(customer);
   }

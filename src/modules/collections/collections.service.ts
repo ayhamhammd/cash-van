@@ -24,6 +24,9 @@ import { CreateCollectionDto } from './dto/create-collection.dto';
 import { UpdateCollectionDto } from './dto/update-collection.dto';
 import { ListCollectionsQuery } from './dto/query.dto';
 import { BatchDepositDto } from './dto/collection-actions.dto';
+import { ScopeService } from '../../common/scope/scope.service';
+import { isEmptyScope } from '../../common/scope/scope.types';
+import { assertRepInScope, repInScope } from '../../common/scope/scope.util';
 
 /** A collection list row enriched with the customer + salesman display names. */
 export type CollectionListItem = Collection & {
@@ -57,11 +60,21 @@ export class CollectionsService {
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
     private readonly proximity: CustomerProximityService,
     private readonly events: EventEmitter2,
+    private readonly scope: ScopeService,
   ) {}
 
   async list(q: ListCollectionsQuery): Promise<{ items: CollectionListItem[]; total: number }> {
+    const scope = await this.scope.forCurrentUser();
+    if (isEmptyScope(scope)) return { items: [], total: 0 };
+
     const where: Record<string, unknown> = {};
-    if (q.repId) where.repId = q.repId;
+    // Scope first, then the caller's filter — which can only narrow it. A
+    // q.repId outside the scope yields nothing rather than someone else's rows.
+    if (scope.kind !== 'ALL') where.repId = In([...scope.repIds]);
+    if (q.repId) {
+      if (!repInScope(scope, q.repId)) return { items: [], total: 0 };
+      where.repId = q.repId;
+    }
     if (q.customerId) where.customerId = q.customerId;
     if (q.method) where.method = q.method;
     if (q.status) where.status = q.status;
@@ -106,6 +119,12 @@ export class CollectionsService {
       relations: { cheques: true },
     });
     if (!c) throw new NotFoundException(`Collection ${id} not found`);
+    // confirm() and update() both load through here, so this covers them too.
+    assertRepInScope(
+      await this.scope.forCurrentUser(),
+      c.repId,
+      `Collection ${id}`,
+    );
     return c;
   }
 
@@ -128,6 +147,13 @@ export class CollectionsService {
   }
 
   async create(dto: CreateCollectionDto): Promise<Collection> {
+    // A salesman resolves to their own rep, so this passes for the app and
+    // still blocks a supervisor booking a collection against another segment.
+    assertRepInScope(
+      await this.scope.forCurrentUser(),
+      dto.repId,
+      `Rep ${dto.repId}`,
+    );
     const rep = await this.reps.findOne({ where: { id: dto.repId } });
     if (!rep) {
       throw new BadRequestException(`Rep ${dto.repId} not found`);
@@ -304,7 +330,10 @@ export class CollectionsService {
   }
 
   async batchDeposit(dto: BatchDepositDto): Promise<{ deposited: number; skipped: string[] }> {
-    const rows = await this.collections.find({ where: { id: In(dto.collectionIds) } });
+    const scope = await this.scope.forCurrentUser();
+    const rows = (
+      await this.collections.find({ where: { id: In(dto.collectionIds) } })
+    ).filter((r) => repInScope(scope, r.repId));
     const byId = new Map(rows.map((r) => [r.id, r]));
     const skipped: string[] = [];
     let deposited = 0;
@@ -329,8 +358,23 @@ export class CollectionsService {
     const start = new Date(`${day}T00:00:00.000Z`);
     const end = new Date(`${day}T23:59:59.999Z`);
 
+    const scope = await this.scope.forCurrentUser();
+    if (isEmptyScope(scope)) {
+      return {
+        date: day,
+        totalCollectedFils: 0,
+        cashFils: 0,
+        chequeFils: 0,
+        pendingFils: 0,
+        overdueChequeFils: 0,
+      };
+    }
+
     const dayRows = await this.collections.find({
-      where: { collectedAt: Between(start, end) },
+      where: {
+        collectedAt: Between(start, end),
+        ...(scope.kind === 'ALL' ? {} : { repId: In([...scope.repIds]) }),
+      },
     });
     const sumBy = (pred: (c: Collection) => boolean) =>
       dayRows.filter(pred).reduce((a, c) => a + c.amount, 0);

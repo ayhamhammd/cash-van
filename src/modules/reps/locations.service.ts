@@ -8,6 +8,9 @@ import { RepLocationEvent } from './entities/rep-location-event.entity';
 import { RepStatusService } from './rep-status.service';
 import { RecordLocationDto, BulkRecordLocationDto } from './dto/record-location.dto';
 import { ListLocationsQuery } from './dto/list-locations.query';
+import { ScopeService } from '../../common/scope/scope.service';
+import { isEmptyScope } from '../../common/scope/scope.types';
+import { assertRepInScope, repInScope } from '../../common/scope/scope.util';
 
 export type LiveStatus = 'online' | 'idle' | 'offline';
 
@@ -65,6 +68,7 @@ export class LocationsService {
     private readonly reps: Repository<Rep>,
     private readonly bus: EventEmitter2,
     private readonly repStatus: RepStatusService,
+    private readonly scope: ScopeService,
   ) {}
 
   async record(repId: string, dto: RecordLocationDto): Promise<RepLocationEvent> {
@@ -119,7 +123,7 @@ export class LocationsService {
   }
 
   async list(repId: string, q: ListLocationsQuery): Promise<TrailPoint[]> {
-    await this.assertRepExists(repId);
+    await this.assertRepVisible(repId);
     const to = q.to ? new Date(q.to) : new Date();
     const from = q.from ? new Date(q.from) : new Date(to.getTime() - 24 * 3600_000);
 
@@ -162,7 +166,7 @@ export class LocationsService {
 
   /** A rep's customer visits within a range (visit markers for the tracking map). */
   async visitsForRep(repId: string, fromIso?: string, toIso?: string): Promise<VisitRow[]> {
-    await this.assertRepExists(repId);
+    await this.assertRepVisible(repId);
     const to = toIso ? new Date(toIso) : new Date();
     const from = fromIso ? new Date(fromIso) : new Date(to.getTime() - 30 * 24 * 3600_000);
     return (await this.events.query(
@@ -206,7 +210,7 @@ export class LocationsService {
     toIso?: string,
     bucket: 'day' | 'month' = 'day',
   ): Promise<TrackingBucket[]> {
-    await this.assertRepExists(repId);
+    await this.assertRepVisible(repId);
     const to = toIso ? new Date(toIso) : new Date();
     const from = fromIso ? new Date(fromIso) : new Date(to.getTime() - 30 * 24 * 3600_000);
     const rows = (await this.events.query(
@@ -281,13 +285,20 @@ export class LocationsService {
 
     if (rows.length === 0) return [];
 
+    // The live map is a read across every rep, so it is filtered here rather
+    // than per-rep: a supervisor sees only their own pins.
+    const scope = await this.scope.forCurrentUser();
+    if (isEmptyScope(scope)) return [];
+    const visible = rows.filter((r) => repInScope(scope, r.rep_id));
+    if (visible.length === 0) return [];
+
     const reps = await this.reps.find({
-      where: { id: In(rows.map((r) => r.rep_id)) },
+      where: { id: In(visible.map((r) => r.rep_id)) },
     });
     const repIndex = new Map(reps.map((r) => [r.id, r]));
     const now = Date.now();
 
-    return rows.flatMap((row) => {
+    return visible.flatMap((row) => {
       const rep = repIndex.get(row.rep_id);
       if (!rep || !rep.isActive) return [];
       const ageMs = now - new Date(row.recorded_at).getTime();
@@ -338,5 +349,18 @@ export class LocationsService {
   private async assertRepExists(repId: string): Promise<void> {
     const exists = await this.reps.exist({ where: { id: repId } });
     if (!exists) throw new NotFoundException(`Rep ${repId} not found`);
+  }
+
+  /**
+   * Existence + scope, for the dashboard trail/visit/summary reads.
+   *
+   * Kept separate from assertRepExists() on purpose: record() and recordBulk()
+   * are the mobile app posting its OWN location, under the rep's own empty
+   * scope. Folding the scope check into the shared helper would stop the app
+   * reporting its position at all.
+   */
+  private async assertRepVisible(repId: string): Promise<void> {
+    await this.assertRepExists(repId);
+    assertRepInScope(await this.scope.forCurrentUser(), repId, `Rep ${repId}`);
   }
 }

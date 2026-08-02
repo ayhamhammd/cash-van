@@ -29,6 +29,11 @@ import {
 } from './dto/create-voucher.dto';
 import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
 import { UserContextService } from '../../common/context/user-context.service';
+import { ScopeService } from '../../common/scope/scope.service';
+import {
+  applyUserCodeScope,
+  assertUserCodeInScope,
+} from '../../common/scope/scope.util';
 import { CustomerProximityService } from '../customers/customer-proximity.service';
 import { OffersService } from '../offers/offers.service';
 import { OffersEngineService } from '../offers/offers-engine.service';
@@ -156,6 +161,7 @@ export class VouchersService implements OnModuleInit {
     @InjectRepository(PaymentCheque)
     private readonly chequesRepo: Repository<PaymentCheque>,
     private readonly userCtx: UserContextService,
+    private readonly scope: ScopeService,
     private readonly proximity: CustomerProximityService,
     private readonly events: EventEmitter2,
     private readonly offers: OffersService,
@@ -806,12 +812,16 @@ export class VouchersService implements OnModuleInit {
    * (out for SALE/TRANSFER_OUT, in for RETURN/TRANSFER_IN, reserve for ORDER).
    */
   async post(id: string): Promise<VoucherHeader> {
+    const scope = await this.scope.forCurrentUser();
     const result = await this.dataSource.transaction(async (em) => {
       const header = await em.getRepository(VoucherHeader).findOne({
         where: { id },
         relations: { transactions: true },
       });
       if (!header) throw new NotFoundException(`Voucher ${id} not found`);
+      // Loads its own header rather than going through findOneOrThrow, so the
+      // scope check has to be repeated here — checked before anything mutates.
+      assertUserCodeInScope(scope, header.userCode, `Voucher ${id}`);
       if (header.isPosted) {
         throw new ConflictException('Voucher already posted');
       }
@@ -848,12 +858,15 @@ export class VouchersService implements OnModuleInit {
    * (reserved -= qty, quantity -= qty). Idempotent via `is_fulfilled`.
    */
   async fulfill(id: string): Promise<VoucherHeader> {
+    const scope = await this.scope.forCurrentUser();
     return this.dataSource.transaction(async (em) => {
       const header = await em.getRepository(VoucherHeader).findOne({
         where: { id },
         relations: { transactions: true },
       });
       if (!header) throw new NotFoundException(`Voucher ${id} not found`);
+      // Same as post(): own load, so its own check, before any mutation.
+      assertUserCodeInScope(scope, header.userCode, `Voucher ${id}`);
       if (header.transKind !== 'ORDER') {
         throw new BadRequestException('Only ORDER vouchers can be fulfilled');
       }
@@ -944,6 +957,10 @@ export class VouchersService implements OnModuleInit {
     return this.headersRepo.save(header);
   }
 
+  /**
+   * The single-voucher gate. `update()` and `remove()` route through here, so
+   * scoping it covers those writes as well as the read.
+   */
   async findOneOrThrow(id: string): Promise<VoucherHeader> {
     const header = await this.headersRepo.findOne({
       where: { id },
@@ -952,6 +969,13 @@ export class VouchersService implements OnModuleInit {
     if (!header) {
       throw new NotFoundException(`Voucher ${id} not found`);
     }
+    // Out of scope reads as "not found" — a 403 here would confirm the voucher
+    // exists to someone who may not know that.
+    assertUserCodeInScope(
+      await this.scope.forCurrentUser(),
+      header.userCode,
+      `Voucher ${id}`,
+    );
     return header;
   }
 
@@ -989,6 +1013,10 @@ export class VouchersService implements OnModuleInit {
       )
       .groupBy('h.id')
       .orderBy('h.in_date', 'DESC');
+
+    // Before any caller-supplied filter: a supervisor's list is bounded by their
+    // reps first, and q.userCode below can only narrow that, never widen it.
+    applyUserCodeScope(qb, await this.scope.forCurrentUser(), 'h.user_code');
 
     if (q.transKind) {
       // Accept a single kind or a comma list (SALE,RETURN,ORDER) for the

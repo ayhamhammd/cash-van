@@ -16,10 +16,13 @@ describe('ScopeService', () => {
   function build(opts: {
     links?: Link[];
     codes?: CodeRow[];
+    /** The rep row this user IS, if any (rule 3). */
+    ownRep?: { id: string } | null;
     ctx?: { userId: string; role: string } | null;
     clsActive?: boolean;
   }) {
     const linksFind = jest.fn().mockResolvedValue(opts.links ?? []);
+    const repsFindOne = jest.fn().mockResolvedValue(opts.ownRep ?? null);
     const getRawMany = jest.fn().mockResolvedValue(opts.codes ?? []);
     const qb = {
       innerJoin: jest.fn().mockReturnThis(),
@@ -38,14 +41,14 @@ describe('ScopeService', () => {
 
     const service = new ScopeService(
       { find: linksFind } as never,
-      { createQueryBuilder: () => qb } as never,
+      { createQueryBuilder: () => qb, findOne: repsFindOne } as never,
       {
         get: () => (opts.ctx === undefined ? { userId: 'u1', role: 'viewer' } : opts.ctx),
       } as never,
       cls as never,
     );
 
-    return { service, linksFind, getRawMany };
+    return { service, linksFind, getRawMany, repsFindOne };
   }
 
   describe('forUser', () => {
@@ -78,7 +81,7 @@ describe('ScopeService', () => {
     it.each(['supervisor', 'manager', 'viewer', 'anything-else'])(
       'resolves an unassigned %s to an empty scope, never to ALL',
       async (role) => {
-        const { service } = build({ links: [] });
+        const { service } = build({ links: [], ownRep: null });
         const scope = await service.forUser('u1', role);
 
         expect(scope).toEqual(EMPTY_SCOPE);
@@ -86,6 +89,40 @@ describe('ScopeService', () => {
         expect(isEmptyScope(scope)).toBe(true);
       },
     );
+
+    // Rule 3 — without this a salesman's own login resolves to nothing and the
+    // mobile app loses access to its own data.
+    it('resolves a salesman to their own rep when they have no assignment', async () => {
+      const { service } = build({
+        links: [],
+        ownRep: { id: 'rOwn' },
+        codes: [{ code: 'S007' }],
+      });
+
+      const scope = await service.forUser('u1', 'viewer');
+
+      expect(scope).toEqual({
+        kind: 'REPS',
+        repIds: ['rOwn'],
+        userCodes: ['S007'],
+      });
+    });
+
+    it('prefers the supervisor assignment over the user’s own rep', async () => {
+      const { service, repsFindOne } = build({
+        links: [{ repId: 'r1' }],
+        ownRep: { id: 'rOwn' },
+        codes: [{ code: 'S001' }],
+      });
+
+      const scope = (await service.forUser('u1', 'supervisor')) as Extract<
+        Scope,
+        { kind: 'REPS' }
+      >;
+
+      expect(scope.repIds).toEqual(['r1']);
+      expect(repsFindOne).not.toHaveBeenCalled();
+    });
 
     it('de-duplicates rep ids and user codes', async () => {
       const { service } = build({

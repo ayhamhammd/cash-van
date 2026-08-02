@@ -19,11 +19,18 @@ export const SCOPE_CTX_KEY = 'dataScope';
  *
  *   1. role === 'admin'                  -> ALL (main admin, unfiltered)
  *   2. has rows in `supervisor_reps`     -> REPS with those ids
- *   3. otherwise                         -> REPS with an empty list
+ *   3. is themselves a rep               -> REPS with just their own id
+ *   4. otherwise                         -> REPS with an empty list
  *
- * Rule 3 is the important one: **deny by default**. A user who should be scoped
+ * Rule 4 is the important one: **deny by default**. A user who should be scoped
  * but has no assignment yet sees an empty dashboard, never the whole company.
  * The opposite default is the kind of mistake that only surfaces after a leak.
+ *
+ * Rule 3 keeps the mobile app working. A salesman's login is not an admin and
+ * has no assignment, so rules 1/2/4 alone would resolve them to *nothing* and
+ * lock the app out of its own vouchers, stock and collections. Scoping them to
+ * their own rep is both what the app needs and strictly tighter than today,
+ * where a rep's token can read any rep's data through the dashboard endpoints.
  *
  * Scope is resolved from the DB per request, never from the JWT, so revoking an
  * assignment takes effect immediately instead of at next login.
@@ -77,7 +84,16 @@ export class ScopeService {
       select: { repId: true },
     });
     const repIds = [...new Set(rows.map((r) => r.repId))];
-    if (repIds.length === 0) return EMPTY_SCOPE;
+
+    if (repIds.length === 0) {
+      // Not a supervisor. If they're a salesman, they get themselves.
+      const own = await this.reps.findOne({
+        where: { userId },
+        select: { id: true },
+      });
+      if (!own) return EMPTY_SCOPE;
+      repIds.push(own.id);
+    }
 
     return { kind: 'REPS', repIds, userCodes: await this.userCodesFor(repIds) };
   }

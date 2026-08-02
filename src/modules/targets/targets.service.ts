@@ -3,6 +3,9 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 
 import { SalesTarget, TargetMetric } from './entities/sales-target.entity';
+import { ScopeService } from '../../common/scope/scope.service';
+import { isEmptyScope } from '../../common/scope/scope.types';
+import { assertRepInScope } from '../../common/scope/scope.util';
 import { UpsertTargetDto } from './dto/upsert-target.dto';
 
 export interface TargetRow {
@@ -65,11 +68,24 @@ export class TargetsService {
   constructor(
     @InjectDataSource() private readonly ds: DataSource,
     @InjectRepository(SalesTarget) private readonly repo: Repository<SalesTarget>,
+    private readonly scope: ScopeService,
   ) {}
 
   /** All active salesmen with their target for the month + actual sales + progress. */
   async list(year: number, month: number): Promise<TargetRow[]> {
     const [start, end] = periodBounds(year, month);
+
+    const scope = await this.scope.forCurrentUser();
+    if (isEmptyScope(scope)) return [];
+
+    // Raw SQL, so the scope goes in as a bound array parameter ($5) rather than
+    // through applyRepScope. `= ANY($5)` is the parameterised form of IN.
+    const params: unknown[] = [start, end, year, month];
+    let scopeSql = '';
+    if (scope.kind !== 'ALL') {
+      params.push([...scope.repIds]);
+      scopeSql = `AND r.id = ANY($${params.length}::uuid[])`;
+    }
 
     const rows: Array<Record<string, string | null>> = await this.ds.query(
       `
@@ -79,9 +95,10 @@ export class TargetsService {
       LEFT JOIN sales_targets t ON t.rep_id = r.id AND t.year = $3 AND t.month = $4
       ${ACTUALS_JOINS}
       WHERE r.is_active = true AND r.deleted_at IS NULL
+      ${scopeSql}
       ORDER BY COALESCE(r.name_ar, r.name_en)
       `,
-      [start, end, year, month],
+      params,
     );
 
     return rows.map(mapRow);
@@ -133,6 +150,11 @@ export class TargetsService {
 
   /** Create or replace a rep's target for a (year, month). */
   async upsert(dto: UpsertTargetDto): Promise<SalesTarget> {
+    assertRepInScope(
+      await this.scope.forCurrentUser(),
+      dto.repId,
+      `Salesman ${dto.repId}`,
+    );
     const existing = await this.repo.findOne({
       where: { repId: dto.repId, year: dto.year, month: dto.month },
     });
@@ -144,6 +166,11 @@ export class TargetsService {
   }
 
   async remove(id: string): Promise<{ deleted: boolean }> {
+    // Load before deleting: the id alone doesn't say whose target it is.
+    const row = await this.repo.findOne({ where: { id } });
+    if (!row) throw new NotFoundException('Target not found.');
+    assertRepInScope(await this.scope.forCurrentUser(), row.repId, 'Target');
+
     const res = await this.repo.delete(id);
     if (!res.affected) throw new NotFoundException('Target not found.');
     return { deleted: true };

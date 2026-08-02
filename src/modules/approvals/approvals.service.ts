@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -22,6 +22,9 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { CreateVoucherDto } from '../vouchers/dto/create-voucher.dto';
 import { Rep } from '../reps/entities/rep.entity';
 import { User } from '../users/entities/user.entity';
+import { ScopeService } from '../../common/scope/scope.service';
+import { isEmptyScope } from '../../common/scope/scope.types';
+import { assertRepInScope } from '../../common/scope/scope.util';
 
 const TYPE_LABEL: Record<ApprovalType, { ar: string; en: string }> = {
   RETURN_VOUCHER: { ar: 'مرتجع', en: 'Return' },
@@ -43,6 +46,7 @@ export class ApprovalsService {
     private readonly vouchers: VouchersService,
     private readonly notifications: NotificationsService,
     private readonly events: EventEmitter2,
+    private readonly scope: ScopeService,
   ) {}
 
   /** Salesman files a request; managers are notified instantly. */
@@ -93,10 +97,16 @@ export class ApprovalsService {
   }
 
   async list(q: ListApprovalsQueryDto): Promise<{ items: ApprovalRequest[]; total: number }> {
+    const scope = await this.scope.forCurrentUser();
+    // Short-circuit rather than building `IN ()`. A request with no rep_id is
+    // excluded from a scoped list by the same rule — deny by default.
+    if (isEmptyScope(scope)) return { items: [], total: 0 };
+
     const [items, total] = await this.repo.findAndCount({
       where: {
         ...(q.status ? { status: q.status } : {}),
         ...(q.type ? { type: q.type } : {}),
+        ...(scope.kind === 'ALL' ? {} : { repId: In([...scope.repIds]) }),
       },
       order: { createdAt: 'DESC' },
       skip: q.offset ?? 0,
@@ -117,9 +127,29 @@ export class ApprovalsService {
     });
   }
 
+  /**
+   * Unscoped loader. Stays unscoped because cancel() runs as the salesman who
+   * raised the request — under their own empty scope — and is authorised by the
+   * ownership check there instead.
+   */
   async findOneOrThrow(id: string): Promise<ApprovalRequest> {
     const row = await this.repo.findOne({ where: { id } });
     if (!row) throw new NotFoundException(`Approval request ${id} not found`);
+    return row;
+  }
+
+  /**
+   * The reviewer's gate: load, then check the request's OWN rep — not the rep
+   * of whoever is asking. Getting that backwards would let a supervisor approve
+   * anything as long as they supervised somebody.
+   */
+  private async findInScopeOrThrow(id: string): Promise<ApprovalRequest> {
+    const row = await this.findOneOrThrow(id);
+    assertRepInScope(
+      await this.scope.forCurrentUser(),
+      row.repId,
+      `Approval request ${id}`,
+    );
     return row;
   }
 
@@ -129,7 +159,7 @@ export class ApprovalsService {
    * VouchersService passes; attribution stays with the rep via payload.userCode.
    */
   async approve(id: string, reviewerUserId: string): Promise<ApprovalRequest> {
-    const row = await this.findOneOrThrow(id);
+    const row = await this.findInScopeOrThrow(id);
     if (row.status !== 'pending') {
       throw new ConflictException(`Request is already ${row.status}`);
     }
@@ -162,7 +192,7 @@ export class ApprovalsService {
   }
 
   async reject(id: string, reviewerUserId: string, reason: string): Promise<ApprovalRequest> {
-    const row = await this.findOneOrThrow(id);
+    const row = await this.findInScopeOrThrow(id);
     if (row.status !== 'pending') {
       throw new ConflictException(`Request is already ${row.status}`);
     }
