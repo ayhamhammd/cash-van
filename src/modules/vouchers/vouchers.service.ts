@@ -30,6 +30,7 @@ import {
 import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
 import { UserContextService } from '../../common/context/user-context.service';
 import { CustomerProximityService } from '../customers/customer-proximity.service';
+import { CustomersService } from '../customers/customers.service';
 import { OffersService } from '../offers/offers.service';
 import { OffersEngineService } from '../offers/offers-engine.service';
 import { SettingsService } from '../settings/settings.service';
@@ -87,6 +88,12 @@ const VAN_EFFECT: Record<string, 'in' | 'out' | 'reserve'> = {
  * separate IN voucher needed.
  */
 const TRANSFER_KIND = 'TRANSFER';
+
+/**
+ * Voucher kinds that mean a rep physically called on a customer. A transfer or
+ * an adjustment moves stock in a warehouse and is not a visit.
+ */
+const VISIT_KINDS = new Set(['SALE', 'RETURN', 'ORDER']);
 
 /** Voucher-number prefix per kind (SALE → INV …). Fallback: first 3 letters. */
 const VOUCHER_PREFIX: Record<string, string> = {
@@ -178,6 +185,7 @@ export class VouchersService implements OnModuleInit {
     private readonly chequesRepo: Repository<PaymentCheque>,
     private readonly userCtx: UserContextService,
     private readonly proximity: CustomerProximityService,
+    private readonly customersService: CustomersService,
     private readonly events: EventEmitter2,
     private readonly offers: OffersService,
     private readonly offersEngine: OffersEngineService,
@@ -233,6 +241,7 @@ export class VouchersService implements OnModuleInit {
     // their stock moves. MUST run before createUnchecked (was previously dead
     // code after an early return, so offers never applied on posted sales).
     const offerResult = await this.applyOffers(dto);
+    const saleLoc = saleLocationOf(dto);
     const result = await this.createUnchecked(dto);
     await this.recordOfferRedemptions(result, offerResult);
     // AR: immediately reflect a credit voucher on the customer's outstanding debt so the
@@ -240,6 +249,10 @@ export class VouchersService implements OnModuleInit {
     // raises the debt; a credit RETURN (credit note) lowers it. The ERP mirror
     // (pullCustomerBalances) later reconciles total_debt to the authoritative ERP balance.
     await this.applyCreditVoucherToDebt(dto);
+    // Every sale is also a CALL on that customer, so the dashboard and the visit
+    // reports show it. Without this a full selling day reads as zero visits —
+    // customer_visits was only ever written by the app's explicit "log visit".
+    await this.recordSaleVisit(dto, saleLoc);
     // Mirror posted vouchers to the ERP (ErpSync listener filters by kind + enqueues
     // an outbox push; no-op when ERP off). Stock IN/OUT adjustments aren't mirrored.
     if (result.isPosted) {
@@ -917,6 +930,45 @@ export class VouchersService implements OnModuleInit {
         relations: { transactions: true, payments: true },
       });
     });
+  }
+
+  /**
+   * Log the customer call behind a voucher.
+   *
+   * Best-effort by design: a voucher is money and a visit is reporting, so a
+   * failure here must never roll back or fail the sale. It is logged and the
+   * next call re-records it.
+   *
+   * Only for kinds that mean a rep stood in front of a customer — a warehouse
+   * transfer or a stock adjustment is not a visit.
+   */
+  private async recordSaleVisit(
+    dto: CreateVoucherDto,
+    saleLoc: { saleLat: number | null; saleLng: number | null },
+  ): Promise<void> {
+    if (!dto.customerNumber) return;
+    if (!VISIT_KINDS.has(dto.transKind)) return;
+    try {
+      const rep = await this.resolveRep(this.dataSource.manager, dto.userCode);
+      if (!rep) return;
+      const customer = await this.dataSource
+        .getRepository(Customer)
+        .findOne({ where: { customerNumber: dto.customerNumber } });
+      if (!customer) return;
+      await this.customersService.recordVisit({
+        customerId: customer.id,
+        repId: rep.id,
+        visitedAt: dto.inDate ? new Date(dto.inDate) : new Date(),
+        // A RETURN still means the rep called; it just did not sell.
+        hadSale: dto.transKind === 'SALE',
+        lat: saleLoc.saleLat,
+        lng: saleLoc.saleLng,
+      });
+    } catch (e) {
+      this.logger.warn(
+        `visit not recorded for ${dto.customerNumber}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   /** Resolve the rep (van owner) behind a voucher's userCode. */

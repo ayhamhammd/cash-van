@@ -258,17 +258,76 @@ export class CustomersService {
 
   async addVisit(customerId: string, dto: CreateVisitDto): Promise<CustomerVisit> {
     await this.findOneOrThrow(customerId);
-    return this.visits.save(
-      this.visits.create({
-        customerId,
-        repId: dto.repId,
-        visitedAt: dto.visitedAt ? new Date(dto.visitedAt) : new Date(),
-        hadSale: dto.hadSale ?? false,
-        visitNote: dto.visitNote ?? null,
-        lat: dto.lat ?? null,
-        lng: dto.lng ?? null,
-      }),
-    );
+    return this.recordVisit({
+      customerId,
+      repId: dto.repId,
+      visitedAt: dto.visitedAt ? new Date(dto.visitedAt) : new Date(),
+      hadSale: dto.hadSale ?? false,
+      visitNote: dto.visitNote ?? null,
+      lat: dto.lat ?? null,
+      lng: dto.lng ?? null,
+    });
+  }
+
+  /**
+   * Record a call on a customer — ONE row per rep per customer per day.
+   *
+   * A rep opens the customer (a visit with no sale), then may raise a voucher
+   * (a visit with a sale). That is one doorstep, not two, so the day's row is
+   * upserted rather than appended: appending would show a rep making twice the
+   * calls they made, and would put the same stop in both the "sold" and "did
+   * not sell" columns at once.
+   *
+   * Merge rules, all one-way, so replaying a call can never lose information:
+   *   - hadSale latches TRUE. A sale happened that day; a later no-sale open
+   *     does not un-happen it.
+   *   - visitedAt keeps the EARLIEST time — when the rep actually arrived.
+   *   - lat/lng and the note fill only when still empty, so the first real fix
+   *     wins over a later missing one.
+   */
+  async recordVisit(input: {
+    customerId: string;
+    repId: string;
+    visitedAt?: Date;
+    hadSale?: boolean;
+    visitNote?: string | null;
+    lat?: number | null;
+    lng?: number | null;
+  }): Promise<CustomerVisit> {
+    const visitedAt = input.visitedAt ?? new Date();
+    const day = visitedAt.toISOString().slice(0, 10);
+
+    return this.visits.manager.transaction(async (em) => {
+      const repo = em.getRepository(CustomerVisit);
+      const existing = await repo
+        .createQueryBuilder('v')
+        .setLock('pessimistic_write')
+        .where('v.customer_id = :customerId', { customerId: input.customerId })
+        .andWhere('v.rep_id = :repId', { repId: input.repId })
+        .andWhere(`(v.visited_at AT TIME ZONE 'UTC')::date = :day::date`, { day })
+        .getOne();
+
+      if (!existing) {
+        return repo.save(
+          repo.create({
+            customerId: input.customerId,
+            repId: input.repId,
+            visitedAt,
+            hadSale: input.hadSale ?? false,
+            visitNote: input.visitNote ?? null,
+            lat: input.lat ?? null,
+            lng: input.lng ?? null,
+          }),
+        );
+      }
+
+      existing.hadSale = existing.hadSale || (input.hadSale ?? false);
+      if (visitedAt < existing.visitedAt) existing.visitedAt = visitedAt;
+      existing.lat = existing.lat ?? input.lat ?? null;
+      existing.lng = existing.lng ?? input.lng ?? null;
+      existing.visitNote = existing.visitNote ?? input.visitNote ?? null;
+      return repo.save(existing);
+    });
   }
 
   async listVisits(
