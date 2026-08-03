@@ -167,6 +167,19 @@ volumes:
 
 networks:
   cashvan-net:
+    # driver: bridge  -- correct ONLY when this stack owns the network alone.
+    #
+    # On a device that also runs the ERP behind a shared Caddy proxy, the network
+    # already exists and other containers live on it. Compose then tries to
+    # DELETE and recreate it on every `up`, fails with "network has active
+    # endpoints", and the whole stack refuses to start. Swap the two lines below
+    # for that layout so Compose ATTACHES instead of managing the lifecycle:
+    #
+    #   name: cashvan_cashvan-net
+    #   external: true
+    #
+    # Do not `docker network rm` the shared network to get out of it — that
+    # disconnects the ERP and the proxy along with this stack.
     driver: bridge
 YML
 
@@ -209,6 +222,22 @@ Stop:    docker compose down          (keeps data)
 Wipe:    docker compose down -v       (DELETES the database)
 Backup:  docker exec cashvan-db pg_dump -U cashvan cashvan > backup.sql
 Update:  docker load -i <new tarball> ; docker compose up -d
+
+SHARED-NETWORK DEVICES (this stack alongside the ERP / a Caddy proxy)
+   If `docker compose up -d` fails with
+       network cashvan_cashvan-net has active endpoints
+   the network is shared and Compose must not try to recreate it. In
+   docker-compose.yml replace:
+       networks:
+         cashvan-net:
+           driver: bridge
+   with:
+       networks:
+         cashvan-net:
+           name: cashvan_cashvan-net
+           external: true
+   then `docker compose up -d` again. Do NOT `docker network rm` it — that
+   disconnects the ERP and the proxy too.
 TXT
 
 echo "==> Done. Bundle ready in: $OUT/"
