@@ -36,7 +36,7 @@ export class ErpHttpClient {
 
   /** Per-request timeout (ms), from ERP_HTTP_TIMEOUT_MS. */
   private timeout(): number {
-    return this.config.get<number>('erp.httpTimeoutMs', 20000);
+    return this.config.get<number>('erp.httpTimeoutMs', 60000);
   }
 
   async list<T>(

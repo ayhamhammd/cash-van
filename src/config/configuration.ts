@@ -49,7 +49,7 @@ export default () => ({
   // slow or distant ERP can be accommodated without a rebuild.
   erp: {
     /** Per-request timeout for every ERP HTTP call. */
-    httpTimeoutMs: parseInt(process.env.ERP_HTTP_TIMEOUT_MS ?? '20000', 10),
+    httpTimeoutMs: parseInt(process.env.ERP_HTTP_TIMEOUT_MS ?? '60000', 10),
   },
   // Self-hosted OpenWA gateway (github.com/rmyndharis/OpenWA) used to send
   // quote links on WhatsApp. Unset baseUrl = outreach falls back to

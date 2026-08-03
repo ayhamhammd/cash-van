@@ -123,7 +123,10 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-cashvan} -d ${DB_NAME:-cashvan}"]
       interval: 5s
-      timeout: 3s
+      # 10s, not 3s: pg_isready on a loaded Windows host can take longer than
+      # three seconds to answer, and a failed probe stops the API starting at
+      # all — a slow database was being reported as a dead one.
+      timeout: 10s
       retries: 10
     networks: [cashvan-net]
     restart: always
