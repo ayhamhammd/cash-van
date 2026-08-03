@@ -26,6 +26,7 @@ import { RepsService } from './reps.service';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
+import { ActivateRepDto } from './dto/activate-rep.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
@@ -118,6 +119,23 @@ export class RepsController {
   @ApiOkResponse({ description: 'Updated rep' })
   update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateRepDto) {
     return this.reps.update(id, dto);
+  }
+
+
+  @Post(':id/activate')
+  @ApiOperation({
+    summary: 'Activate a frozen salesman',
+    description:
+      'Unfreeze a salesman with the activation key issued for their code. Idempotent — activating an already-active salesman succeeds and changes nothing.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
+  @ApiOkResponse({ description: 'The activated salesman' })
+  activate(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ActivateRepDto,
+    @CurrentUser('sub') actorId: string,
+  ) {
+    return this.reps.activate(id, dto.key, actorId ?? null);
   }
 
   @Delete(':id')

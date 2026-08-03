@@ -1364,6 +1364,11 @@ export class ErpSyncService {
    */
   private async pullWarehouses(): Promise<number> {
     const { data } = await this.erp.list<ErpWarehouse>('warehouses', { page: 1, pageSize: 200 });
+    // Read once per pull, not per salesman: the answer cannot change mid-batch,
+    // and a settings failure must not lock anyone out, so it defaults to false.
+    const activationOn = await this.settings
+      .salesmanActivationEnabled()
+      .catch(() => false);
     let n = 0;
     for (const w of data) {
       if (!w.code) continue; // only warehouses with an external code are syncable
@@ -1384,7 +1389,14 @@ export class ErpSyncService {
         });
         if (!existing) {
           await this.dataSource.transaction((em) =>
-            provisionRep(em, { code: w.code!, nameAr: w.name ?? w.code! }),
+            // Licensing: a salesman arriving FROM the ERP is frozen on the same
+            // terms as one created in the dashboard, or the lock would be
+            // trivially bypassed by adding the salesman in the ERP instead.
+            provisionRep(em, {
+              code: w.code!,
+              nameAr: w.name ?? w.code!,
+              frozen: activationOn,
+            }),
           );
         }
       }

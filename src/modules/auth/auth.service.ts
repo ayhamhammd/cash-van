@@ -58,6 +58,20 @@ export class AuthService {
 
     // Map the logged-in user to their field rep (1:1), if any.
     const rep = await this.repsService.findByUserId(user.id);
+
+    // Seat licensing: a frozen salesman exists but cannot sign in until their
+    // activation key is entered in the dashboard. Checked here rather than at
+    // each endpoint so there is one gate, not a list of them to keep in step.
+    //
+    // Deliberately a distinct code and message: "wrong password" would send the
+    // rep and their manager hunting for a credentials problem that is not there.
+    if (rep?.isFrozen) {
+      throw new UnauthorizedException({
+        message:
+          'This salesman is not activated yet. Ask the administrator to enter the activation key.',
+        code: 'salesman_not_activated',
+      });
+    }
     const repId = rep?.id ?? null;
 
     const permissions = this.extractPermissions(user);

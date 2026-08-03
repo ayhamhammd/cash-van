@@ -58,6 +58,11 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_MIN_INTERVAL_MS: Joi.number().min(5000).default(20000),
   WHATSAPP_DAILY_CAP: Joi.number().min(1).max(1000).default(150),
 
+  // Secret behind per-salesman activation keys. Optional: with no secret the
+  // activation endpoint refuses every key rather than accepting any, so an
+  // unconfigured server cannot silently hand out free seats.
+  SALESMAN_ACTIVATION_SECRET: Joi.string().allow('').default(''),
+
   // Rep-offline watchdog threshold (minutes of silence before alerting).
   REP_OFFLINE_THRESHOLD_MINUTES: Joi.number().min(2).default(10),
 

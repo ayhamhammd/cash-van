@@ -69,6 +69,14 @@ export class AppSettings {
 
   // ── ERP (erp-saas) integration ────────────────────────────────────────────
   /** The toggle: work WITH the ERP (sync items/units/stores/stock) or standalone. */
+  /**
+   * Seat licensing master switch. OFF by default so an existing installation
+   * upgrades to a no-op — turning it on is a deliberate act per client, never a
+   * side effect of deploying.
+   */
+  @Column({ name: 'salesman_activation_enabled', type: 'boolean', default: false })
+  salesmanActivationEnabled!: boolean;
+
   @Column({ name: 'erp_sync_enabled', type: 'boolean', default: false })
   erpSyncEnabled!: boolean;
 
