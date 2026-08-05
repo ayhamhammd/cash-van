@@ -939,12 +939,55 @@ export class ReportsService {
     if (q.payment === 'CREDIT') where.push(isCredit);
     else if (q.payment === 'CASH') where.push(`NOT ${isCredit}`);
 
+    // Per-voucher line roll-up.
+    //
+    // The report used to read voucher_headers.total_discount_value, which holds
+    // ONLY the voucher-level discount — so a sale that discounted every item and
+    // nothing at the header reported 0.000 given away. INV-4000020 on the client
+    // server is exactly that: four lines at 0.100 each, reported as no discount.
+    //
+    // voucher_transactions.discount_value is the RESOLVED per-line figure — the
+    // line's own discount PLUS its share of the header discount (see
+    // VouchersService, where it is written as lineDiscountFils + headerShareFils,
+    // and voucher-calc, which forces the shares to sum to exactly the header
+    // amount). Summing it therefore gives the WHOLE discount; adding the header
+    // column on top would count the voucher-level part twice.
+    //
+    // tobacco_net_tax_fils is integer FILS while every header money column is
+    // JOD, so it is converted here and nowhere else.
+    const lineRollup = `
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(t.discount_value), 0)                 AS line_discount,
+               COALESCE(SUM(t.tobacco_net_tax_fils), 0) / 1000.0  AS tobacco_tax
+          FROM voucher_transactions t
+         WHERE t.voucher_number = h.voucher_number
+      ) ld ON true`;
+
     const joins = `
       FROM voucher_headers h
       LEFT JOIN users u ON u.user_number = h.user_code
       LEFT JOIN reps  r ON r.user_id = u.id
       LEFT JOIN customers c ON c.customer_number = h.customer_number
+      ${lineRollup}
       WHERE ${where.join(' AND ')}`;
+
+    // The four money columns have to describe one voucher consistently:
+    //
+    //     subTotal - discount + tax = netTotal
+    //
+    // netTotal and total_tax are recorded facts, and the discount is now the
+    // real one, so the subtotal is derived from them. Reading h.total instead
+    // (the GST tax base) printed subTotal = netTotal on this installation: the
+    // items carry 0% GST and their tax content is TOBACCO tax, which h.total
+    // does not exclude. Deriving it works in both tax modes and needs no
+    // migration — every historical voucher recomputes correctly on read.
+    // The lines are the source of truth. The header column is only a fallback for
+    // a voucher with no line discounts recorded at all — an older document, or a
+    // header-only discount written before the shares were pushed down to the
+    // lines. When the lines DO carry discounts their sum already includes the
+    // header share, so the fallback can never double-count.
+    const discountExpr = `COALESCE(NULLIF(COALESCE(ld.line_discount, 0), 0), h.total_discount_value)`;
+    const subTotalExpr = `(h.net_total + ${discountExpr} - h.total_tax)`;
 
     const rowsRaw: Array<Record<string, string | null>> = await this.ds.query(
       `SELECT h.id::text      AS "id",
@@ -956,9 +999,10 @@ export class ReportsService {
               h.customer_number                               AS "customerNumber",
               COALESCE(c.name_ar, c.customer_name, c.name_en) AS "customerName",
               CASE WHEN ${isCredit} THEN 'CREDIT' ELSE 'CASH' END AS "payment",
-              h.total                AS "subTotal",
+              ${subTotalExpr}        AS "subTotal",
               h.total_tax            AS "totalTax",
-              h.total_discount_value AS "totalDiscount",
+              COALESCE(ld.tobacco_tax, 0) AS "tobaccoTax",
+              ${discountExpr}        AS "totalDiscount",
               h.net_total            AS "netTotal"
        ${joins}
        ORDER BY h.in_date ASC, h.voucher_number ASC
@@ -967,11 +1011,12 @@ export class ReportsService {
     );
 
     const totalsRaw: Array<Record<string, string>> = await this.ds.query(
-      `SELECT COUNT(*)::int                            AS "count",
-              COALESCE(SUM(h.total), 0)                AS "subTotal",
-              COALESCE(SUM(h.total_tax), 0)            AS "totalTax",
-              COALESCE(SUM(h.total_discount_value), 0) AS "totalDiscount",
-              COALESCE(SUM(h.net_total), 0)            AS "netTotal"
+      `SELECT COUNT(*)::int                                 AS "count",
+              COALESCE(SUM(${subTotalExpr}), 0)             AS "subTotal",
+              COALESCE(SUM(h.total_tax), 0)                 AS "totalTax",
+              COALESCE(SUM(COALESCE(ld.tobacco_tax, 0)), 0) AS "tobaccoTax",
+              COALESCE(SUM(${discountExpr}), 0)             AS "totalDiscount",
+              COALESCE(SUM(h.net_total), 0)                 AS "netTotal"
        ${joins}`,
       params,
     );
@@ -990,6 +1035,7 @@ export class ReportsService {
       payment: (r.payment as string) ?? 'CASH',
       subTotal: Number(r.subTotal ?? 0),
       totalTax: Number(r.totalTax ?? 0),
+      tobaccoTax: Number(r.tobaccoTax ?? 0),
       totalDiscount: Number(r.totalDiscount ?? 0),
       netTotal: Number(r.netTotal ?? 0),
     }));
@@ -1015,6 +1061,7 @@ export class ReportsService {
         count: Number(t.count ?? 0),
         subTotal: Number(t.subTotal ?? 0),
         totalTax: Number(t.totalTax ?? 0),
+        tobaccoTax: Number(t.tobaccoTax ?? 0),
         totalDiscount: Number(t.totalDiscount ?? 0),
         netTotal: Number(t.netTotal ?? 0),
       },
@@ -1084,6 +1131,7 @@ export class ReportsService {
       payment: String(r.method ?? '').toUpperCase(),
       subTotal: 0,
       totalTax: 0,
+      tobaccoTax: 0,
       totalDiscount: 0,
       // collections.amount is FILS (integer minor units) while every voucher
       // column is JOD. Without this divide the same column would hold 41010
@@ -1174,8 +1222,13 @@ export interface VoucherSummaryRow {
   customerName: string | null;
   /** CASH / CREDIT for a voucher; the method (cash, cheque, transfer) for a collection. */
   payment: string;
+  /** Before discount and before ANY tax: netTotal + totalDiscount - totalTax. */
   subTotal: number;
+  /** All tax content — GST plus tobacco. */
   totalTax: number;
+  /** The tobacco slice of totalTax, 0 where nothing tobacco was sold. */
+  tobaccoTax: number;
+  /** Voucher-level discount PLUS every per-item discount on the lines. */
   totalDiscount: number;
   netTotal: number;
 }
@@ -1189,6 +1242,7 @@ export interface VoucherSummaryTotals {
   count: number;
   subTotal: number;
   totalTax: number;
+  tobaccoTax: number;
   totalDiscount: number;
   netTotal: number;
 }
