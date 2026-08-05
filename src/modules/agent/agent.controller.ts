@@ -136,6 +136,7 @@ export class AgentController {
           prompt: dto.prompt,
           conversationId: dto.conversationId,
           userId: user?.sub ?? null,
+          persona: dto.persona,
         },
         abort.signal,
       )) {

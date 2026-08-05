@@ -68,4 +68,36 @@ export const AGENT_TOOL_DEFS: LlmToolDef[] = [
       required: ['sql', 'format'],
     },
   },
+  {
+    name: 'run_checks',
+    description:
+      'Run the reviewed audit battery: a fixed set of read-only SQL checks for ' +
+      'the things that go wrong in cash-van operations (vouchers with no ' +
+      'payment, customers over their credit limit, sales made away from the ' +
+      "customer's location, undeposited collections, negative van stock, " +
+      'documents that never reached the ERP). Returns each check with how many ' +
+      'rows it found and a small sample. Call this FIRST when asked what looks ' +
+      'wrong. You do not write these queries and cannot add to them; your job ' +
+      'is to explain and rank what they returned.',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_geo',
+    description:
+      'Customers with their coordinates, assigned salesman, outstanding debt, ' +
+      'last visit, last sale and sale count over the past 90 days — in one ' +
+      'call. Use this for anything about location, proximity, route coverage ' +
+      'or which customers have gone quiet, instead of assembling the same ' +
+      'joins by hand. Ordered least-recently-sold-to first.',
+    parameters: {
+      type: 'object',
+      properties: {
+        repId: {
+          type: 'string',
+          description:
+            "Optional rep UUID to restrict to one salesman's customers.",
+        },
+      },
+    },
+  },
 ];

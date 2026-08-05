@@ -1,4 +1,5 @@
 import { REPORT_FORMATS } from './agent.types';
+import { DEFAULT_PERSONA, personaPrompt, type Persona } from './personas';
 
 /**
  * System prompt for the report agent. Domain framing + hard rules. The full
@@ -22,6 +23,7 @@ export function languageDirective(language: string | undefined): string {
 export function buildSystemPrompt(
   tableNames: string[],
   language?: string,
+  persona: Persona = DEFAULT_PERSONA,
 ): string {
   const tables = tableNames.length
     ? tableNames.join(', ')
@@ -61,5 +63,9 @@ export function buildSystemPrompt(
     '',
     'LANGUAGE',
     `- ${languageDirective(language)}`,
+    '',
+    // Last, so the persona's framing is the most recent thing the model read
+    // before the conversation starts.
+    personaPrompt(persona),
   ].join('\n');
 }

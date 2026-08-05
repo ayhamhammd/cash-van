@@ -10,6 +10,12 @@ import { AiSessionService, type TurnRecord } from './store/ai-session.service';
 import { ReadonlyDbService } from './db/readonly-db.service';
 import { AGENT_TOOL_DEFS } from './tools/tool-definitions';
 import { buildSystemPrompt } from './agent.system-prompt';
+import {
+  DEFAULT_PERSONA,
+  isPersona,
+  toolsFor,
+  type Persona,
+} from './personas';
 import { AiProviderResolver } from './llm/ai-provider.resolver';
 import { SettingsService } from '../settings/settings.service';
 import { type LlmMessage, type LlmToolResult } from './llm/llm.types';
@@ -19,6 +25,9 @@ export interface ChatRequest {
   prompt: string;
   conversationId?: string;
   userId: string | null;
+  /** Which expert answers. Unknown values fall back rather than 400 — a client
+   *  sending a persona this build does not know should still get an answer. */
+  persona?: string;
 }
 
 @Injectable()
@@ -72,7 +81,19 @@ export class AgentService {
       .getAiConfig()
       .then((c) => c.language)
       .catch(() => 'auto');
-    const system = buildSystemPrompt(await this.getTableNames(), aiLanguage);
+    const persona: Persona = isPersona(req.persona)
+      ? req.persona
+      : DEFAULT_PERSONA;
+    const system = buildSystemPrompt(
+      await this.getTableNames(),
+      aiLanguage,
+      persona,
+    );
+    // The model is only OFFERED the tools its persona may use. Filtering here
+    // rather than refusing at dispatch means it never proposes an action it is
+    // not allowed to take, so the user never sees a tool call fail for a reason
+    // that is really a policy decision.
+    const tools = toolsFor(persona, AGENT_TOOL_DEFS);
     const reportIds: string[] = [];
     let stopReason = 'end_turn';
     // The per-message index, written once at the end of the turn. Collected
@@ -83,7 +104,7 @@ export class AgentService {
 
     for (let i = 0; i < this.maxIterations; i++) {
       const turn = provider.streamTurn(
-        { system, tools: AGENT_TOOL_DEFS, messages },
+        { system, tools, messages },
         signal,
       );
       let next = await turn.next();
@@ -175,7 +196,7 @@ export class AgentService {
     }
 
     await this.persist(convo, messages, req.prompt);
-    await this.indexTurns(convo.id, turns, provider.model);
+    await this.indexTurns(convo.id, turns, provider.model, persona);
 
     yield {
       type: 'done',
@@ -197,9 +218,10 @@ export class AgentService {
     conversationId: string,
     turns: TurnRecord[],
     model: string,
+    persona: string,
   ): Promise<void> {
     try {
-      await this.sessions.append(conversationId, turns, { model });
+      await this.sessions.append(conversationId, turns, { model, persona });
     } catch (err) {
       this.logger.error(
         `Failed to index conversation turns: ${this.errorMessage(err)}`,
