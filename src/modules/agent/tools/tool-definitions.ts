@@ -44,8 +44,10 @@ export const AGENT_TOOL_DEFS: LlmToolDef[] = [
       'deliverable file. For a quick answer, just reply in text instead. ' +
       'Supported formats: ' +
       REPORT_FORMATS.join(', ') +
-      '. If the user asks for any other format (e.g. csv, pdf, docx), do NOT call ' +
-      'this tool — tell them in text that the format is not supported yet.',
+      '. Prefer xlsx when the user will work with the numbers, and pdf when they ' +
+      'will read, print or send it. Arabic renders correctly in pdf. ' +
+      'If the user asks for a format not in that list (e.g. csv, docx), do NOT ' +
+      'call this tool — tell them in text that the format is not supported yet.',
     parameters: {
       type: 'object',
       properties: {

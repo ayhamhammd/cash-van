@@ -8,6 +8,7 @@ import { AgentStoreService } from './store/agent-store.service';
 import { AiSessionService } from './store/ai-session.service';
 import { ReadonlyDbService } from './db/readonly-db.service';
 import { ReportRendererService } from './reports/report-renderer.service';
+import { PdfRendererService } from './reports/pdf-renderer.service';
 import { SqlValidator } from './sql/sql-validator';
 import { AdminGuard } from './guards/admin.guard';
 import { AgentConversation } from './entities/agent-conversation.entity';
@@ -32,6 +33,7 @@ import { AiProviderResolver } from './llm/ai-provider.resolver';
     AiSessionService,
     ReadonlyDbService,
     ReportRendererService,
+    PdfRendererService,
     SqlValidator,
     AdminGuard,
   ],
