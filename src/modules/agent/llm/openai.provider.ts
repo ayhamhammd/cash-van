@@ -36,6 +36,9 @@ export class OpenAiProvider implements LlmProvider {
       model: this.model,
       max_tokens: this.maxTokens,
       stream: true,
+      // A streamed OpenAI response carries no usage unless this is set; the
+      // figures then arrive in a final chunk whose `choices` array is empty.
+      stream_options: { include_usage: true },
       messages: [
         { role: 'system', content: system },
         ...messages.flatMap(toOpenAi),
@@ -76,6 +79,7 @@ export class OpenAiProvider implements LlmProvider {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let usage: { inputTokens: number; outputTokens: number } | undefined;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -96,6 +100,15 @@ export class OpenAiProvider implements LlmProvider {
         } catch {
           continue;
         }
+        // The usage chunk arrives with an EMPTY choices array, so it has to be
+        // read before the `!choice` guard below drops the chunk entirely.
+        if (chunk.usage) {
+          usage = {
+            inputTokens: chunk.usage.prompt_tokens ?? 0,
+            outputTokens: chunk.usage.completion_tokens ?? 0,
+          };
+        }
+
         const choice = chunk.choices?.[0];
         if (!choice) continue;
         if (choice.finish_reason) finishReason = choice.finish_reason;
@@ -126,11 +139,16 @@ export class OpenAiProvider implements LlmProvider {
       text,
       toolCalls,
       stopReason: toolCalls.length > 0 ? 'tool_use' : finishReason,
+      usage,
     };
   }
 }
 
 interface OpenAiStreamChunk {
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+  } | null;
   choices?: Array<{
     finish_reason?: string | null;
     delta?: {

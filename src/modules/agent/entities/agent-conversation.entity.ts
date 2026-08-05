@@ -30,6 +30,33 @@ export class AgentConversation {
   @Column({ type: 'jsonb', default: () => `'[]'::jsonb` })
   messages!: unknown[];
 
+  /** Which expert answered: analyst | admin | auditor | sales. */
+  @Column({ type: 'text', default: 'analyst' })
+  persona!: string;
+
+  /** Model id resolved when the thread last ran — kept for cost history. */
+  @Column({ type: 'text', nullable: true })
+  model?: string | null;
+
+  /**
+   * Running totals, not a per-turn figure. Stored as bigint because a long
+   * research session on a 60-table schema passes a million input tokens
+   * comfortably.
+   */
+  @Column({ name: 'input_tokens', type: 'bigint', default: 0 })
+  inputTokens!: string;
+
+  @Column({ name: 'output_tokens', type: 'bigint', default: 0 })
+  outputTokens!: string;
+
+  /** Set to hide from the session list without losing the transcript. */
+  @Column({ name: 'archived_at', type: 'timestamptz', nullable: true })
+  archivedAt?: Date | null;
+
+  /** Rolling summary of turns older than the replay window (Phase 1b). */
+  @Column({ type: 'text', nullable: true })
+  summary?: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

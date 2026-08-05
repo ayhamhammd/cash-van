@@ -69,7 +69,15 @@ export class AnthropicProvider implements LlmProvider {
         });
       }
     }
-    return { text, toolCalls, stopReason: final.stop_reason ?? 'end_turn' };
+    return {
+      text,
+      toolCalls,
+      stopReason: final.stop_reason ?? 'end_turn',
+      usage: {
+        inputTokens: final.usage?.input_tokens ?? 0,
+        outputTokens: final.usage?.output_tokens ?? 0,
+      },
+    };
   }
 }
 

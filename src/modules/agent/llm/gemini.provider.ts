@@ -57,7 +57,17 @@ export class GeminiProvider implements LlmProvider {
     let text = '';
     const toolCalls: LlmToolCall[] = [];
     let idx = 0;
+    // Gemini repeats usageMetadata on every chunk with running totals, so the
+    // LAST one seen is the turn's figure — accumulating would multiply it.
+    let usage: { inputTokens: number; outputTokens: number } | undefined;
     for await (const chunk of stream) {
+      const meta = chunk.usageMetadata;
+      if (meta) {
+        usage = {
+          inputTokens: meta.promptTokenCount ?? 0,
+          outputTokens: meta.candidatesTokenCount ?? 0,
+        };
+      }
       const parts: Part[] = chunk.candidates?.[0]?.content?.parts ?? [];
       for (const part of parts) {
         if (typeof part.text === 'string' && part.text.length > 0) {
@@ -78,6 +88,7 @@ export class GeminiProvider implements LlmProvider {
       text,
       toolCalls,
       stopReason: toolCalls.length > 0 ? 'tool_use' : 'end_turn',
+      usage,
     };
   }
 }

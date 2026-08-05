@@ -36,12 +36,23 @@ export type LlmMessage =
   | { role: 'assistant'; text: string; toolCalls: LlmToolCall[] }
   | { role: 'tool'; results: LlmToolResult[] };
 
+/** Tokens one turn consumed, when the provider reports them. */
+export interface LlmUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 /** What one assistant turn produced after streaming completes. */
 export interface LlmTurnResult {
   text: string;
   toolCalls: LlmToolCall[];
   /** 'tool_use' when the model wants tools run, else 'end_turn' / etc. */
   stopReason: string;
+  /**
+   * Optional: not every provider reports usage on a streamed turn, and a
+   * missing figure must read as "unknown" in the UI rather than as zero cost.
+   */
+  usage?: LlmUsage;
 }
 
 export interface LlmTurnParams {

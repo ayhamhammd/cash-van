@@ -34,7 +34,13 @@ export type AgentEvent =
   | { type: 'report_ready'; data: ReportRef }
   | {
       type: 'done';
-      data: { conversationId: string; reportIds: string[]; stopReason: string };
+      data: {
+        conversationId: string;
+        reportIds: string[];
+        stopReason: string;
+        /** Absent when the provider did not report usage — show "—", not 0. */
+        usage?: { input: number; output: number };
+      };
     }
   | { type: 'error'; data: { message: string } };
 
