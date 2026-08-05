@@ -124,15 +124,17 @@ deletes data.
 BEFORE YOU START — one edit that is REQUIRED
 --------------------------------------------
 If your docker-compose.yml still carries the temporary override added to work
-around the old crash loop:
+around the old crash loop — anything mentioning dist/src — REPLACE it with:
 
-    command: ["sh", "-c", "node dist/src/database/... && node dist/src/main.js"]
-       (anything mentioning dist/src)
+    command: ["npm", "run", "start:deploy"]
 
-DELETE that whole 'command:' line from the 'app' service. This build puts the
-compiled output back at dist/ (not dist/src/), so the override now points at
-files that do not exist and the API will crash-loop on start. With the line
-removed the image runs its own correct start command.
+This build puts the compiled output back at dist/ (not dist/src/), so the old
+override points at files that no longer exist and the API crash-loops on start.
+
+Do NOT simply delete the line. The image's own default command is
+'node dist/main.js', which starts the server but SKIPS MIGRATIONS — the API
+would come up against an un-migrated database and fail on missing columns.
+start:deploy is what runs migrate -> seed -> start.
 
 STEPS
 -----
