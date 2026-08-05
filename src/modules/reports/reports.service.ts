@@ -920,9 +920,18 @@ export class ReportsService {
       params.push(q.repId);
       where.push(`r.id = $${params.length}`);
     }
-    if (q.transKind && q.transKind !== 'ALL') {
+    if (q.transKind === 'COLLECTION') {
+      // Nothing in voucher_headers can match; short-circuit rather than run a
+      // scan guaranteed to return nothing.
+      where.push('1 = 0');
+    } else if (q.transKind && q.transKind !== 'ALL') {
       params.push(q.transKind);
       where.push(`h.trans_kind = $${params.length}`);
+    } else {
+      // "All" means all SALES documents, not every voucher in the system. A
+      // stock load (IN) or a van transfer is not something a sales report should
+      // total — including them made the net disagree with the day's takings.
+      where.push(`h.trans_kind IN ('SALE', 'RETURN', 'ORDER')`);
     }
     // CREDIT = at least one on-account payment; CASH = everything else. The same
     // reading the offers engine uses, so the two never disagree on a voucher.
@@ -938,9 +947,10 @@ export class ReportsService {
       WHERE ${where.join(' AND ')}`;
 
     const rowsRaw: Array<Record<string, string | null>> = await this.ds.query(
-      `SELECT h.voucher_number AS "voucherNumber",
+      `SELECT h.id::text      AS "id",
+              h.voucher_number AS "docNumber",
               h.in_date        AS "inDate",
-              h.trans_kind     AS "transKind",
+              h.trans_kind     AS "docType",
               h.user_code      AS "userCode",
               COALESCE(r.name_ar, r.name_en)                  AS "repName",
               h.customer_number                               AS "customerNumber",
@@ -966,22 +976,41 @@ export class ReportsService {
       params,
     );
 
+    const collections = await this.collectionsBreakdown(from, to, q.repId);
+
+    const voucherRows: VoucherSummaryRow[] = rowsRaw.map((r) => ({
+      id: r.id as string,
+      docType: r.docType as string,
+      docNumber: r.docNumber as string,
+      inDate: new Date(r.inDate as string),
+      userCode: r.userCode ?? null,
+      repName: r.repName ?? null,
+      customerNumber: r.customerNumber ?? null,
+      customerName: r.customerName ?? null,
+      payment: (r.payment as string) ?? 'CASH',
+      subTotal: Number(r.subTotal ?? 0),
+      totalTax: Number(r.totalTax ?? 0),
+      totalDiscount: Number(r.totalDiscount ?? 0),
+      netTotal: Number(r.netTotal ?? 0),
+    }));
+
+    // Collections join the same list unless the caller asked for one voucher
+    // kind — "show me returns" should not also hand back receipts.
+    const wantsCollections =
+      !q.transKind || q.transKind === 'ALL' || q.transKind === 'COLLECTION';
+    const collectionRows = wantsCollections
+      ? await this.collectionRows(from, to, q.repId, q.payment)
+      : [];
+
+    // One list, in time order, so a sale and the money taken against it sit next
+    // to each other instead of in two panels to correlate by eye.
+    const merged = [...voucherRows, ...collectionRows].sort(
+      (a, b) => a.inDate.getTime() - b.inDate.getTime(),
+    );
+
     const t = totalsRaw[0] ?? {};
     return {
-      rows: rowsRaw.map((r) => ({
-        voucherNumber: r.voucherNumber as string,
-        inDate: new Date(r.inDate as string),
-        transKind: r.transKind as string,
-        userCode: r.userCode as string,
-        repName: r.repName ?? null,
-        customerNumber: r.customerNumber ?? null,
-        customerName: r.customerName ?? null,
-        payment: (r.payment as 'CASH' | 'CREDIT') ?? 'CASH',
-        subTotal: Number(r.subTotal ?? 0),
-        totalTax: Number(r.totalTax ?? 0),
-        totalDiscount: Number(r.totalDiscount ?? 0),
-        netTotal: Number(r.netTotal ?? 0),
-      })),
+      rows: merged,
       totals: {
         count: Number(t.count ?? 0),
         subTotal: Number(t.subTotal ?? 0),
@@ -989,8 +1018,78 @@ export class ReportsService {
         totalDiscount: Number(t.totalDiscount ?? 0),
         netTotal: Number(t.netTotal ?? 0),
       },
-      collections: await this.collectionsBreakdown(from, to, q.repId),
+      collections,
     };
+  }
+
+  /**
+   * Collections as report rows, so receipts sit in the same table as vouchers.
+   *
+   * A collection has no tax or discount — those stay 0 and the amount lands in
+   * netTotal, which is what the money column means for a receipt.
+   *
+   * The cash/credit filter maps onto the METHOD: cash collections are cash, and
+   * cheques and transfers are treated as the non-cash side. Bounced ones are
+   * excluded here exactly as they are from the footer, so the list and the total
+   * can never disagree.
+   */
+  private async collectionRows(
+    from: string,
+    to: string,
+    repId?: string,
+    payment?: string,
+  ): Promise<VoucherSummaryRow[]> {
+    const params: unknown[] = [from, to];
+    const where: string[] = [
+      'col.collected_at >= $1::date',
+      'col.collected_at < ($2::date + 1)',
+      `col.status <> 'bounced'`,
+    ];
+    if (repId) {
+      params.push(repId);
+      where.push(`col.rep_id = $${params.length}`);
+    }
+    if (payment === 'CASH') where.push(`col.method = 'cash'`);
+    else if (payment === 'CREDIT') where.push(`col.method <> 'cash'`);
+
+    const rows: Array<Record<string, string | null>> = await this.ds.query(
+      `SELECT col.id::text          AS "id",
+              col.collection_number AS "docNumber",
+              col.collected_at      AS "inDate",
+              col.method            AS "method",
+              col.amount            AS "amount",
+              COALESCE(r.name_ar, r.name_en)                  AS "repName",
+              c.customer_number                               AS "customerNumber",
+              COALESCE(c.name_ar, c.customer_name, c.name_en) AS "customerName"
+         FROM collections col
+         LEFT JOIN reps r ON r.id = col.rep_id
+         LEFT JOIN customers c ON c.id = col.customer_id
+        WHERE ${where.join(' AND ')}
+        ORDER BY col.collected_at ASC
+        LIMIT ${VOUCHER_SUMMARY_ROW_CAP}`,
+      params,
+    );
+
+    return rows.map((r) => ({
+      id: r.id as string,
+      docType: 'COLLECTION',
+      // Collection numbers are optional; fall back to the id so a row is never
+      // blank in the number column.
+      docNumber: r.docNumber ?? `#${String(r.id).slice(0, 8)}`,
+      inDate: new Date(r.inDate as string),
+      userCode: null,
+      repName: r.repName ?? null,
+      customerNumber: r.customerNumber ?? null,
+      customerName: r.customerName ?? null,
+      payment: String(r.method ?? '').toUpperCase(),
+      subTotal: 0,
+      totalTax: 0,
+      totalDiscount: 0,
+      // collections.amount is FILS (integer minor units) while every voucher
+      // column is JOD. Without this divide the same column would hold 41010
+      // beside 0.387 and the report would read as nonsense.
+      netTotal: Number(r.amount ?? 0) / 1000,
+    }));
   }
 
   /**
@@ -1027,7 +1126,9 @@ export class ReportsService {
       cash: 0, cheque: 0, transfer: 0, other: 0, total: 0, count: 0,
     };
     for (const r of rows) {
-      const amount = Number(r.amount ?? 0);
+      // FILS -> JOD, same reason as the row list: the footer must be in the
+      // units the rest of the report is in.
+      const amount = Number(r.amount ?? 0) / 1000;
       const key = String(r.method ?? '').toLowerCase();
       if (key === 'cash') out.cash += amount;
       else if (key === 'cheque') out.cheque += amount;
@@ -1048,23 +1149,42 @@ export class ReportsService {
  */
 const VOUCHER_SUMMARY_ROW_CAP = 5000;
 
-/** One voucher line in the voucher summary report. */
+/**
+ * One line in the report — a voucher OR a collection.
+ *
+ * Both shapes share a row type so the screen can show one merged, sortable
+ * table instead of two stacked ones: a supervisor reading a salesman's day
+ * wants the sale and the money that came in against it next to each other, in
+ * time order, not in separate panels they have to correlate by eye.
+ *
+ * A collection has no tax or discount, so those are 0 and `netTotal` carries the
+ * amount. The FOOTER still keeps the two apart — see VoucherSummaryTotals.
+ */
 export interface VoucherSummaryRow {
-  voucherNumber: string;
+  /** Row id, for opening the record's own page. */
+  id: string;
+  /** SALE / RETURN / ORDER / … for vouchers, or COLLECTION. */
+  docType: string;
+  /** Voucher number, or collection number when it has one. */
+  docNumber: string;
   inDate: Date;
-  transKind: string;
-  userCode: string;
+  userCode: string | null;
   repName: string | null;
   customerNumber: string | null;
   customerName: string | null;
-  /** CREDIT when any payment is on account, else CASH. */
-  payment: 'CASH' | 'CREDIT';
+  /** CASH / CREDIT for a voucher; the method (cash, cheque, transfer) for a collection. */
+  payment: string;
   subTotal: number;
   totalTax: number;
   totalDiscount: number;
   netTotal: number;
 }
 
+/**
+ * Voucher totals ONLY. Collections are reported separately and never added in:
+ * a sale and the cash collected against it are the same money counted twice, so
+ * one combined figure would overstate the day.
+ */
 export interface VoucherSummaryTotals {
   count: number;
   subTotal: number;

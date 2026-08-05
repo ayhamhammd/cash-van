@@ -1,7 +1,13 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsIn, IsOptional, IsUUID, Matches } from 'class-validator';
 
-export const VOUCHER_SUMMARY_KINDS = ['SALE', 'RETURN', 'ORDER', 'ALL'] as const;
+export const VOUCHER_SUMMARY_KINDS = [
+  'SALE',
+  'RETURN',
+  'ORDER',
+  'COLLECTION',
+  'ALL',
+] as const;
 export type VoucherSummaryKind = (typeof VOUCHER_SUMMARY_KINDS)[number];
 
 export const VOUCHER_SUMMARY_PAYMENTS = ['CASH', 'CREDIT', 'ALL'] as const;
