@@ -54,6 +54,15 @@ echo "==> Dashboard will call: $NEXT_PUBLIC_API_BASE_URL"
 echo "==> Building API image ($API_IMAGE) ..."
 docker buildx build --platform "$PLATFORM" --target production -t "$API_IMAGE" --load .
 
+# The production image must start from dist/main.js. A build that leaks scripts/
+# into the TS program shifts rootDir and moves the output to dist/src/, which
+# crash-loops on the device with "Cannot find module /app/dist/main.js". That
+# shipped once; catch it here rather than on the client's server.
+echo "==> Verifying the API image's entrypoint layout ..."
+docker run --rm --entrypoint node "$API_IMAGE" \
+  -e "require('fs').accessSync('/app/dist/main.js'); require('fs').accessSync('/app/dist/database/data-source.js')" \
+  || { echo "ERROR: $API_IMAGE has no dist/main.js + dist/database/data-source.js — check tsconfig.build.json excludes." >&2; exit 1; }
+
 echo "==> Building dashboard image ($WEB_IMAGE) ..."
 docker buildx build --platform "$PLATFORM" -t "$WEB_IMAGE" --load \
   --build-arg "NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL" \
