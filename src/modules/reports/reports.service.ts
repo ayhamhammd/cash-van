@@ -5,6 +5,7 @@ import { DataSource, Repository } from 'typeorm';
 import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
 import { CashAccountsService, SettleTransfers } from '../cash-accounts/cash-accounts.service';
 import { SalesmanSettlement } from './entities/salesman-settlement.entity';
+import { VoucherSummaryQuery } from './dto/voucher-summary.query';
 
 /** One salesman's End-of-Day cash summary over a period (all money in fils). */
 export interface EodRow {
@@ -890,6 +891,202 @@ export class ReportsService {
       path,
     };
   }
+
+  /**
+   * Voucher summary: the filtered vouchers plus the footer totals.
+   *
+   * Totals come from their OWN aggregate query rather than by summing the
+   * returned rows. The row list is capped so a year-wide range cannot exhaust
+   * memory, and totals summed from a capped list would quietly under-report — a
+   * footer that disagrees with the books is worse than no footer at all.
+   *
+   * Only POSTED vouchers count: a draft has not happened yet, and counting one
+   * would make this disagree with the ERP.
+   */
+  async voucherSummary(q: VoucherSummaryQuery): Promise<VoucherSummaryReport> {
+    const from = q.from ?? new Date().toISOString().slice(0, 10);
+    const to = q.to ?? from;
+
+    // One shared WHERE for both queries, so the rows and the footer can never
+    // drift apart and describe different sets of vouchers.
+    const params: unknown[] = [from, to];
+    const where: string[] = [
+      'h.deleted_at IS NULL',
+      'h.is_posted = true',
+      'h.in_date >= $1::date',
+      'h.in_date < ($2::date + 1)',
+    ];
+    if (q.repId) {
+      params.push(q.repId);
+      where.push(`r.id = $${params.length}`);
+    }
+    if (q.transKind && q.transKind !== 'ALL') {
+      params.push(q.transKind);
+      where.push(`h.trans_kind = $${params.length}`);
+    }
+    // CREDIT = at least one on-account payment; CASH = everything else. The same
+    // reading the offers engine uses, so the two never disagree on a voucher.
+    const isCredit = `EXISTS (SELECT 1 FROM payments p WHERE p.voucher_number = h.voucher_number AND p.payment_type = 'CREDIT')`;
+    if (q.payment === 'CREDIT') where.push(isCredit);
+    else if (q.payment === 'CASH') where.push(`NOT ${isCredit}`);
+
+    const joins = `
+      FROM voucher_headers h
+      LEFT JOIN users u ON u.user_number = h.user_code
+      LEFT JOIN reps  r ON r.user_id = u.id
+      LEFT JOIN customers c ON c.customer_number = h.customer_number
+      WHERE ${where.join(' AND ')}`;
+
+    const rowsRaw: Array<Record<string, string | null>> = await this.ds.query(
+      `SELECT h.voucher_number AS "voucherNumber",
+              h.in_date        AS "inDate",
+              h.trans_kind     AS "transKind",
+              h.user_code      AS "userCode",
+              COALESCE(r.name_ar, r.name_en)                  AS "repName",
+              h.customer_number                               AS "customerNumber",
+              COALESCE(c.name_ar, c.customer_name, c.name_en) AS "customerName",
+              CASE WHEN ${isCredit} THEN 'CREDIT' ELSE 'CASH' END AS "payment",
+              h.total                AS "subTotal",
+              h.total_tax            AS "totalTax",
+              h.total_discount_value AS "totalDiscount",
+              h.net_total            AS "netTotal"
+       ${joins}
+       ORDER BY h.in_date ASC, h.voucher_number ASC
+       LIMIT ${VOUCHER_SUMMARY_ROW_CAP}`,
+      params,
+    );
+
+    const totalsRaw: Array<Record<string, string>> = await this.ds.query(
+      `SELECT COUNT(*)::int                            AS "count",
+              COALESCE(SUM(h.total), 0)                AS "subTotal",
+              COALESCE(SUM(h.total_tax), 0)            AS "totalTax",
+              COALESCE(SUM(h.total_discount_value), 0) AS "totalDiscount",
+              COALESCE(SUM(h.net_total), 0)            AS "netTotal"
+       ${joins}`,
+      params,
+    );
+
+    const t = totalsRaw[0] ?? {};
+    return {
+      rows: rowsRaw.map((r) => ({
+        voucherNumber: r.voucherNumber as string,
+        inDate: new Date(r.inDate as string),
+        transKind: r.transKind as string,
+        userCode: r.userCode as string,
+        repName: r.repName ?? null,
+        customerNumber: r.customerNumber ?? null,
+        customerName: r.customerName ?? null,
+        payment: (r.payment as 'CASH' | 'CREDIT') ?? 'CASH',
+        subTotal: Number(r.subTotal ?? 0),
+        totalTax: Number(r.totalTax ?? 0),
+        totalDiscount: Number(r.totalDiscount ?? 0),
+        netTotal: Number(r.netTotal ?? 0),
+      })),
+      totals: {
+        count: Number(t.count ?? 0),
+        subTotal: Number(t.subTotal ?? 0),
+        totalTax: Number(t.totalTax ?? 0),
+        totalDiscount: Number(t.totalDiscount ?? 0),
+        netTotal: Number(t.netTotal ?? 0),
+      },
+      collections: await this.collectionsBreakdown(from, to, q.repId),
+    };
+  }
+
+  /**
+   * Money collected in the same window, split by how it arrived.
+   *
+   * Bounced collections are excluded — a cheque that came back is not money.
+   * Pending ones are INCLUDED: the rep is holding the cash, it simply is not
+   * deposited yet, and leaving it out would make a settlement look short.
+   */
+  private async collectionsBreakdown(
+    from: string,
+    to: string,
+    repId?: string,
+  ): Promise<CollectionsBreakdown> {
+    const params: unknown[] = [from, to];
+    let repFilter = '';
+    if (repId) {
+      params.push(repId);
+      repFilter = `AND rep_id = $${params.length}`;
+    }
+    const rows: Array<{ method: string; amount: string; n: number }> =
+      await this.ds.query(
+        `SELECT method, COALESCE(SUM(amount), 0) AS amount, COUNT(*)::int AS n
+           FROM collections
+          WHERE collected_at >= $1::date
+            AND collected_at < ($2::date + 1)
+            AND status <> 'bounced'
+            ${repFilter}
+          GROUP BY method`,
+        params,
+      );
+
+    const out: CollectionsBreakdown = {
+      cash: 0, cheque: 0, transfer: 0, other: 0, total: 0, count: 0,
+    };
+    for (const r of rows) {
+      const amount = Number(r.amount ?? 0);
+      const key = String(r.method ?? '').toLowerCase();
+      if (key === 'cash') out.cash += amount;
+      else if (key === 'cheque') out.cheque += amount;
+      else if (key === 'transfer') out.transfer += amount;
+      else out.other += amount;
+      out.total += amount;
+      out.count += Number(r.n ?? 0);
+    }
+    return out;
+  }
+}
+
+
+/**
+ * Ceiling on rows returned by the voucher summary. The FOOTER is unaffected —
+ * it is aggregated in SQL over the whole range — so a wide date range gives
+ * correct totals with a truncated list rather than an out-of-memory error.
+ */
+const VOUCHER_SUMMARY_ROW_CAP = 5000;
+
+/** One voucher line in the voucher summary report. */
+export interface VoucherSummaryRow {
+  voucherNumber: string;
+  inDate: Date;
+  transKind: string;
+  userCode: string;
+  repName: string | null;
+  customerNumber: string | null;
+  customerName: string | null;
+  /** CREDIT when any payment is on account, else CASH. */
+  payment: 'CASH' | 'CREDIT';
+  subTotal: number;
+  totalTax: number;
+  totalDiscount: number;
+  netTotal: number;
+}
+
+export interface VoucherSummaryTotals {
+  count: number;
+  subTotal: number;
+  totalTax: number;
+  totalDiscount: number;
+  netTotal: number;
+}
+
+/** Money actually collected in the same window, split by how it arrived. */
+export interface CollectionsBreakdown {
+  cash: number;
+  cheque: number;
+  transfer: number;
+  other: number;
+  total: number;
+  count: number;
+}
+
+export interface VoucherSummaryReport {
+  rows: VoucherSummaryRow[];
+  totals: VoucherSummaryTotals;
+  collections: CollectionsBreakdown;
 }
 
 /** Great-circle distance in metres. */

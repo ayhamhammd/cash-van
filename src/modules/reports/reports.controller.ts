@@ -7,6 +7,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
+import { VoucherSummaryQuery } from './dto/voucher-summary.query';
 import { ReportsService } from './reports.service';
 import {
   ReportsQueryDto,
@@ -82,6 +83,18 @@ export class ReportsController {
   @ApiOkResponse({ description: 'Trips, newest first' })
   repTrips(@Query() q: TripsQueryDto) {
     return this.reports.repTrips(q.date, q.repId);
+  }
+
+
+  @Get('voucher-summary')
+  @ApiOperation({
+    summary: 'Voucher summary with footer totals',
+    description:
+      'Posted vouchers in a date range, optionally narrowed to one salesman, one voucher kind (SALE/RETURN/ORDER) and cash-vs-credit. Returns the rows, the footer totals (sub-total, tax, discount, net) aggregated over the WHOLE range, and the collections taken in the same window split by method.',
+  })
+  @ApiOkResponse({ description: 'Rows, totals and collections' })
+  voucherSummary(@Query() query: VoucherSummaryQuery) {
+    return this.reports.voucherSummary(query);
   }
 
   @Get('low-stock')
