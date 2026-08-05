@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AgentController } from './agent.controller';
 import { AgentService } from './agent.service';
 import { AgentToolsService } from './tools/agent-tools.service';
+import { PythonSandboxService } from './tools/python-sandbox.service';
 import { AgentStoreService } from './store/agent-store.service';
 import { AiSessionService } from './store/ai-session.service';
 import { ReadonlyDbService } from './db/readonly-db.service';
@@ -29,6 +30,7 @@ import { AiProviderResolver } from './llm/ai-provider.resolver';
     AiProviderResolver,
     AgentService,
     AgentToolsService,
+    PythonSandboxService,
     AgentStoreService,
     AiSessionService,
     ReadonlyDbService,

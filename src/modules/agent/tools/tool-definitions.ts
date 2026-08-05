@@ -100,4 +100,34 @@ export const AGENT_TOOL_DEFS: LlmToolDef[] = [
       },
     },
   },
+  {
+    name: 'run_python',
+    description:
+      'Run Python over a query result, for analysis SQL cannot express: ' +
+      'regression, cohort and retention curves, clustering, and charts. ' +
+      'pandas, numpy, matplotlib and openpyxl are available. Pass `sql` and the ' +
+      'rows arrive as a JSON array at /job/data.json — read it with ' +
+      "pandas.read_json('/job/data.json'). Anything the script writes into " +
+      '/job/out becomes a downloadable file (charts as .png, tables as .xlsx or ' +
+      '.csv). There is NO network and NO database access inside the sandbox: ' +
+      'everything the script needs must come through `sql`. If the tool replies ' +
+      'that it is not enabled, do not retry it — answer with SQL instead.',
+    parameters: {
+      type: 'object',
+      properties: {
+        code: {
+          type: 'string',
+          description:
+            'The complete Python program. Print what you want to read back; ' +
+            'save charts and files into /job/out.',
+        },
+        sql: {
+          type: 'string',
+          description:
+            'Optional single SELECT whose rows become /job/data.json.',
+        },
+      },
+      required: ['code'],
+    },
+  },
 ];

@@ -6,14 +6,11 @@ import {
   personaPrompt,
   toolsFor,
 } from './personas';
+import { AGENT_TOOL_DEFS } from './tools/tool-definitions';
 
-const ALL_TOOLS = [
-  { name: 'get_schema' },
-  { name: 'run_sql' },
-  { name: 'generate_report' },
-  { name: 'run_checks' },
-  { name: 'get_geo' },
-];
+// The REAL definitions, not a hand-kept copy. A fixture drifts the moment a
+// tool is added and then quietly stops testing the thing it exists to test.
+const ALL_TOOLS = AGENT_TOOL_DEFS;
 
 describe('isPersona', () => {
   it('accepts the four known personas', () => {
@@ -38,6 +35,13 @@ describe('toolsFor', () => {
     expect(names).not.toContain('get_geo');
   });
 
+  it('gives run_python to the analyst and nobody else — it is the only persona that computes', () => {
+    for (const p of PERSONAS) {
+      const has = toolsFor(p, ALL_TOOLS).some((t) => t.name === 'run_python');
+      expect(has).toBe(p === 'analyst');
+    }
+  });
+
   it('gives run_checks to the auditor and nobody else', () => {
     for (const p of PERSONAS) {
       const has = toolsFor(p, ALL_TOOLS).some((t) => t.name === 'run_checks');
@@ -52,7 +56,7 @@ describe('toolsFor', () => {
     }
   });
 
-  it('never hands any persona a tool that is not in ALL_TOOLS', () => {
+  it('never grants a persona a tool that does not exist', () => {
     for (const p of PERSONAS) {
       for (const name of PERSONA_TOOLS[p]) {
         expect(ALL_TOOLS.some((t) => t.name === name)).toBe(true);

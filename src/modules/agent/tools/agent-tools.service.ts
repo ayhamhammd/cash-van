@@ -6,6 +6,10 @@ import { ReportRendererService } from '../reports/report-renderer.service';
 import { AgentStoreService } from '../store/agent-store.service';
 import { InvalidSqlError, SqlValidator } from '../sql/sql-validator';
 import {
+  PythonSandboxService,
+  SandboxDisabledError,
+} from './python-sandbox.service';
+import {
   REPORT_FORMATS,
   type QueryResult,
   type ReportFormat,
@@ -49,6 +53,7 @@ export class AgentToolsService {
     private readonly validator: SqlValidator,
     private readonly renderer: ReportRendererService,
     private readonly store: AgentStoreService,
+    private readonly python: PythonSandboxService,
   ) {
     this.previewRows = this.config.get<number>('agent.sqlPreviewRows', 50);
     this.rowLimit = this.config.get<number>('agent.sqlRowLimit', 5000);
@@ -71,6 +76,8 @@ export class AgentToolsService {
         return { result: await this.runChecks() };
       case 'get_geo':
         return { result: await this.getGeo(input) };
+      case 'run_python':
+        return this.runPython(input, ctx);
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -321,6 +328,105 @@ export class AgentToolsService {
       note: 'Ordered by least-recently-sold-to first. lat/lng are null where the customer was never pinned.',
       customers: res.rows,
     };
+  }
+
+  // --- run_python (analyst, off by default) --------------------------------
+
+  /**
+   * Run model-authored Python over an optional query result.
+   *
+   * The SQL is validated and executed HERE, by the read-only role, and the rows
+   * are handed to the sandbox as a file. The sandbox never gets a connection
+   * string — which is why turning this on does not widen what the assistant can
+   * reach, only what it can compute.
+   */
+  private async runPython(
+    input: unknown,
+    ctx: ToolContext,
+  ): Promise<ToolOutcome> {
+    const code = (input as { code?: unknown })?.code;
+    if (typeof code !== 'string' || code.trim().length === 0) {
+      throw new Error('Missing required "code" argument.');
+    }
+
+    let data: QueryResult | null = null;
+    const rawSql = (input as { sql?: unknown })?.sql;
+    if (typeof rawSql === 'string' && rawSql.trim().length > 0) {
+      const { sql } = this.validator.validate(rawSql, this.rowLimit);
+      data = await this.db.runSelect(sql, [], this.rowLimit);
+    }
+
+    let run;
+    try {
+      run = await this.python.run(code, data);
+    } catch (err) {
+      if (err instanceof SandboxDisabledError) {
+        // Not an error the model should retry — tell it plainly so it falls
+        // back to SQL instead of trying the same tool three more times.
+        return { result: { enabled: false, message: err.message } };
+      }
+      throw err;
+    }
+
+    // Each output file becomes a downloadable artifact, reusing the same store
+    // the report tool writes to so the artifacts panel needs no special case.
+    const reports = [];
+    for (const file of run.files) {
+      const ref = await this.store.createReport(
+        {
+          conversationId: ctx.conversationId,
+          createdBy: ctx.userId,
+          title: file.name,
+          format: 'text',
+          filename: file.name,
+          contentType: this.contentTypeFor(file.name),
+          rowCount: 0,
+          sqlText: typeof rawSql === 'string' ? rawSql : null,
+          buffer: file.buffer,
+        },
+        file.name.split('.').pop() ?? 'bin',
+      );
+      reports.push(ref);
+    }
+
+    return {
+      result: {
+        ok: run.ok,
+        timedOut: run.timedOut,
+        exitCode: run.exitCode,
+        durationMs: run.durationMs,
+        rowsProvided: data?.rows.length ?? 0,
+        stdout: run.stdout,
+        stderr: run.stderr,
+        files: reports.map((r) => ({
+          filename: r.filename,
+          downloadUrl: r.downloadUrl,
+        })),
+      },
+      // The loop emits one report_ready per file; only the first is surfaced
+      // here because ToolOutcome carries a single ref. The rest are in `files`.
+      report: reports[0],
+    };
+  }
+
+  private contentTypeFor(name: string): string {
+    const ext = name.split('.').pop()?.toLowerCase() ?? '';
+    switch (ext) {
+      case 'png':
+        return 'image/png';
+      case 'svg':
+        return 'image/svg+xml';
+      case 'csv':
+        return 'text/csv; charset=utf-8';
+      case 'json':
+        return 'application/json; charset=utf-8';
+      case 'xlsx':
+        return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      case 'pdf':
+        return 'application/pdf';
+      default:
+        return 'application/octet-stream';
+    }
   }
 
   // --- helpers -------------------------------------------------------------

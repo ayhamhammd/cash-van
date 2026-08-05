@@ -26,7 +26,7 @@ export function isPersona(value: unknown): value is Persona {
 
 /** Tools each persona may call. Anything absent is not offered to the model. */
 export const PERSONA_TOOLS: Record<Persona, readonly string[]> = {
-  analyst: ['get_schema', 'run_sql', 'generate_report'],
+  analyst: ['get_schema', 'run_sql', 'generate_report', 'run_python'],
   admin: ['get_schema', 'run_sql'],
   auditor: ['get_schema', 'run_sql', 'run_checks', 'generate_report'],
   sales: ['get_schema', 'run_sql', 'get_geo', 'generate_report'],
