@@ -94,7 +94,7 @@ export class CollectionsController {
   @ApiParam({ name: 'id', format: 'uuid', description: 'Collection id' })
   @ApiOkResponse({ description: 'The collection' })
   findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.collections.findOne(id);
+    return this.collections.detail(id);
   }
 
   @Patch(':id')

@@ -127,6 +127,35 @@ export class CollectionsService {
     return `C-${store}-${String(seq).padStart(6, '0')}`;
   }
 
+  /**
+   * A collection with the names a detail screen needs.
+   *
+   * findOne() returns the bare entity, and the LIST endpoint batch-joins names
+   * separately — so a detail page built on findOne would show two raw UUIDs
+   * where the customer and salesman should be. Enriched here rather than with
+   * two more round trips from the browser.
+   */
+  async detail(id: string): Promise<
+    Collection & {
+      customerName: string | null;
+      customerNumber: string | null;
+      repName: string | null;
+      repCode: string | null;
+    }
+  > {
+    const c = await this.findOne(id);
+    const [rep, cust] = await Promise.all([
+      this.reps.findOne({ where: { id: c.repId } }),
+      this.customers.findOne({ where: { id: c.customerId } }),
+    ]);
+    return Object.assign(c, {
+      customerName: cust?.nameAr || cust?.customerName || null,
+      customerNumber: cust?.customerNumber ?? null,
+      repName: rep?.nameAr || rep?.nameEn || null,
+      repCode: rep?.code ?? null,
+    });
+  }
+
   async create(dto: CreateCollectionDto): Promise<Collection> {
     const rep = await this.reps.findOne({ where: { id: dto.repId } });
     if (!rep) {
