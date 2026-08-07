@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
+  IsDateString,
   IsIn,
   IsInt,
   IsLatitude,
@@ -17,6 +18,15 @@ import type { CustomerType } from '../entities/customer.entity';
 const TYPES: CustomerType[] = ['CASH', 'CREDIT', 'WHOLESALE', 'RETAIL'];
 
 export class CreateCustomerDto {
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'Id from POST /customers/photo. REQUIRED when a salesman creates the customer — the document photo is staged first because the customer may not exist until an admin approves.',
+  })
+  @IsOptional()
+  @IsUUID()
+  photoId?: string;
+
   @ApiPropertyOptional({ description: 'Auto-generated (CUST-000001) when omitted.' })
   @IsOptional()
   @IsString()
@@ -140,4 +150,43 @@ export class CreateCustomerDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  // ── Tax exemption ─────────────────────────────────────────────────────────
+  // Writable here so a customer created from the dashboard OR the van is exempt
+  // from the moment they exist — not only after the next ERP sync catches up.
+  @ApiPropertyOptional({
+    default: false,
+    description: 'Every voucher for this customer is issued tax-exempt.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  isTaxExempt?: boolean;
+
+  @ApiPropertyOptional({ enum: ['FULL_EXEMPTION', 'VAT_EXEMPTION', 'SPECIAL_APPROVAL'] })
+  @IsOptional()
+  @IsIn(['FULL_EXEMPTION', 'VAT_EXEMPTION', 'SPECIAL_APPROVAL'])
+  taxExemptionType?: string;
+
+  @ApiPropertyOptional({ description: 'Certificate / decision number, printed on the invoice.' })
+  @IsOptional()
+  @IsString()
+  @Length(0, 64)
+  taxExemptionNumber?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @Length(0, 255)
+  taxExemptionReason?: string;
+
+  /** Outside this window the customer is NOT exempt, flag or no flag. */
+  @ApiPropertyOptional({ type: String, format: 'date-time' })
+  @IsOptional()
+  @IsDateString()
+  taxExemptionValidFrom?: string;
+
+  @ApiPropertyOptional({ type: String, format: 'date-time' })
+  @IsOptional()
+  @IsDateString()
+  taxExemptionValidTo?: string;
 }

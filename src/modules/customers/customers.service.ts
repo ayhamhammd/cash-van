@@ -4,6 +4,8 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -13,6 +15,9 @@ import { parse } from 'csv-parse/sync';
 import { Customer } from './entities/customer.entity';
 import { CustomerAiProfile } from './entities/customer-ai-profile.entity';
 import { CustomerVisit } from './entities/customer-visit.entity';
+import { ApprovalsService } from '../approvals/approvals.service';
+import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
+import { PendingCustomerPhoto } from './entities/pending-customer-photo.entity';
 import { CustomerAttachment } from './entities/customer-attachment.entity';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
@@ -56,6 +61,10 @@ export class CustomersService {
   private readonly logger = new Logger(CustomersService.name);
 
   constructor(
+    @Inject(forwardRef(() => ApprovalsService))
+    private readonly approvals: ApprovalsService,
+    @InjectRepository(PendingCustomerPhoto)
+    private readonly pendingPhotos: Repository<PendingCustomerPhoto>,
     @InjectRepository(Customer)
     private readonly customers: Repository<Customer>,
     @InjectRepository(CustomerAiProfile)
@@ -68,6 +77,123 @@ export class CustomersService {
     private readonly storage: StorageService,
     private readonly events: EventEmitter2,
   ) {}
+
+  /**
+   * Stage a customer document photo BEFORE the customer exists.
+   *
+   * The salesman photographs the registration or ID in front of the shopkeeper
+   * and only then fills the form — and when the creation needs approval the
+   * customer row may not exist for hours. Returns the id the create request
+   * references; [claimPhoto] moves it once the customer is real.
+   */
+  async stagePhoto(
+    file: Express.Multer.File | undefined,
+    uploadedBy: string | null,
+  ): Promise<PendingCustomerPhoto> {
+    if (!file) throw new BadRequestException('No photo provided');
+    // Images only. The generic attachment endpoint accepts PDFs and
+    // spreadsheets; this one is a camera/gallery pick and anything else here is
+    // a client bug worth failing loudly on.
+    if (!file.mimetype.startsWith('image/')) {
+      throw new BadRequestException(`Photo must be an image, got ${file.mimetype}`);
+    }
+    if (file.size > CustomersService.ATTACHMENT_MAX_BYTES) {
+      throw new BadRequestException('Photo too large (max 10 MB)');
+    }
+    const original = this.sanitizeFilename(file.originalname || 'photo.jpg');
+    const key = `customers/_pending/${randomUUID()}-${original}`;
+    const url = await this.storage.save(key, file.buffer);
+    return this.pendingPhotos.save(
+      this.pendingPhotos.create({
+        storageKey: key,
+        url,
+        originalName: original,
+        mimeType: file.mimetype,
+        sizeBytes: file.size,
+        uploadedBy,
+      }),
+    );
+  }
+
+  /**
+   * Create a customer on behalf of the signed-in user, applying the two rules a
+   * plain [create] cannot know about:
+   *
+   *   a salesman must attach a document photo
+   *   a salesman without canCreateCustomerDirect gets an approval request,
+   *   not a customer
+   *
+   * Office users (no repId) are unaffected: no photo requirement, no approval.
+   */
+  async createAsUser(
+    dto: CreateCustomerDto,
+    user: AuthenticatedUser,
+  ): Promise<Customer | { pendingApprovalId: string; status: 'pending' }> {
+    const isSalesman = user.repId != null;
+    if (!isSalesman) return this.create(dto);
+
+    if (!dto.photoId) {
+      throw new BadRequestException(
+        'A customer document photo is required when a salesman creates a customer',
+      );
+    }
+    const photo = await this.pendingPhotos.findOne({ where: { id: dto.photoId } });
+    if (!photo) throw new BadRequestException('Photo not found — upload it first');
+    if (photo.claimedAt) {
+      throw new BadRequestException('That photo already belongs to another customer');
+    }
+
+    if (user.permissions?.canCreateCustomerDirect) {
+      const customer = await this.create(dto);
+      await this.claimPhoto(photo, customer.id, user.sub);
+      return customer;
+    }
+
+    // No direct permission → nothing is created yet. The whole request, photo
+    // included, waits for an admin. Deliberately NOT a disabled customer row:
+    // a half-real customer can be sold to, and credit-checked, before anyone
+    // has looked at it.
+    const req = await this.approvals.createCustomerRequest(dto, user);
+    return { pendingApprovalId: req.id, status: 'pending' };
+  }
+
+  /**
+   * Bytes of a STAGED photo, for the reviewer looking at an approval request.
+   *
+   * A download endpoint rather than a public URL, matching customer attachments:
+   * `storage.publicBaseUrl` is decorative here — nothing serves the storage root —
+   * and a customer's commercial registration should not be fetchable by anyone
+   * who guesses the filename.
+   */
+  async getStagedPhotoFile(
+    id: string,
+  ): Promise<{ photo: PendingCustomerPhoto; buffer: Buffer }> {
+    const photo = await this.pendingPhotos.findOne({ where: { id } });
+    if (!photo) throw new NotFoundException('Photo not found');
+    return { photo, buffer: await this.storage.read(photo.storageKey) };
+  }
+
+  /** Move a staged photo onto the now-real customer. */
+  async claimPhoto(
+    photo: PendingCustomerPhoto,
+    customerId: string,
+    uploadedBy: string | null,
+  ): Promise<CustomerAttachment> {
+    const row = await this.attachments.save(
+      this.attachments.create({
+        customerId,
+        storageKey: photo.storageKey,
+        url: photo.url,
+        originalName: photo.originalName,
+        mimeType: photo.mimeType,
+        sizeBytes: photo.sizeBytes,
+        uploadedBy,
+      }),
+    );
+    photo.claimedAt = new Date();
+    await this.pendingPhotos.save(photo);
+    return row;
+  }
 
   async create(dto: CreateCustomerDto): Promise<Customer> {
     const customerNumber =
@@ -175,7 +301,10 @@ export class CustomersService {
     return c;
   }
 
-  async list(query: ListCustomersQuery): Promise<{ items: Customer[]; total: number }> {
+  async list(
+    query: ListCustomersQuery,
+    visibleRepIds: string[] | null = null,
+  ): Promise<{ items: Customer[]; total: number }> {
     const qb = this.customers
       .createQueryBuilder('c')
       .where('c.deleted_at IS NULL')
@@ -185,6 +314,16 @@ export class CustomersService {
 
     if (query.unassigned) qb.andWhere('c.rep_id IS NULL');
     else if (query.repId) qb.andWhere('c.rep_id = :repId', { repId: query.repId });
+    // Supervisor scope, applied on TOP of any repId filter above rather than
+    // instead of it: a scoped user narrowing to one of their own salesmen must
+    // still not be able to widen past their assignment by sending someone else's.
+    if (visibleRepIds !== null) {
+      qb.andWhere('c.rep_id IN (:...visibleRepIds)', {
+        visibleRepIds: visibleRepIds.length
+          ? visibleRepIds
+          : ['00000000-0000-0000-0000-000000000000'],
+      });
+    }
     if (query.regionId) qb.andWhere('c.region_id = :regionId', { regionId: query.regionId });
     if (query.isActive !== undefined) qb.andWhere('c.is_active = :a', { a: query.isActive });
 

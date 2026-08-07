@@ -191,7 +191,12 @@ export class ReportsService {
   // ── End-of-Day cash reconciliation ─────────────────────────────────────────
 
   /** Raw per-salesman aggregates for [from, to]. Money in fils. */
-  private async eodRows(from: string, to: string, repId?: string): Promise<EodRow[]> {
+  private async eodRows(
+    from: string,
+    to: string,
+    repId?: string,
+    visibleRepIds?: string[] | null,
+  ): Promise<EodRow[]> {
     const rows: Array<Record<string, string | null>> = await this.ds.query(
       `
       WITH coll AS (
@@ -272,11 +277,14 @@ export class ReportsService {
       LEFT JOIN vis  ON vis.rep_id  = r.id
       WHERE r.deleted_at IS NULL
         AND ($3::uuid IS NULL OR r.id = $3::uuid)
+        -- Scope: null = unrestricted. An EMPTY array yields no rows, which is
+        -- the correct answer for a supervisor with no salesmen assigned.
+        AND ($4::uuid[] IS NULL OR r.id = ANY($4::uuid[]))
         AND (coll.rep_id IS NOT NULL OR vp.rep_id IS NOT NULL
              OR vis.rep_id IS NOT NULL OR COALESCE(bal.new_balance_fils,0) <> 0)
       ORDER BY r.name_ar
       `,
-      [from, to, repId ?? null],
+      [from, to, repId ?? null, visibleRepIds ?? null],
     );
     return rows.map((r) => {
       const n = (k: string) => Number(r[k] ?? 0);
@@ -304,8 +312,13 @@ export class ReportsService {
   }
 
   /** End-of-Day report: per-salesman rows + totals. */
-  async endOfDay(from: string, to: string, repId?: string): Promise<EodResponse> {
-    const rows = await this.eodRows(from, to, repId);
+  async endOfDay(
+    from: string,
+    to: string,
+    repId?: string,
+    visibleRepIds?: string[] | null,
+  ): Promise<EodResponse> {
+    const rows = await this.eodRows(from, to, repId, visibleRepIds);
     const sum = (k: keyof EodRow) =>
       rows.reduce((s, r) => s + (Number(r[k]) || 0), 0);
     return {
@@ -383,16 +396,25 @@ export class ReportsService {
   }
 
   /** Settlement history with rep name/code (for the dedicated history page). */
-  async listSettlements(q: {
-    repId?: string;
-    from?: string;
-    to?: string;
-  }): Promise<SettlementRow[]> {
+  async listSettlements(
+    q: {
+      repId?: string;
+      from?: string;
+      to?: string;
+    },
+    visibleRepIds: string[] | null = null,
+  ): Promise<SettlementRow[]> {
     // DataSource.query() requires PostgreSQL positional params ($1, $2…), not named ones.
     const conditions: string[] = [];
-    const params: string[] = [];
+    const params: unknown[] = [];
 
     if (q.repId) { params.push(q.repId);  conditions.push(`s.rep_id = $${params.length}`); }
+    // Stacked on top of any repId filter, not instead of it — otherwise a scoped
+    // user could read another supervisor's settlements by naming their rep.
+    if (visibleRepIds !== null) {
+      params.push(visibleRepIds);
+      conditions.push(`s.rep_id = ANY($${params.length}::uuid[])`);
+    }
     if (q.from)  { params.push(q.from);   conditions.push(`s.period_to >= $${params.length}`); }
     if (q.to)    { params.push(q.to);     conditions.push(`s.period_from <= $${params.length}`); }
 
@@ -461,9 +483,22 @@ export class ReportsService {
   }
 
   /** Best-selling items from posted SALE voucher lines (by quantity), optionally within N days. */
-  async bestItems(offset = 0, limit = 25, days?: number): Promise<Paged<BestItemRow>> {
+  async bestItems(
+    offset = 0,
+    limit = 25,
+    days?: number,
+    visibleRepIds: string[] | null = null,
+  ): Promise<Paged<BestItemRow>> {
     const dateFilter = days ? `AND h.in_date >= CURRENT_DATE - ($3::int - 1)` : '';
     const params: unknown[] = days ? [offset, limit, days] : [offset, limit];
+    // Placeholder position depends on whether `days` was supplied, so it is
+    // computed rather than written literally.
+    let scopeFilter = '';
+    if (visibleRepIds !== null) {
+      params.push(visibleRepIds);
+      scopeFilter =
+        ` AND h.user_code IN (SELECT code FROM reps WHERE id = ANY($${params.length}::uuid[]))`;
+    }
     const items: BestItemRow[] = await this.ds.query(
       `SELECT t.item_number AS "itemNumber",
               MAX(t.item_name) AS "itemName",
@@ -472,25 +507,36 @@ export class ReportsService {
               COUNT(*)::int AS "lines"
          FROM voucher_transactions t
          JOIN voucher_headers h ON h.voucher_number = t.voucher_number
-        WHERE h.is_posted = true AND t.trans_kind = 'SALE' ${dateFilter}
+        WHERE h.is_posted = true AND t.trans_kind = 'SALE' ${dateFilter}${scopeFilter}
         GROUP BY t.item_number
         ORDER BY SUM(t.item_qty::numeric) DESC
         OFFSET $1 LIMIT $2`,
       params,
     );
+    const countParams: unknown[] = days ? [days] : [];
+    let countScope = '';
+    if (visibleRepIds !== null) {
+      countParams.push(visibleRepIds);
+      countScope =
+        ` AND h.user_code IN (SELECT code FROM reps WHERE id = ANY($${countParams.length}::uuid[]))`;
+    }
     const totalRows: Array<{ c: number }> = await this.ds.query(
       `SELECT COUNT(*)::int AS c FROM (
          SELECT 1 FROM voucher_transactions t
          JOIN voucher_headers h ON h.voucher_number = t.voucher_number
-         WHERE h.is_posted = true AND t.trans_kind = 'SALE' ${days ? 'AND h.in_date >= CURRENT_DATE - ($1::int - 1)' : ''}
+         WHERE h.is_posted = true AND t.trans_kind = 'SALE' ${days ? 'AND h.in_date >= CURRENT_DATE - ($1::int - 1)' : ''}${countScope}
          GROUP BY t.item_number) x`,
-      days ? [days] : [],
+      countParams,
     );
     return { items, total: totalRows[0]?.c ?? 0 };
   }
 
   /** Customer visits across all reps, newest first. */
-  async visits(offset = 0, limit = 25): Promise<Paged<VisitRow>> {
+  async visits(
+    offset = 0,
+    limit = 25,
+    visibleRepIds: string[] | null = null,
+  ): Promise<Paged<VisitRow>> {
     const items: VisitRow[] = await this.ds.query(
       `SELECT v.id::text AS id,
               v.visited_at AS "visitedAt",
@@ -502,19 +548,23 @@ export class ReportsService {
          FROM customer_visits v
          LEFT JOIN customers c ON c.id = v.customer_id
          LEFT JOIN reps r ON r.id = v.rep_id
+        WHERE ($3::uuid[] IS NULL OR v.rep_id = ANY($3::uuid[]))
         ORDER BY v.visited_at DESC
         OFFSET $1 LIMIT $2`,
-      [offset, limit],
+      [offset, limit, visibleRepIds ?? null],
     );
+    // Count scoped too: an unscoped total would page a supervisor into empty rows.
     const totalRows: Array<{ c: number }> = await this.ds.query(
-      `SELECT COUNT(*)::int AS c FROM customer_visits`,
+      `SELECT COUNT(*)::int AS c FROM customer_visits
+        WHERE ($1::uuid[] IS NULL OR rep_id = ANY($1::uuid[]))`,
+      [visibleRepIds ?? null],
     );
     return { items, total: totalRows[0]?.c ?? 0 };
   }
 
   /** Today's customer visits that did NO business (had_sale=false) — who was visited
    *  without a transaction, with customer + rep names (newest first). */
-  async noTransactionVisitsToday(): Promise<VisitRow[]> {
+  async noTransactionVisitsToday(visibleRepIds: string[] | null = null): Promise<VisitRow[]> {
     return this.ds.query(
       `SELECT v.id::text AS id,
               v.visited_at AS "visitedAt",
@@ -527,12 +577,27 @@ export class ReportsService {
          LEFT JOIN customers c ON c.id = v.customer_id
          LEFT JOIN reps r ON r.id = v.rep_id
         WHERE v.had_sale = false AND v.visited_at >= CURRENT_DATE
+          AND ($1::uuid[] IS NULL OR v.rep_id = ANY($1::uuid[]))
         ORDER BY v.visited_at DESC`,
+      [visibleRepIds ?? null],
     );
   }
 
-  /** One aggregated KPI payload for the dashboard home page (today vs yesterday). */
-  async dashboard(): Promise<DashboardOverview> {
+  /**
+   * One aggregated KPI payload for the dashboard home page (today vs yesterday).
+   *
+   * @param visibleRepIds null = company-wide; an array (possibly empty) limits
+   *   every figure to those salesmen. See docs/SPEC-rep-scoped-users.md.
+   *
+   * Each sub-query reaches the rep differently, and getting that wrong would
+   * silently leak another supervisor's numbers:
+   *   voucher_headers  → by rep CODE (user_code), not id — hence the sub-select
+   *   collections / customer_visits / customers → by rep_id directly
+   *   payment_cheques  → no rep column at all; reached through the customer
+   *   item_balance     → no rep dimension; see the comment at that query
+   */
+  async dashboard(visibleRepIds: string[] | null = null): Promise<DashboardOverview> {
+    const scope = visibleRepIds ?? null;
     const [salesRows, openOrderRows, payRows, visitRows, custRows, chequeRows, lowStockRows, repRows] =
       await Promise.all([
         this.ds.query(
@@ -545,12 +610,18 @@ export class ReportsService {
               COUNT(*)                         FILTER (WHERE trans_kind = 'ORDER'  AND in_date >= CURRENT_DATE)::int        AS "ordersTodayCount"
             FROM voucher_headers
            WHERE is_posted = true AND deleted_at IS NULL
-             AND in_date >= CURRENT_DATE - 1`,
+             AND in_date >= CURRENT_DATE - 1
+             AND ($1::uuid[] IS NULL
+                  OR user_code IN (SELECT code FROM reps WHERE id = ANY($1::uuid[])))`,
+          [scope],
         ),
         this.ds.query(
           `SELECT COUNT(*)::int AS c
              FROM voucher_headers
-            WHERE trans_kind = 'ORDER' AND is_fulfilled = false AND deleted_at IS NULL`,
+            WHERE trans_kind = 'ORDER' AND is_fulfilled = false AND deleted_at IS NULL
+              AND ($1::uuid[] IS NULL
+                   OR user_code IN (SELECT code FROM reps WHERE id = ANY($1::uuid[])))`,
+          [scope],
         ),
         this.ds.query(
           // "Collected today" = actual collection receipts (the collections table),
@@ -561,7 +632,9 @@ export class ReportsService {
               COALESCE(SUM(amount) FILTER (WHERE method = 'cash'),   0)::float8 / 1000   AS "todayCash",
               COALESCE(SUM(amount) FILTER (WHERE method = 'cheque'), 0)::float8 / 1000   AS "todayCheque"
             FROM collections
-           WHERE status IN ('confirmed','deposited') AND collected_at >= CURRENT_DATE`,
+           WHERE status IN ('confirmed','deposited') AND collected_at >= CURRENT_DATE
+             AND ($1::uuid[] IS NULL OR rep_id = ANY($1::uuid[]))`,
+          [scope],
         ),
         this.ds.query(
           `SELECT
@@ -569,7 +642,9 @@ export class ReportsService {
               COUNT(*) FILTER (WHERE visited_at >= CURRENT_DATE AND had_sale)::int    AS "todayWithSale",
               COUNT(*) FILTER (WHERE visited_at <  CURRENT_DATE)::int                 AS "yesterday"
             FROM customer_visits
-           WHERE visited_at >= CURRENT_DATE - 1`,
+           WHERE visited_at >= CURRENT_DATE - 1
+             AND ($1::uuid[] IS NULL OR rep_id = ANY($1::uuid[]))`,
+          [scope],
         ),
         this.ds.query(
           `SELECT
@@ -579,15 +654,27 @@ export class ReportsService {
               COALESCE(SUM(total_debt::numeric) FILTER (WHERE total_debt::numeric > 0), 0)::float8 AS "totalDebt",
               COUNT(*) FILTER (WHERE total_debt::numeric > 0)::int AS "debtors"
             FROM customers
-           WHERE deleted_at IS NULL`,
+           WHERE deleted_at IS NULL
+             AND ($1::uuid[] IS NULL OR rep_id = ANY($1::uuid[]))`,
+          [scope],
         ),
         this.ds.query(
           `SELECT COUNT(*)::int AS "dueSoonCount",
                   COALESCE(SUM(amount::numeric), 0)::float8 AS "dueSoonAmount"
              FROM payment_cheques
             WHERE deleted_at IS NULL
-              AND due_date >= CURRENT_DATE AND due_date < CURRENT_DATE + 8`,
+              AND due_date >= CURRENT_DATE AND due_date < CURRENT_DATE + 8
+              -- payment_cheques carries no rep_id; the owning salesman is a
+              -- property of the CUSTOMER the cheque came from.
+              AND ($1::uuid[] IS NULL OR customer_number IN (
+                    SELECT customer_number FROM customers
+                     WHERE rep_id = ANY($1::uuid[]) AND deleted_at IS NULL))`,
+          [scope],
         ),
+        // NOT scoped: item_balance has no rep dimension — stock sits in a
+        // warehouse/van by stock_number, with no mapping back to a salesman.
+        // Low stock is a company inventory fact, and showing a supervisor a
+        // reorder warning for the whole business is correct, not a leak.
         this.ds.query(
           `SELECT COUNT(*)::int AS c FROM (
              SELECT b.item_number
@@ -598,7 +685,10 @@ export class ReportsService {
              HAVING COALESCE(SUM(b.qty), 0) <= ic.reorder_qty) x`,
         ),
         this.ds.query(
-          `SELECT COUNT(*)::int AS c FROM reps WHERE deleted_at IS NULL AND is_active = true`,
+          `SELECT COUNT(*)::int AS c FROM reps
+            WHERE deleted_at IS NULL AND is_active = true
+              AND ($1::uuid[] IS NULL OR id = ANY($1::uuid[]))`,
+          [scope],
         ),
       ]);
 
@@ -645,7 +735,7 @@ export class ReportsService {
   }
 
   /** Daily sales / returns / payments series for the last N days (zero-filled). */
-  async salesTrend(days = 30): Promise<TrendPoint[]> {
+  async salesTrend(days = 30, visibleRepIds: string[] | null = null): Promise<TrendPoint[]> {
     return this.ds.query(
       `SELECT to_char(d.day, 'YYYY-MM-DD') AS "date",
               COALESCE(s."salesNet", 0)     AS "salesNet",
@@ -661,6 +751,8 @@ export class ReportsService {
               FROM voucher_headers
              WHERE is_posted = true AND deleted_at IS NULL
                AND in_date >= CURRENT_DATE - ($1::int - 1)
+               AND ($2::uuid[] IS NULL
+                    OR user_code IN (SELECT code FROM reps WHERE id = ANY($2::uuid[])))
              GROUP BY in_date::date) s ON s.day = d.day
          LEFT JOIN (
             -- collection receipts per day (fils → JOD major), not sales-voucher payments
@@ -669,14 +761,19 @@ export class ReportsService {
               FROM collections
              WHERE status IN ('confirmed','deposited')
                AND collected_at >= CURRENT_DATE - ($1::int - 1)
+               AND ($2::uuid[] IS NULL OR rep_id = ANY($2::uuid[]))
              GROUP BY collected_at::date) p ON p.day = d.day
         ORDER BY d.day`,
-      [days],
+      [days, visibleRepIds ?? null],
     );
   }
 
   /** Top customers by posted SALE net total over the last N days. */
-  async topCustomers(days = 30, limit = 10): Promise<TopCustomerRow[]> {
+  async topCustomers(
+    days = 30,
+    limit = 10,
+    visibleRepIds: string[] | null = null,
+  ): Promise<TopCustomerRow[]> {
     return this.ds.query(
       `SELECT c.customer_number AS "customerNumber",
               c.customer_name   AS "customerName",
@@ -689,15 +786,21 @@ export class ReportsService {
         WHERE h.is_posted = true AND h.deleted_at IS NULL
           AND h.trans_kind = 'SALE'
           AND h.in_date >= CURRENT_DATE - ($1::int - 1)
+          AND ($3::uuid[] IS NULL
+               OR h.user_code IN (SELECT code FROM reps WHERE id = ANY($3::uuid[])))
         GROUP BY c.customer_number, c.customer_name, c.total_debt
         ORDER BY SUM(h.net_total::numeric) DESC
         LIMIT $2`,
-      [days, limit],
+      [days, limit, visibleRepIds ?? null],
     );
   }
 
   /** Rep performance leaderboard (sales, vouchers, distinct customers, visits) over N days. */
-  async repLeaderboard(days = 30, limit = 10): Promise<RepLeaderboardRow[]> {
+  async repLeaderboard(
+    days = 30,
+    limit = 10,
+    visibleRepIds: string[] | null = null,
+  ): Promise<RepLeaderboardRow[]> {
     return this.ds.query(
       `SELECT u.user_number AS "userCode",
               COALESCE(r.name_ar, u.name) AS "repName",
@@ -714,10 +817,13 @@ export class ReportsService {
         WHERE h.is_posted = true AND h.deleted_at IS NULL
           AND h.trans_kind = 'SALE'
           AND h.in_date >= CURRENT_DATE - ($1::int - 1)
+          -- r.id, not user_code: this query already joins reps, and a voucher
+          -- from a user with no rep row must not slip through a scoped view.
+          AND ($3::uuid[] IS NULL OR r.id = ANY($3::uuid[]))
         GROUP BY u.user_number, u.name, r.id, r.name_ar, r.code
         ORDER BY SUM(h.net_total::numeric) DESC
         LIMIT $2`,
-      [days, limit],
+      [days, limit, visibleRepIds ?? null],
     );
   }
 
@@ -745,12 +851,22 @@ export class ReportsService {
    * STOP_DWELL_MS) or the signal drops (gap > GAP_MS). Tiny/noise segments are
    * discarded. Works for both real (parking gaps) and continuous-ping data.
    */
-  async repTrips(date: string, repId?: string): Promise<TripRow[]> {
+  async repTrips(
+    date: string,
+    repId?: string,
+    visibleRepIds: string[] | null = null,
+  ): Promise<TripRow[]> {
     const params: unknown[] = [date];
     let repFilter = '';
     if (repId) {
       params.push(repId);
-      repFilter = `AND e.rep_id = $2`;
+      repFilter = `AND e.rep_id = $${params.length}`;
+    }
+    // Appended after the optional repId so the placeholder number is whatever
+    // position it actually lands in — hardcoding $2 here breaks when repId is absent.
+    if (visibleRepIds !== null) {
+      params.push(visibleRepIds);
+      repFilter += ` AND e.rep_id = ANY($${params.length}::uuid[])`;
     }
     const pings: RawPing[] = await this.ds.query(
       `SELECT e.rep_id AS "repId",
@@ -903,7 +1019,10 @@ export class ReportsService {
    * Only POSTED vouchers count: a draft has not happened yet, and counting one
    * would make this disagree with the ERP.
    */
-  async voucherSummary(q: VoucherSummaryQuery): Promise<VoucherSummaryReport> {
+  async voucherSummary(
+    q: VoucherSummaryQuery,
+    visibleRepIds: string[] | null = null,
+  ): Promise<VoucherSummaryReport> {
     const from = q.from ?? new Date().toISOString().slice(0, 10);
     const to = q.to ?? from;
 
@@ -919,6 +1038,13 @@ export class ReportsService {
     if (q.repId) {
       params.push(q.repId);
       where.push(`r.id = $${params.length}`);
+    }
+    // Joins the shared WHERE so the rows AND the footer totals are both scoped —
+    // separate predicates here would let the footer total a wider set than the
+    // rows it sits under.
+    if (visibleRepIds !== null) {
+      params.push(visibleRepIds);
+      where.push(`r.id = ANY($${params.length}::uuid[])`);
     }
     if (q.transKind === 'COLLECTION') {
       // Nothing in voucher_headers can match; short-circuit rather than run a
@@ -958,7 +1084,10 @@ export class ReportsService {
     const lineRollup = `
       LEFT JOIN LATERAL (
         SELECT COALESCE(SUM(t.discount_value), 0)                 AS line_discount,
-               COALESCE(SUM(t.tobacco_net_tax_fils), 0) / 1000.0  AS tobacco_tax
+               COALESCE(SUM(t.tobacco_net_tax_fils), 0) / 1000.0  AS tobacco_tax,
+               COALESCE(
+                 SUM(t.unit_price * COALESCE(t.qty_of_unit, t.item_qty)), 0
+               )                                                  AS line_gross
           FROM voucher_transactions t
          WHERE t.voucher_number = h.voucher_number
       ) ld ON true`;
@@ -971,23 +1100,36 @@ export class ReportsService {
       ${lineRollup}
       WHERE ${where.join(' AND ')}`;
 
-    // The four money columns have to describe one voucher consistently:
-    //
-    //     subTotal - discount + tax = netTotal
-    //
-    // netTotal and total_tax are recorded facts, and the discount is now the
-    // real one, so the subtotal is derived from them. Reading h.total instead
-    // (the GST tax base) printed subTotal = netTotal on this installation: the
-    // items carry 0% GST and their tax content is TOBACCO tax, which h.total
-    // does not exclude. Deriving it works in both tax modes and needs no
-    // migration — every historical voucher recomputes correctly on read.
-    // The lines are the source of truth. The header column is only a fallback for
-    // a voucher with no line discounts recorded at all — an older document, or a
-    // header-only discount written before the shares were pushed down to the
-    // lines. When the lines DO carry discounts their sum already includes the
-    // header share, so the fallback can never double-count.
+    // The lines are the source of truth for the discount. The header column is
+    // only a fallback for a voucher with no line discounts recorded at all — an
+    // older document, or a header-only discount written before the shares were
+    // pushed down to the lines. When the lines DO carry discounts their sum
+    // already includes the header share, so the fallback can never double-count.
     const discountExpr = `COALESCE(NULLIF(COALESCE(ld.line_discount, 0), 0), h.total_discount_value)`;
-    const subTotalExpr = `(h.net_total + ${discountExpr} - h.total_tax)`;
+
+    // SUB-TOTAL — one rule, and it depends on the installation's tax mode:
+    //
+    //   INCLUSIVE  net_total - total_tax
+    //              The entered price already contains the tax, so stripping the
+    //              tax content out of the grand total IS the pre-tax figure. The
+    //              discount is already inside that price and must NOT be added
+    //              back — doing so reported a sub-total the customer never saw.
+    //
+    //   EXCLUSIVE  Σ(unit_price × qty)
+    //              Prices exclude tax, so the sub-total is simply what the items
+    //              cost before discount and before tax is added on top.
+    //
+    // Read from app_settings rather than passed in, so the grouped totals below
+    // use exactly the same expression as the rows. The subquery is uncorrelated,
+    // so Postgres evaluates it once as an InitPlan, not per row.
+    //
+    // qty_of_unit is the quantity in the unit the price is quoted in; item_qty
+    // (base pieces) is the fallback for rows written before units were recorded.
+    const taxModeExpr = `(SELECT s.tax_calc_method FROM app_settings s LIMIT 1)`;
+    const subTotalExpr = `CASE WHEN ${taxModeExpr} = 'INCLUSIVE'
+                               THEN (h.net_total - h.total_tax)
+                               ELSE COALESCE(ld.line_gross, 0)
+                          END`;
 
     const rowsRaw: Array<Record<string, string | null>> = await this.ds.query(
       `SELECT h.id::text      AS "id",

@@ -107,6 +107,32 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'is_fulfilled', type: 'boolean', default: false })
   isFulfilled!: boolean;
 
+  // ── Tax exemption snapshot (frozen at creation; never recalculated) ────────
+  /** True when this document was issued tax-exempt. Drives the printed banner. */
+  @Column({ name: 'is_tax_exempt', type: 'boolean', default: false })
+  isTaxExempt!: boolean;
+
+  /**
+   * Where the exemption came from: CUSTOMER (the customer record said so),
+   * MANUAL (chosen on this document), or NONE. Kept because "why was no tax
+   * charged" is the first question an auditor asks, and the customer record may
+   * have changed since.
+   */
+  @Column({ name: 'tax_exemption_source', type: 'text', default: 'NONE' })
+  taxExemptionSource!: 'CUSTOMER' | 'MANUAL' | 'NONE';
+
+  @Column({ name: 'tax_exemption_number_snapshot', type: 'text', nullable: true })
+  taxExemptionNumber?: string | null;
+
+  @Column({ name: 'tax_exemption_reason_snapshot', type: 'text', nullable: true })
+  taxExemptionReason?: string | null;
+
+  @Column({ name: 'tax_exemption_type_snapshot', type: 'text', nullable: true })
+  taxExemptionType?: string | null;
+
+  @Column({ name: 'tax_exemption_applied_at', type: 'timestamptz', nullable: true })
+  taxExemptionAppliedAt?: Date | null;
+
   @OneToMany(() => VoucherTransaction, (t) => t.header, { cascade: true })
   transactions?: VoucherTransaction[];
 

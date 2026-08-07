@@ -28,7 +28,11 @@ import { HeartbeatDto } from './dto/heartbeat.dto';
 import { ListLocationsQuery } from './dto/list-locations.query';
 import { TrackingSummaryQuery } from './dto/tracking-summary.query';
 import { RolesGuard } from '../../common/guards/roles.guard';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import {
+  CurrentUser,
+  AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
+import { RepScopeService } from '../users/rep-scope.service';
 
 @ApiTags('reps-locations')
 @ApiBearerAuth()
@@ -38,6 +42,7 @@ export class LocationsController {
   constructor(
     private readonly locations: LocationsService,
     private readonly repStatus: RepStatusService,
+    private readonly repScope: RepScopeService,
   ) {}
 
   @Post(':id/heartbeat')
@@ -99,8 +104,8 @@ export class LocationsController {
       'Latest GPS ping for each active rep (last-24h window). Powers the Live Map.',
   })
   @ApiOkResponse({ description: 'Latest ping per active rep' })
-  latest() {
-    return this.locations.latestPerRep();
+  async latest(@CurrentUser() user: AuthenticatedUser) {
+    return this.locations.latestPerRep(await this.repScope.visibleRepIds(user));
   }
 
   @Get(':id/locations')
@@ -110,10 +115,14 @@ export class LocationsController {
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiOkResponse({ description: 'Ordered list of pings in the window' })
-  list(
+  async list(
     @Param('id', ParseUUIDPipe) id: string,
     @Query() query: ListLocationsQuery,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
+    // Naming one rep: 403 rather than an empty trail, which would read as
+    // "this salesman didn't move today".
+    await this.repScope.assertCanSeeRep(user, id);
     return this.locations.list(id, query);
   }
 
@@ -125,10 +134,12 @@ export class LocationsController {
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiOkResponse({ description: 'Ordered list of visits in the window' })
-  visits(
+  async visits(
     @Param('id', ParseUUIDPipe) id: string,
     @Query() query: ListLocationsQuery,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
+    await this.repScope.assertCanSeeRep(user, id);
     return this.locations.visitsForRep(id, query.from, query.to);
   }
 
@@ -139,10 +150,12 @@ export class LocationsController {
       "Vouchers the rep saved with a GPS fix, within [from,to] (defaults last 30d) — the sale markers for the tracking map. Vouchers saved without a fix (indoors, location off, raised from the dashboard) are simply absent.",
   })
   @ApiOkResponse({ description: 'Ordered list of located sales in the window' })
-  salePoints(
+  async salePoints(
     @Param('id', ParseUUIDPipe) id: string,
     @Query() query: ListLocationsQuery,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
+    await this.repScope.assertCanSeeRep(user, id);
     return this.locations.salePointsForRep(id, query.from, query.to);
   }
 
@@ -154,10 +167,12 @@ export class LocationsController {
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiOkResponse({ description: 'Ordered list of tracking buckets' })
-  trackingSummary(
+  async trackingSummary(
     @Param('id', ParseUUIDPipe) id: string,
     @Query() query: TrackingSummaryQuery,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
+    await this.repScope.assertCanSeeRep(user, id);
     return this.locations.trackingSummary(id, query.from, query.to, query.bucket ?? 'day');
   }
 
@@ -169,10 +184,13 @@ export class LocationsController {
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiOkResponse({ description: 'GeoJSON FeatureCollection' })
-  geojson(
+  async geojson(
     @Param('id', ParseUUIDPipe) id: string,
     @Query() query: ListLocationsQuery,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
+    // Same guard as the trail it exports — otherwise the export is a way around it.
+    await this.repScope.assertCanSeeRep(user, id);
     return this.locations.toGeoJsonLineString(id, query);
   }
 }

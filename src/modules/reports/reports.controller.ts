@@ -22,14 +22,18 @@ import {
 } from './dto/end-of-day.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
+import { RepScopeService } from '../users/rep-scope.service';
 
 @ApiTags('reports')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'reports', version: '1' })
 export class ReportsController {
-  constructor(private readonly reports: ReportsService) {}
+  constructor(
+    private readonly reports: ReportsService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Get('dashboard')
   @ApiOperation({
@@ -38,8 +42,8 @@ export class ReportsController {
       'One aggregated payload for the dashboard home page: sales today vs yesterday, payments, visits, customers/debt, cheques due soon, low stock and active reps.',
   })
   @ApiOkResponse({ description: 'Aggregated dashboard KPIs' })
-  dashboard() {
-    return this.reports.dashboard();
+  async dashboard(@CurrentUser() user: AuthenticatedUser) {
+    return this.reports.dashboard(await this.repScope.visibleRepIds(user));
   }
 
   @Get('sales-trend')
@@ -49,8 +53,8 @@ export class ReportsController {
       'Zero-filled daily series of posted SALE/RETURN totals and payments for the last N days (default 30).',
   })
   @ApiOkResponse({ description: 'Daily trend points, oldest first' })
-  salesTrend(@Query() q: ReportsRangeQueryDto) {
-    return this.reports.salesTrend(q.days ?? 30);
+  async salesTrend(@Query() q: ReportsRangeQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.reports.salesTrend(q.days ?? 30, await this.repScope.visibleRepIds(user));
   }
 
   @Get('top-customers')
@@ -59,8 +63,8 @@ export class ReportsController {
     description: 'Customers ranked by posted SALE net total over the last N days.',
   })
   @ApiOkResponse({ description: 'Ranked customers' })
-  topCustomers(@Query() q: ReportsRangeQueryDto) {
-    return this.reports.topCustomers(q.days ?? 30, q.limit ?? 10);
+  async topCustomers(@Query() q: ReportsRangeQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.reports.topCustomers(q.days ?? 30, q.limit ?? 10, await this.repScope.visibleRepIds(user));
   }
 
   @Get('rep-leaderboard')
@@ -70,8 +74,8 @@ export class ReportsController {
       'Reps ranked by posted SALE net total over the last N days, with voucher, customer and visit counts.',
   })
   @ApiOkResponse({ description: 'Ranked reps' })
-  repLeaderboard(@Query() q: ReportsRangeQueryDto) {
-    return this.reports.repLeaderboard(q.days ?? 30, q.limit ?? 10);
+  async repLeaderboard(@Query() q: ReportsRangeQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.reports.repLeaderboard(q.days ?? 30, q.limit ?? 10, await this.repScope.visibleRepIds(user));
   }
 
   @Get('rep-trips')
@@ -81,8 +85,8 @@ export class ReportsController {
       'Segments each rep’s GPS pings on the given date into trips (start/end, duration, distance, speed, path). Pass repId to focus one salesman.',
   })
   @ApiOkResponse({ description: 'Trips, newest first' })
-  repTrips(@Query() q: TripsQueryDto) {
-    return this.reports.repTrips(q.date, q.repId);
+  async repTrips(@Query() q: TripsQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.reports.repTrips(q.date, q.repId, await this.repScope.visibleRepIds(user));
   }
 
 
@@ -93,8 +97,8 @@ export class ReportsController {
       'Posted vouchers in a date range, optionally narrowed to one salesman, one voucher kind (SALE/RETURN/ORDER) and cash-vs-credit. Returns the rows, the footer totals (sub-total, tax, discount, net) aggregated over the WHOLE range, and the collections taken in the same window split by method.',
   })
   @ApiOkResponse({ description: 'Rows, totals and collections' })
-  voucherSummary(@Query() query: VoucherSummaryQuery) {
-    return this.reports.voucherSummary(query);
+  async voucherSummary(@Query() query: VoucherSummaryQuery, @CurrentUser() user: AuthenticatedUser) {
+    return this.reports.voucherSummary(query, await this.repScope.visibleRepIds(user));
   }
 
   @Get('low-stock')
@@ -114,8 +118,8 @@ export class ReportsController {
     description: 'Items ranked by quantity sold (posted SALE voucher lines). Paginated.',
   })
   @ApiOkResponse({ description: 'Paginated best-selling items' })
-  bestItems(@Query() q: ReportsQueryDto) {
-    return this.reports.bestItems(q.offset ?? 0, q.limit ?? 25, q.days);
+  async bestItems(@Query() q: ReportsQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.reports.bestItems(q.offset ?? 0, q.limit ?? 25, q.days, await this.repScope.visibleRepIds(user));
   }
 
   @Get('visits')
@@ -124,8 +128,8 @@ export class ReportsController {
     description: 'All customer visits (newest first) with customer + rep names. Paginated.',
   })
   @ApiOkResponse({ description: 'Paginated visits' })
-  visits(@Query() q: ReportsQueryDto) {
-    return this.reports.visits(q.offset ?? 0, q.limit ?? 25);
+  async visits(@Query() q: ReportsQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.reports.visits(q.offset ?? 0, q.limit ?? 25, await this.repScope.visibleRepIds(user));
   }
 
   @Get('visits-no-transaction')
@@ -134,8 +138,8 @@ export class ReportsController {
     description: 'Customers visited today where the rep did no business (had_sale=false), with customer + rep names.',
   })
   @ApiOkResponse({ description: 'Today no-transaction visits' })
-  noTransactionVisits() {
-    return this.reports.noTransactionVisitsToday();
+  async noTransactionVisits(@CurrentUser() user: AuthenticatedUser) {
+    return this.reports.noTransactionVisitsToday(await this.repScope.visibleRepIds(user));
   }
 
   // ── End-of-Day cash reconciliation (admin/manager) ──────────────────────────
@@ -148,8 +152,13 @@ export class ReportsController {
       "Per-salesman cash/cheque collections, cash/credit sales, cash returns, discount, expected cash, and the salesman's carried balance, over a date range.",
   })
   @ApiOkResponse({ description: '{ from, to, rows, totals } — money in fils' })
-  endOfDay(@Query() q: EndOfDayQueryDto) {
-    return this.reports.endOfDay(q.from, q.to, q.repId);
+  async endOfDay(@Query() q: EndOfDayQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.reports.endOfDay(
+      q.from,
+      q.to,
+      q.repId,
+      await this.repScope.visibleRepIds(user),
+    );
   }
 
   @Post('end-of-day/settle')
@@ -160,7 +169,14 @@ export class ReportsController {
       'Records the cash received from a salesman for a period; carries the difference (expected − received) onto their running balance. Recomputes the period server-side.',
   })
   @ApiCreatedResponse({ description: 'The created settlement (with newBalanceFils)' })
-  settle(@Body() dto: SettleEndOfDayDto, @CurrentUser('sub') userId: string) {
+  async settle(
+    @Body() dto: SettleEndOfDayDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // Settling WRITES a balance against a salesman. Filtering it away would read
+    // as "nothing to settle"; a 403 says whose it is.
+    await this.repScope.assertCanSeeRep(user, dto.repId);
     return this.reports.settle(dto, userId);
   }
 
@@ -168,8 +184,11 @@ export class ReportsController {
   @Roles('admin', 'manager')
   @ApiOperation({ summary: 'Settlement history', description: 'Past End-of-Day settlements with rep name (newest first).' })
   @ApiOkResponse({ description: 'SettlementRow[]' })
-  settlements(@Query() q: SettlementsQueryDto) {
-    return this.reports.listSettlements(q);
+  async settlements(
+    @Query() q: SettlementsQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.reports.listSettlements(q, await this.repScope.visibleRepIds(user));
   }
 
   /**
@@ -185,10 +204,15 @@ export class ReportsController {
       'Returns locked=true when the salesman has a settled End-of-Day covering the given date (defaults to today). The mobile app calls this before allowing new transactions.',
   })
   @ApiOkResponse({ description: '{ locked, lockedSince?, periodFrom?, periodTo?, settlementId? }' })
-  eodLock(
+  async eodLock(
     @Param('repId') repId: string,
     @Query() q: EodLockQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
+    // A salesman's own scope is [their own repId], so the mobile app's call for
+    // itself passes unchanged; only a scoped supervisor asking about someone
+    // else's van is refused.
+    await this.repScope.assertCanSeeRep(user, repId);
     return this.reports.getEodLock(repId, q.date);
   }
 }

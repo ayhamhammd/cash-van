@@ -10,10 +10,12 @@ import { VoucherHeader } from './voucher-header.entity';
 import { ItemCart } from '../../items/entities/item-cart.entity';
 import { TransactionKind } from './transaction-kind.entity';
 import { Warehouse } from '../../warehouses/entities/warehouse.entity';
+import { ItemUnit } from '../../units/entities/item-unit.entity';
 
 @Entity({ name: 'voucher_transactions' })
 @Index('idx_voucher_transactions_voucher_number', ['voucherNumber'])
 @Index('idx_voucher_transactions_item_number', ['itemNumber'])
+@Index('idx_voucher_transactions_stock_unit', ['itemNumber', 'stockUnitCode'])
 export class VoucherTransaction extends BaseEntity {
   @ManyToOne(() => VoucherHeader, (h) => h.transactions, {
     onDelete: 'CASCADE',
@@ -111,6 +113,32 @@ export class VoucherTransaction extends BaseEntity {
   /** Pieces per unit (conversion factor): item_qty = qty_of_unit × unit_base_qty. */
   @Column({ name: 'unit_base_qty', type: 'integer', nullable: true })
   unitBaseQty?: number | null;
+
+  /**
+   * Stock pool this line moves: the variant unit's code, or `''` for the item's
+   * base pool. Distinct from `unit_code`, which is a free-text display snapshot
+   * (installed APKs post the Arabic name in it) and is unfit to key stock on.
+   */
+  @Column({ name: 'stock_unit_code', type: 'text', default: '' })
+  stockUnitCode!: string;
+
+  /** The `item_units` row this line was entered in. Null = base pieces. */
+  @ManyToOne(() => ItemUnit, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({ name: 'item_unit_id' })
+  itemUnit?: ItemUnit | null;
+
+  @Column({ name: 'item_unit_id', type: 'uuid', nullable: true })
+  itemUnitId?: string | null;
+
+  /**
+   * How much of this SALE line has already come back on a return.
+   *
+   * Only meaningful on SALE lines; the return-by-item allocator reads
+   * `item_qty - qty_returned` to know what is still returnable. A DB CHECK keeps
+   * it within what was sold — over-return is silent and compounding otherwise.
+   */
+  @Column({ name: 'qty_returned', type: 'numeric', precision: 14, scale: 3, default: 0 })
+  qtyReturned!: string;
 
   @Column({ name: 'signed_qty', type: 'numeric', precision: 14, scale: 3, default: 0 })
   signedQty!: string;

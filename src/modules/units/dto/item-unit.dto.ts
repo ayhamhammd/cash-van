@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import {
+  IsBoolean,
   IsInt,
   IsNumberString,
   IsOptional,
@@ -38,6 +39,29 @@ export class CreateItemUnitDto {
   @IsInt()
   @Min(1)
   qty?: number;
+
+  @ApiPropertyOptional({
+    default: false,
+    description:
+      'True makes this unit a VARIANT — a physically different good (أحمر) that ' +
+      'owns its own stock pool. False (the default) is a packaging unit ' +
+      '(كرتونة ×12): a way to enter a quantity of the same goods, drawing from ' +
+      "the item's base pool.",
+  })
+  @IsOptional()
+  @IsBoolean()
+  isStockUnit?: boolean;
+
+  @ApiPropertyOptional({
+    example: 'SKU-1001-RED',
+    description:
+      'The ERP product_skus.sku this unit mirrors, so an outbound sale posts ' +
+      'against the variant instead of the base SKU. Normally written by sync.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  erpSkuCode?: string;
 }
 
 export class UpdateItemUnitDto extends PartialType(CreateItemUnitDto) {

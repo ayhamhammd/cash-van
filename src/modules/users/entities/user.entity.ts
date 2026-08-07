@@ -4,6 +4,13 @@ import { BaseEntity } from '../../../common/entities/base.entity';
 export type UserType = 'ADMIN' | 'MANAGER' | 'SALES' | 'DRIVER';
 export type UserRole = 'admin' | 'manager' | 'supervisor' | 'viewer';
 
+/**
+ * Whether this user sees every salesman or only assigned ones.
+ * 'all' is the default so existing users keep today's access — scoping only
+ * applies when someone is deliberately switched. See docs/SPEC-rep-scoped-users.md.
+ */
+export type RepScopeMode = 'all' | 'assigned';
+
 @Entity({ name: 'users' })
 export class User extends BaseEntity {
   @Index('uq_users_user_number', { unique: true })
@@ -59,6 +66,17 @@ export class User extends BaseEntity {
 
   @Column({ name: 'can_add_customer', type: 'boolean', default: false })
   canAddCustomer!: boolean;
+
+  /**
+   * May this salesman create a customer that is REAL immediately?
+   * False (the default) routes their creation through admin approval instead.
+   * Meaningless without canAddCustomer, which decides whether they may create at all.
+   */
+  @Column({ name: 'rep_scope_mode', type: 'text', default: 'all' })
+  repScopeMode!: RepScopeMode;
+
+  @Column({ name: 'can_create_customer_direct', type: 'boolean', default: false })
+  canCreateCustomerDirect!: boolean;
 
   @Column({ name: 'can_edit_customer_credit', type: 'boolean', default: false })
   canEditCustomerCredit!: boolean;

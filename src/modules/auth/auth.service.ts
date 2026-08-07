@@ -128,6 +128,7 @@ export class AuthService {
       canMakeVoucher: user.canMakeVoucher,
       canEditVoucher: user.canEditVoucher,
       canAddCustomer: user.canAddCustomer,
+      canCreateCustomerDirect: user.canCreateCustomerDirect,
       canEditCustomerCredit: user.canEditCustomerCredit,
       canAddItems: user.canAddItems,
       canEditExpiry: user.canEditExpiry,

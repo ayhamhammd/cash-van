@@ -1,11 +1,12 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThanOrEqual, Repository } from 'typeorm';
+import { In, LessThanOrEqual, Repository } from 'typeorm';
 
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
 import { Payment } from '../vouchers/entities/payment.entity';
+import { ItemUnit } from '../units/entities/item-unit.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { Customer } from '../customers/entities/customer.entity';
@@ -39,6 +40,17 @@ const ERP_PAYMENT_METHOD: Record<string, string> = {
   TRANSFER: 'BANK_TRANSFER',
 };
 
+/**
+ * A payload that can NEVER be built, however many times we retry — an order with
+ * no customer, a return with no source sale.
+ *
+ * Distinct from returning null (which means "not yet — the prerequisite may
+ * still arrive"), because the two need opposite handling: one should dead-letter
+ * on the first look, the other should back off and try again. Conflating them is
+ * what made ORD-101000002 burn six attempts on a condition that could not change.
+ */
+export class TerminalPayloadError extends Error {}
+
 @Injectable()
 export class ErpOutboxService {
   private readonly logger = new Logger(ErpOutboxService.name);
@@ -57,6 +69,7 @@ export class ErpOutboxService {
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
     @InjectRepository(SalesmanSettlement) private readonly salesmanSettlements: Repository<SalesmanSettlement>,
     @InjectRepository(Payment) private readonly payments: Repository<Payment>,
+    @InjectRepository(ItemUnit) private readonly itemUnits: Repository<ItemUnit>,
   ) {}
 
   /** Queue a van document for push to the ERP (best-effort; never throws to the caller). */
@@ -150,9 +163,18 @@ export class ErpOutboxService {
 
   private async pushOne(row: ErpOutbox): Promise<void> {
     try {
-      const calls = await this.buildCalls(row);
+      let calls;
+      try {
+        calls = await this.buildCalls(row);
+      } catch (e) {
+        // Terminal on the FIRST look: no number of retries invents a customer.
+        if (e instanceof TerminalPayloadError) return this.failTerminal(row, e.message);
+        throw e;
+      }
       if (!calls || calls.length === 0) {
-        return this.fail(row, 'payload could not be built (source missing)');
+        // Still the "not yet" case — a prerequisite that may arrive on a later
+        // sync. Retries with backoff are the right behaviour here.
+        return this.fail(row, 'waiting on a prerequisite that has not synced yet');
       }
       // A document may map to >1 call; each carries its own externalId, so a
       // retry replays them idempotently. (Most kinds are a single call.)
@@ -178,6 +200,22 @@ export class ErpOutboxService {
       row.paymentSkipped = posting.paymentSkipped;
       await this.outbox.save(row);
       this.warnOnPostingGap(row);
+      // A customer only becomes ERP-mapped once it actually exists there. Writing
+      // the map on enqueue would make an unexported customer look synced and stop
+      // it ever being retried.
+      if (row.kind === 'CUSTOMER') {
+        // Find-then-update, not create+save: a blind insert added a SECOND map
+        // row on every retry, and the customer sync then resolves an ambiguous
+        // identity for the same code.
+        const existing = await this.idmap.findOne({
+          where: { entity: 'customer', localId: row.ref },
+        });
+        const map =
+          existing ?? this.idmap.create({ entity: 'customer', localId: row.ref });
+        map.erpId = row.resultRef ?? row.ref;
+        map.erpCode = row.ref;
+        await this.idmap.save(map);
+      }
       if (row.kind === 'SALE_INVOICE' && row.resultRef) {
         await this.mapVoucher(row.ref, row.resultRef);
         // A partially-paid sale posts as CREDIT; settle its paid portion with a
@@ -229,6 +267,21 @@ export class ErpOutboxService {
     );
   }
 
+  /**
+   * Dead-letter now, without spending the retry budget.
+   *
+   * For failures whose cause cannot change on its own. Burning five attempts and
+   * an hour of backoff only delays the operator seeing a message they need to
+   * act on.
+   */
+  private async failTerminal(row: ErpOutbox, error: string): Promise<void> {
+    row.attempts += 1;
+    row.error = error;
+    row.status = 'dead_letter';
+    await this.outbox.save(row);
+    this.logger.warn(`outbox ${row.kind} ${row.ref} DEAD (terminal): ${error}`);
+  }
+
   private async fail(row: ErpOutbox, error: string): Promise<void> {
     row.attempts += 1;
     row.error = error;
@@ -247,6 +300,7 @@ export class ErpOutboxService {
   private async buildPayload(
     row: ErpOutbox,
   ): Promise<{ path: string; body: Record<string, unknown> } | null> {
+    if (row.kind === 'CUSTOMER') return this.buildCustomer(row.ref);
     if (row.kind === 'SALE_INVOICE') return this.buildSale(row.ref);
     if (row.kind === 'SALES_RETURN') return this.buildReturn(row.ref);
     if (row.kind === 'SALES_ORDER') return this.buildOrder(row.ref);
@@ -277,6 +331,37 @@ export class ErpOutboxService {
         description: journal.description,
         date: journal.date,
         lines: journal.lines,
+      },
+    };
+  }
+
+  /**
+   * Build the ERP create/upsert call for a cash-van customer.
+   *
+   * `ref` is the customer_number, which is also the ERP `code` and the
+   * Idempotency-Key — so a retry after a timeout cannot create a duplicate
+   * customer in the ERP, and re-running an export is safe.
+   *
+   * Read at PUSH time, not at enqueue time: a customer edited while the ERP was
+   * down should export its current details, not the ones it had when it was
+   * first queued.
+   */
+  private async buildCustomer(
+    ref: string,
+  ): Promise<{ path: string; body: Record<string, unknown>; idem?: string } | null> {
+    const c = await this.customers.findOne({ where: { customerNumber: ref } });
+    if (!c) return null;
+    return {
+      path: 'customers',
+      idem: ref,
+      body: {
+        code: c.customerNumber,
+        name: c.nameAr || c.customerName || c.customerNumber,
+        ...(c.phone ? { phone: c.phone } : {}),
+        ...(c.email ? { email: c.email } : {}),
+        ...(c.tin ? { taxNumber: c.tin } : {}),
+        // JOD major here; the ERP scales it on receipt.
+        ...(c.creditLimit != null ? { creditLimit: Number(c.creditLimit) } : {}),
       },
     };
   }
@@ -365,16 +450,33 @@ export class ErpOutboxService {
     voucherNumber: string,
   ): Promise<{ path: string; body: Record<string, unknown> } | null> {
     const header = await this.headers.findOne({ where: { voucherNumber } });
-    if (!header?.customerNumber) return null;
+    if (!header) throw new TerminalPayloadError('Order not found');
+
+    // TERMINAL: the ERP's sales-orders endpoint requires a customer, and an
+    // order that was saved without one will never acquire one by waiting.
+    if (!header.customerNumber) {
+      throw new TerminalPayloadError(
+        'Order has no customer. The ERP cannot accept an order without one — ' +
+          'raise it again against a customer.',
+      );
+    }
+
+    // NOT terminal: the customer may still be mid-export. Returning null retries
+    // with backoff, which is exactly right while the customer outbox drains.
     const cust = await this.idmap.findOne({
       where: { entity: 'customer', localId: header.customerNumber },
     });
-    if (!cust?.erpId) return null; // customer not mirrored to the ERP yet
+    if (!cust?.erpId) return null;
+
     const lines = await this.lines.find({ where: { voucherNumber } });
+    if (lines.length === 0) {
+      throw new TerminalPayloadError('Order has no lines.');
+    }
     const orderLines: Array<{ skuId: string; quantity: number }> = [];
     for (const l of lines) {
+      // Also not terminal — items mirror on the next catalogue sync.
       const sku = await this.idmap.findOne({ where: { entity: 'item', localId: l.itemNumber } });
-      if (!sku?.erpId) return null; // item not mirrored yet
+      if (!sku?.erpId) return null;
       orderLines.push({ skuId: sku.erpId, quantity: Math.round(Number(l.itemQty) || 0) });
     }
     return { path: 'sales-orders', body: { customerId: cust.erpId, lines: orderLines } };
@@ -514,19 +616,49 @@ export class ErpOutboxService {
     return n;
   }
 
+  /**
+   * The ERP SKU each line of ONE voucher posts against: the VARIANT's own SKU
+   * when the line was entered in a unit that has one, else the item's base SKU
+   * (`item_number`, which is the base SKU by construction).
+   *
+   * Without this a red sale posted against the base SKU and the ERP's own
+   * per-colour stock diverged from the van's on the very first sale (spec §5.3).
+   *
+   * Resolved for the whole voucher in ONE query — a lookup per line is an N+1 on
+   * a path that runs for every document the van pushes. A voucher whose lines
+   * carry no unit at all skips the query entirely.
+   */
+  private async erpSkuResolver(
+    lines: VoucherTransaction[],
+  ): Promise<(line: VoucherTransaction) => string> {
+    const unitIds = [
+      ...new Set(lines.map((l) => l.itemUnitId).filter((id): id is string => !!id)),
+    ];
+    if (unitIds.length === 0) return (l) => l.itemNumber;
+    const units = await this.itemUnits.find({ where: { id: In(unitIds) } });
+    const skuByUnit = new Map(
+      units.filter((u) => u.erpSkuCode).map((u) => [u.id, u.erpSkuCode!]),
+    );
+    // A unit with no erp_sku_code was authored in the dashboard, not synced —
+    // the ERP has never heard of it, so its line falls back to the base SKU.
+    return (l) => (l.itemUnitId ? skuByUnit.get(l.itemUnitId) : undefined) ?? l.itemNumber;
+  }
+
   private async buildSale(
     voucherNumber: string,
   ): Promise<{ path: string; body: Record<string, unknown> } | null> {
     const header = await this.headers.findOne({ where: { voucherNumber } });
     if (!header) return null;
     const lines = await this.lines.find({ where: { voucherNumber } });
+    const skuOf = await this.erpSkuResolver(lines);
     const items = await Promise.all(
       lines.map(async (l) => {
         // quantity is in BASE pieces (item_qty), so send the per-PIECE price.
-        // For base-unit lines (unit_base_qty = 1) this equals unit_price exactly.
+        // For base-unit lines (unit_base_qty = 1) this equals unit_price exactly
+        // — and a variant's divisor is 1 too, since a colour is one piece.
         const baseQty = l.unitBaseQty && l.unitBaseQty > 0 ? l.unitBaseQty : 1;
         const base = {
-          skuCode: l.itemNumber, // cash-van item_number == ERP sku (set on inbound sync)
+          skuCode: skuOf(l), // the variant's SKU, else the item's base SKU
           quantity: this.erpQty(l.itemQty, l.itemNumber, voucherNumber),
           unitPrice: (Number(l.unitPrice) || 0) / baseQty, // JOD major, per base piece
           discount: Number(l.discountValue) || 0, // resolved line discount (incl header share)
@@ -572,10 +704,16 @@ export class ErpOutboxService {
     // The ERP needs the ORIGINAL ERP invoice number; resolve it from the
     // referenced sale's push result.
     const ref = header.referenceVoucherNumber;
-    if (!ref) return null;
+    if (!ref) {
+      throw new TerminalPayloadError(
+        'Return has no source sale. Re-raise it through Return-by-item so it can ' +
+          'be matched to the sales it came from.',
+      );
+    }
     const map = await this.idmap.findOne({ where: { entity: 'voucher', localId: ref } });
     const originalInvoiceNumber = map?.erpCode ?? ref;
     const lines = await this.lines.find({ where: { voucherNumber } });
+    const skuOf = await this.erpSkuResolver(lines);
     return {
       path: 'sales-returns',
       body: {
@@ -585,7 +723,7 @@ export class ErpOutboxService {
         warehouseCode: this.vanStoreOf(lines, header.userCode), // physical return to the van
         originalInvoiceNumber,
         lines: lines.map((l) => ({
-          skuCode: l.itemNumber,
+          skuCode: skuOf(l), // red goes back to the red SKU, not the base one
           quantity: this.erpQty(l.itemQty, l.itemNumber, voucherNumber),
         })),
       },
@@ -600,6 +738,7 @@ export class ErpOutboxService {
     if (!header) return null;
     const lines = await this.lines.find({ where: { voucherNumber } });
     if (!lines.length) return null;
+    const skuOf = await this.erpSkuResolver(lines);
     return {
       path: 'stock-adjustments',
       body: {
@@ -608,7 +747,7 @@ export class ErpOutboxService {
         warehouseCode: this.vanStoreOf(lines, header.userCode),
         type: header.transKind === 'IN' ? 'IN' : 'OUT',
         items: lines.map((l) => ({
-          skuCode: l.itemNumber,
+          skuCode: skuOf(l),
           quantity: Math.round(Number(l.itemQty) || 0),
         })),
       },
@@ -634,8 +773,9 @@ export class ErpOutboxService {
     const from = lines.find((l) => l.fromStoreNumber)?.fromStoreNumber;
     const to = lines.find((l) => l.toStoreNumber)?.toStoreNumber;
     if (!from || !to) return null; // a transfer needs both endpoints
+    const skuOf = await this.erpSkuResolver(lines);
     const items = lines.map((l) => ({
-      skuCode: l.itemNumber,
+      skuCode: skuOf(l),
       quantity: Math.round(Number(l.itemQty) || 0),
     }));
     return [

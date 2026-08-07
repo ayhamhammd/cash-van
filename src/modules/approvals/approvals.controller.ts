@@ -24,16 +24,23 @@ import {
   RejectApprovalDto,
 } from './dto/approvals.dto';
 import { ApprovalStatus } from './entities/approval-request.entity';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import {
+  CurrentUser,
+  AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { RepScopeService } from '../users/rep-scope.service';
 
 @ApiTags('approvals')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'approvals', version: '1' })
 export class ApprovalsController {
-  constructor(private readonly approvals: ApprovalsService) {}
+  constructor(
+    private readonly approvals: ApprovalsService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Post()
   @ApiOperation({
@@ -50,8 +57,8 @@ export class ApprovalsController {
   @Roles('admin', 'manager')
   @ApiOperation({ summary: 'Approvals queue', description: 'Filter by status/type. Newest first.' })
   @ApiOkResponse({ description: '{ items, total }' })
-  list(@Query() q: ListApprovalsQueryDto) {
-    return this.approvals.list(q);
+  async list(@Query() q: ListApprovalsQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.approvals.list(q, await this.repScope.visibleRepIds(user));
   }
 
   @Get('mine')
@@ -88,8 +95,9 @@ export class ApprovalsController {
   approve(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser('sub') reviewerId: string,
+    @CurrentUser() reviewer: AuthenticatedUser,
   ) {
-    return this.approvals.approve(id, reviewerId);
+    return this.approvals.approve(id, reviewerId, reviewer);
   }
 
   @Post(':id/reject')
@@ -101,8 +109,9 @@ export class ApprovalsController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser('sub') reviewerId: string,
     @Body() dto: RejectApprovalDto,
+    @CurrentUser() reviewer: AuthenticatedUser,
   ) {
-    return this.approvals.reject(id, reviewerId, dto.reason);
+    return this.approvals.reject(id, reviewerId, dto.reason, reviewer);
   }
 
   @Post(':id/cancel')

@@ -6,9 +6,10 @@ import { CashAccountsModule } from '../cash-accounts/cash-accounts.module';
 import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
 import { SalesmanSettlement } from './entities/salesman-settlement.entity';
+import { UsersModule } from '../users/users.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([SalesmanSettlement]), ErpSyncModule, CashAccountsModule],
+  imports: [UsersModule, TypeOrmModule.forFeature([SalesmanSettlement]), ErpSyncModule, CashAccountsModule],
   controllers: [ReportsController],
   providers: [ReportsService],
 })

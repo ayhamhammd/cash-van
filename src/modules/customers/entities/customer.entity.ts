@@ -129,4 +129,35 @@ export class Customer extends BaseEntity {
    * resolution: price-list item price applies unless a customer_prices override wins. */
   @Column({ name: 'price_list_id', type: 'uuid', nullable: true })
   priceListId?: string | null;
+
+  // ---- Tax exemption (mirrors the ERP customer) ----------------------------
+  /**
+   * When true, every voucher created for this customer is an EXEMPT voucher:
+   * its tax is zero and the exemption is frozen onto the document.
+   * Current state only — a voucher never reads this after it is created.
+   */
+  @Column({ name: 'is_tax_exempt', type: 'boolean', default: false })
+  isTaxExempt!: boolean;
+
+  /** FULL_EXEMPTION | VAT_EXEMPTION | SPECIAL_APPROVAL (ERP vocabulary). */
+  @Column({ name: 'tax_exemption_type', type: 'text', nullable: true })
+  taxExemptionType?: string | null;
+
+  /** The certificate/decision number printed on the exempt invoice. */
+  @Column({ name: 'tax_exemption_number', type: 'text', nullable: true })
+  taxExemptionNumber?: string | null;
+
+  @Column({ name: 'tax_exemption_reason', type: 'text', nullable: true })
+  taxExemptionReason?: string | null;
+
+  /**
+   * Validity window. A sale outside it is NOT exempt even when the flag is on —
+   * an expired certificate is not an exemption, and charging no tax on it is the
+   * company's liability, not the customer's.
+   */
+  @Column({ name: 'tax_exemption_valid_from', type: 'timestamptz', nullable: true })
+  taxExemptionValidFrom?: Date | null;
+
+  @Column({ name: 'tax_exemption_valid_to', type: 'timestamptz', nullable: true })
+  taxExemptionValidTo?: Date | null;
 }

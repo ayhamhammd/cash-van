@@ -313,7 +313,7 @@ export class LocationsService {
    *
    * Uses Postgres DISTINCT ON for efficiency on the partitioned table.
    */
-  async latestPerRep(): Promise<LatestRepLocation[]> {
+  async latestPerRep(visibleRepIds: string[] | null = null): Promise<LatestRepLocation[]> {
     // Get distinct latest event per rep within the last 24h (live map window).
     // Raw query because TypeORM's QueryBuilder reorders SELECT columns, which
     // breaks `DISTINCT ON (...)`'s requirement that it be the first expression.
@@ -324,9 +324,10 @@ export class LocationsService {
              rep_id, lat, lng, accuracy_m, recorded_at
       FROM rep_location_events
       WHERE recorded_at >= $1
+        AND ($2::uuid[] IS NULL OR rep_id = ANY($2::uuid[]))
       ORDER BY rep_id, recorded_at DESC
       `,
-      [horizon],
+      [horizon, visibleRepIds ?? null],
     )) as Array<{
       rep_id: string;
       lat: number;

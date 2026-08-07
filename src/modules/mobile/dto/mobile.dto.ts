@@ -34,8 +34,23 @@ export class CompanyMetaDto {
 export class ItemUnitDto {
   @ApiProperty({ example: 'كرتونة' }) unitName!: string;
   @ApiProperty({ example: '4423524', description: 'Unit barcode' }) unitCode!: string;
+  @ApiProperty({
+    format: 'uuid',
+    description: 'Authoritative unit identity — post it back as the line itemUnitId',
+  })
+  itemUnitId!: string;
+  @ApiProperty({
+    example: false,
+    description: 'True when this unit is a variant that owns its own stock pool',
+  })
+  isStockUnit!: boolean;
   @ApiProperty({ example: '4.200', description: '3-decimal JOD price' }) unitPrice!: string;
-  @ApiProperty({ example: '25', description: 'Available stock for this unit in the van' })
+  @ApiProperty({
+    example: '25',
+    description:
+      "Stock available in THIS unit: a variant's own pool, or what the item's " +
+      'base pool can make up for a packaging unit',
+  })
   unitQty!: string;
 }
 
@@ -64,6 +79,11 @@ export class ItemBalanceRowDto {
   @ApiProperty({ example: 'C001' }) companyNumber!: string;
   @ApiProperty({ example: 'S012' }) salesmanCode!: string;
   @ApiProperty({ example: '231312' }) itemNumber!: string;
+  @ApiProperty({
+    example: 'أحمر',
+    description: "The stock pool — '' is the item's base pieces",
+  })
+  stockUnitCode!: string;
   @ApiProperty({ example: '40' }) itemQty!: string;
   @ApiProperty({ example: '1' }) storeNumber!: string;
 }
@@ -71,12 +91,29 @@ export class ItemBalanceRowDto {
 /** One unit row inside a /mobile/van-stock entry. */
 export class VanStockUnitDto {
   @ApiProperty({ format: 'uuid' }) unitId!: string;
+  @ApiProperty({
+    format: 'uuid',
+    description: 'Authoritative unit identity — post it back as the line itemUnitId',
+  })
+  itemUnitId!: string;
   @ApiProperty({ example: 'CTN' }) unitCode!: string;
   @ApiProperty({ example: 'كرتونة' }) unitName!: string;
   @ApiProperty({ example: 'Carton', nullable: true }) unitNameEn!: string | null;
   @ApiProperty({ example: 24, description: 'How many base units make 1 of this unit' })
   qty!: number;
   @ApiProperty({ example: false }) isBase!: boolean;
+  @ApiProperty({
+    example: false,
+    description: 'True when this unit is a variant that owns its own stock pool',
+  })
+  isStockUnit!: boolean;
+  @ApiProperty({
+    example: 12,
+    description:
+      "Stock available in THIS unit: a variant's own pool, or what the item's " +
+      'base pool can make up for a packaging unit',
+  })
+  quantity!: number;
   @ApiProperty({ example: '4423524' }) barcode!: string;
   @ApiProperty({ example: '8.400' }) salePrice!: string;
 }
@@ -103,6 +140,11 @@ export class VanStockItemDto {
   @ApiProperty() taxRate!: string;
   @ApiProperty() taxPercentage!: string;
   @ApiProperty({ nullable: true }) photoUrl!: string | null;
-  @ApiProperty({ description: 'Current quantity on the van in base units' }) quantity!: number;
+  @ApiProperty({
+    description:
+      "Current quantity on the van in the item's BASE pieces. Variant units " +
+      'carry their own stock on their units[] row.',
+  })
+  quantity!: number;
   @ApiProperty({ type: [VanStockUnitDto] }) units!: VanStockUnitDto[];
 }

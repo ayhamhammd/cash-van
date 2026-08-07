@@ -11,6 +11,18 @@ import { SYNC_REQUIRED_EVENT, SyncResource, syncSignal } from './sync-signal';
  * Sources that don't exist yet (anomaly/cheque-scan from plan 08) simply won't
  * fire until those plans emit — the wiring is ready.
  */
+/**
+ * Pull a rep id out of a loosely-typed event payload.
+ *
+ * Returns null when there is no usable one — which routes the event to
+ * unrestricted dashboards only. An approval filed from the office carries no
+ * repId, and that is exactly the case no scoped supervisor should be pinged for.
+ */
+function repIdOf(p: Record<string, unknown>): string | null {
+  const v = p.repId ?? p.rep_id;
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
 @Injectable()
 export class EventBridgeService {
   constructor(private readonly gateway: EventsGateway) {}
@@ -82,20 +94,20 @@ export class EventBridgeService {
 
   @OnEvent('rep.location')
   onRepLocation(p: { repId: string; lat: number; lng: number; recordedAt: Date }): void {
-    this.gateway.broadcast('rep.location', {
+    this.gateway.broadcastForRep('rep.location', {
       rep_id: p.repId,
       lat: p.lat,
       lng: p.lng,
       ts: p.recordedAt,
-    });
+    }, p.repId);
   }
 
   @OnEvent('invoice.created')
   onInvoiceCreated(p: { invoiceId: string; repId: string }): void {
-    this.gateway.broadcast('invoice.created', {
+    this.gateway.broadcastForRep('invoice.created', {
       invoice_id: p.invoiceId,
       rep_id: p.repId,
-    });
+    }, p.repId);
   }
 
   @OnEvent('invoice.confirmed')
@@ -105,12 +117,12 @@ export class EventBridgeService {
     customerId: string;
     grandTotal: number;
   }): void {
-    this.gateway.broadcast('invoice.confirmed', {
+    this.gateway.broadcastForRep('invoice.confirmed', {
       invoice_id: p.invoiceId,
       rep_id: p.repId,
       customer_id: p.customerId,
       total: p.grandTotal,
-    });
+    }, p.repId);
   }
 
   @OnEvent('route.deviated')
@@ -119,45 +131,45 @@ export class EventBridgeService {
     planId: string;
     nearestStopMeters: number;
   }): void {
-    this.gateway.broadcast('route.deviated', {
+    this.gateway.broadcastForRep('route.deviated', {
       rep_id: p.repId,
       plan_id: p.planId,
       deviation_m: p.nearestStopMeters,
-    });
+    }, p.repId);
   }
 
   @OnEvent('rep.offline')
   onRepOffline(p: { repId: string; lastSeen: Date | null }): void {
-    this.gateway.broadcast('rep.offline', {
+    this.gateway.broadcastForRep('rep.offline', {
       rep_id: p.repId,
       last_seen: p.lastSeen,
-    });
+    }, p.repId);
   }
 
   @OnEvent('rep.online')
   onRepOnline(p: { repId: string; at: Date }): void {
-    this.gateway.broadcast('rep.online', { rep_id: p.repId, ts: p.at });
+    this.gateway.broadcastForRep('rep.online', { rep_id: p.repId, ts: p.at }, p.repId);
   }
 
   @OnEvent('rep.gps_off')
   onRepGpsOff(p: { repId: string; at: Date }): void {
-    this.gateway.broadcast('rep.gps_off', { rep_id: p.repId, ts: p.at });
+    this.gateway.broadcastForRep('rep.gps_off', { rep_id: p.repId, ts: p.at }, p.repId);
   }
 
   @OnEvent('rep.gps_on')
   onRepGpsOn(p: { repId: string; at: Date }): void {
-    this.gateway.broadcast('rep.gps_on', { rep_id: p.repId, ts: p.at });
+    this.gateway.broadcastForRep('rep.gps_on', { rep_id: p.repId, ts: p.at }, p.repId);
   }
 
   @OnEvent('rep.app_closed')
   onRepAppClosed(p: { repId: string; at: Date }): void {
-    this.gateway.broadcast('rep.app_closed', { rep_id: p.repId, ts: p.at });
+    this.gateway.broadcastForRep('rep.app_closed', { rep_id: p.repId, ts: p.at }, p.repId);
   }
 
   // Reserved for plan 08:
   @OnEvent('anomaly.flagged')
   onAnomaly(p: Record<string, unknown>): void {
-    this.gateway.broadcast('anomaly.flagged', p);
+    this.gateway.broadcastForRep('anomaly.flagged', p, repIdOf(p));
   }
 
   @OnEvent('cheque.scanned')
@@ -168,12 +180,12 @@ export class EventBridgeService {
   // F10 — approvals + notification inbox
   @OnEvent('approval.requested')
   onApprovalRequested(p: Record<string, unknown>): void {
-    this.gateway.broadcast('approval.requested', p);
+    this.gateway.broadcastForRep('approval.requested', p, repIdOf(p));
   }
 
   @OnEvent('approval.decided')
   onApprovalDecided(p: Record<string, unknown>): void {
-    this.gateway.broadcast('approval.decided', p);
+    this.gateway.broadcastForRep('approval.decided', p, repIdOf(p));
   }
 
   @OnEvent('notification.created')

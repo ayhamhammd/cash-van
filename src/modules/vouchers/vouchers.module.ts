@@ -17,6 +17,9 @@ import { CustomersModule } from '../customers/customers.module';
 import { VendorsModule } from '../vendors/vendors.module';
 import { WarehousesModule } from '../warehouses/warehouses.module';
 import { OffersModule } from '../offers/offers.module';
+import { ReturnsController } from './returns/returns.controller';
+import { ReturnCandidatesService } from './returns/candidates';
+import { ReturnCreateService } from './returns/create';
 
 @Module({
   imports: [
@@ -34,8 +37,8 @@ import { OffersModule } from '../offers/offers.module';
     WarehousesModule,
     OffersModule,
   ],
-  controllers: [VouchersController],
-  providers: [VouchersService, TransactionKindsService],
+  controllers: [ReturnsController, VouchersController],
+  providers: [ReturnCandidatesService, ReturnCreateService, VouchersService, TransactionKindsService],
   exports: [VouchersService, TransactionKindsService],
 })
 export class VouchersModule {}

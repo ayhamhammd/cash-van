@@ -146,7 +146,13 @@ export class ErpHttpClient {
       return { ok: true, duplicate: true, data: json, status: res.status };
     }
     if (!res.ok) {
-      return { ok: false, duplicate: false, data: json, status: res.status, error: code ?? `HTTP ${res.status}` };
+      return {
+        ok: false,
+        duplicate: false,
+        data: json,
+        status: res.status,
+        error: this.errorDetail(json) ?? code ?? `HTTP ${res.status}`,
+      };
     }
     return { ok: true, duplicate: false, data: json, status: res.status };
   }
@@ -172,6 +178,9 @@ export class ErpHttpClient {
     return json?.data ?? null;
   }
 
+  /**
+   * The ERP error CODE alone — for branching (DUPLICATE_EXTERNAL_ID, 429…).
+   */
   private errorCode(json: unknown): string | null {
     if (json && typeof json === 'object') {
       const err = (json as Record<string, unknown>).error;
@@ -181,6 +190,28 @@ export class ErpHttpClient {
       }
     }
     return null;
+  }
+
+  /**
+   * Code PLUS the ERP's own explanation, for the operator reading a dead-letter.
+   *
+   * A bare "VALIDATION_ERROR" is unactionable — it says a field is wrong without
+   * saying which. The ERP already sends `error.message` ("code: Required") and
+   * often `error.details`; both were being discarded, so seven invoices sat dead
+   * with an error nobody could diagnose without replaying the request by hand.
+   */
+  private errorDetail(json: unknown): string | null {
+    if (!json || typeof json !== 'object') return null;
+    const err = (json as Record<string, unknown>).error;
+    if (!err || typeof err !== 'object') return null;
+    const e = err as Record<string, unknown>;
+    const code = typeof e.code === 'string' ? e.code : null;
+    const message = typeof e.message === 'string' ? e.message : null;
+    const details = Array.isArray(e.details) && e.details.length
+      ? ` — ${JSON.stringify(e.details).slice(0, 300)}`
+      : '';
+    if (!code && !message) return null;
+    return `${code ?? 'ERROR'}${message ? `: ${message}` : ''}${details}`;
   }
 
   private extractData<T>(body: unknown): T[] {

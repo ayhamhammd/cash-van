@@ -18,7 +18,11 @@ export type ErpOutboxKind =
   // sale — enqueued after the SALE_INVOICE posts, allocated to that invoice.
   | 'SALE_SPLIT_RECEIPT'
   | 'CASH_SETTLEMENT'
-  | 'REP_SETTLEMENT_JOURNAL';
+  | 'REP_SETTLEMENT_JOURNAL'
+  // A customer created/edited in the van or the dashboard. Queued rather than
+  // fired-and-forgotten so a customer added while the ERP is down is not lost:
+  // it stays pending and exports when the connection is back.
+  | 'CUSTOMER';
 export type ErpOutboxStatus = 'pending' | 'posted' | 'failed' | 'dead_letter';
 
 /** Outbound queue: van transactions to push to the ERP (idempotent by `ref`). */

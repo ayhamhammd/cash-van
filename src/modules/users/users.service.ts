@@ -8,6 +8,7 @@ import { ILike, Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 
 import { User } from './entities/user.entity';
+import { RepScopeService } from './rep-scope.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { PaginationDto, PaginatedResult } from '../../common/dto/pagination.dto';
@@ -18,6 +19,7 @@ const BCRYPT_ROUNDS = 12;
 export class UsersService {
   constructor(
     @InjectRepository(User) private readonly usersRepo: Repository<User>,
+    private readonly repScope: RepScopeService,
   ) {}
 
   async create(dto: CreateUserDto): Promise<User> {
@@ -44,17 +46,32 @@ export class UsersService {
       canMakeVoucher: dto.canMakeVoucher ?? false,
       canEditVoucher: dto.canEditVoucher ?? false,
       canAddCustomer: dto.canAddCustomer ?? false,
+      canCreateCustomerDirect: dto.canCreateCustomerDirect ?? false,
       canEditCustomerCredit: dto.canEditCustomerCredit ?? false,
       canAddItems: dto.canAddItems ?? false,
       canEditExpiry: dto.canEditExpiry ?? false,
+      repScopeMode: dto.repScopeMode ?? 'all',
     });
-    return this.usersRepo.save(user);
+    const saved = await this.usersRepo.save(user);
+    // After the insert: the join rows need the user id, which only exists now.
+    if (dto.repIds?.length) await this.repScope.setScope(saved.id, dto.repIds);
+    return saved;
   }
 
   async update(id: string, dto: UpdateUserDto): Promise<User> {
     const user = await this.findOneOrThrow(id);
-    Object.assign(user, dto);
-    return this.usersRepo.save(user);
+    // repIds is a separate TABLE, not a column. Object.assign would drop it onto
+    // the entity where it means nothing, and the assignment would silently not save.
+    const { repIds, ...columns } = dto;
+    Object.assign(user, columns);
+    const saved = await this.usersRepo.save(user);
+    if (repIds) await this.repScope.setScope(id, repIds);
+    return saved;
+  }
+
+  /** The salesmen assigned to a scoped user (empty for unrestricted ones). */
+  async scopeOf(id: string): Promise<string[]> {
+    return this.repScope.getScope(id);
   }
 
   async changePassword(id: string, newPassword: string): Promise<void> {

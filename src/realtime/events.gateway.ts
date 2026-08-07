@@ -9,11 +9,20 @@ import {
 import { Server, Socket } from 'socket.io';
 
 import { ACCESS_TOKEN_COOKIE } from '../common/auth/auth-cookie';
+import { RepScopeService } from '../modules/users/rep-scope.service';
+import { AuthenticatedUser } from '../common/decorators/current-user.decorator';
 
 /** Room every salesman socket joins, so a signal can reach all vans at once. */
 export const REPS_ROOM = 'reps';
 /** Per-salesman room: only this rep's device(s) receive the message. */
 export const repRoom = (repId: string) => `rep:${repId}`;
+
+/**
+ * Dashboard WATCHER rooms — who may see events ABOUT a salesman, as opposed to
+ * `repRoom`, which is the salesman's own device. See docs/SPEC-rep-scoped-users.md.
+ */
+export const SCOPE_ALL_ROOM = 'scope:all';
+export const watchRoom = (repId: string) => `watch:${repId}`;
 
 /**
  * Operational realtime stream.
@@ -45,6 +54,7 @@ export class EventsGateway implements OnGatewayConnection {
   constructor(
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly repScope: RepScopeService,
   ) {}
 
   handleConnection(client: Socket): void {
@@ -68,10 +78,46 @@ export class EventsGateway implements OnGatewayConnection {
       if (repId) {
         void client.join(repRoom(repId));
         void client.join(REPS_ROOM);
+        // A salesman watches only themselves.
+        void client.join(watchRoom(repId));
+        return;
       }
+
+      // Dashboard socket: the scope lives in the database, not the token, so it
+      // needs a lookup. Deliberately not awaited inside handleConnection —
+      // Socket.IO does not gate delivery on it — which leaves a few-millisecond
+      // window at connect where a scoped user is in no watcher room and simply
+      // misses events. Missing one live ping is the safe failure; receiving
+      // another supervisor's would not be.
+      void this.joinWatchRooms(client, payload.sub);
     } catch {
       this.logger.warn(`WS connection refused (bad token): ${client.id}`);
       client.disconnect(true);
+    }
+  }
+
+  /**
+   * Join a dashboard socket to the watcher rooms its user is entitled to.
+   *
+   * Resolved once at handshake, so changing someone's assigned salesmen takes
+   * effect on their next connection (a refresh), not mid-session. Worth knowing
+   * when you widen a supervisor's scope and they say they still cannot see it.
+   */
+  private async joinWatchRooms(client: Socket, userId: string): Promise<void> {
+    try {
+      const visible = await this.repScope.visibleRepIds({
+        sub: userId,
+        repId: null,
+      } as AuthenticatedUser);
+      if (visible === null) {
+        await client.join(SCOPE_ALL_ROOM);
+        return;
+      }
+      await Promise.all(visible.map((id) => client.join(watchRoom(id))));
+    } catch (e) {
+      // Fail CLOSED: a socket that joins nothing sees nothing, which is the
+      // right outcome when we cannot establish what it is allowed to see.
+      this.logger.warn(`WS scope lookup failed for ${client.id}: ${String(e)}`);
     }
   }
 
@@ -79,6 +125,21 @@ export class EventsGateway implements OnGatewayConnection {
   broadcast(event: string, payload: unknown): void {
     if (!this.server) return;
     this.server.emit(event, payload);
+  }
+
+  /**
+   * Broadcast an event that is ABOUT one salesman, to the dashboards allowed to
+   * see them: unrestricted users plus that rep's assigned supervisors.
+   *
+   * A null/unknown repId goes to `scope:all` only — if we cannot say whose event
+   * it is, no scoped supervisor should be told about it.
+   */
+  broadcastForRep(event: string, payload: unknown, repId?: string | null): void {
+    if (!this.server) return;
+    const target = repId
+      ? this.server.to([SCOPE_ALL_ROOM, watchRoom(repId)])
+      : this.server.to(SCOPE_ALL_ROOM);
+    target.emit(event, payload);
   }
 
   /**

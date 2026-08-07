@@ -24,6 +24,12 @@ export interface RepKpis {
   customersAtRisk: number;
 }
 
+/**
+ * A uuid that matches no rep. TypeORM's IN (:...x) renders invalid SQL for an
+ * empty array, so an empty scope needs a sentinel that reliably matches nothing.
+ */
+const NO_REPS = '00000000-0000-0000-0000-000000000000';
+
 @Injectable()
 export class RepsService {
   constructor(
@@ -36,7 +42,14 @@ export class RepsService {
     private readonly users: UsersService,
   ) {}
 
-  async list(query: ListRepsQuery): Promise<{ items: Rep[]; total: number }> {
+  /**
+   * @param visibleRepIds null = unrestricted; an array (possibly empty) limits
+   *   the list to those reps. See docs/SPEC-rep-scoped-users.md.
+   */
+  async list(
+    query: ListRepsQuery,
+    visibleRepIds: string[] | null = null,
+  ): Promise<{ items: Rep[]; total: number }> {
     const qb = this.repo
       .createQueryBuilder('rep')
       .where('rep.deleted_at IS NULL')
@@ -44,6 +57,13 @@ export class RepsService {
       .take(query.limit ?? 50)
       .skip(query.offset ?? 0);
 
+    // Empty array must yield NOTHING, so this is a plain IN — not a
+    // `if (length)` guard, which would hand a scoped user the whole list.
+    if (visibleRepIds !== null) {
+      qb.andWhere('rep.id IN (:...visibleRepIds)', {
+        visibleRepIds: visibleRepIds.length ? visibleRepIds : [NO_REPS],
+      });
+    }
     if (query.regionId) {
       qb.andWhere('rep.region_id = :regionId', { regionId: query.regionId });
     }

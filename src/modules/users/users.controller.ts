@@ -76,7 +76,9 @@ export class UsersController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<UserResponseDto> {
     const user = await this.usersService.findOneOrThrow(id);
-    return UserResponseDto.fromEntity(user);
+    // Scope comes from a join table, so the form that edits it needs it here —
+    // otherwise opening a scoped user and saving would silently wipe their reps.
+    return { ...UserResponseDto.fromEntity(user), repIds: await this.usersService.scopeOf(id) };
   }
 
   @Patch(':id')

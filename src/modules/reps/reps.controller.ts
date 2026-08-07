@@ -34,13 +34,17 @@ import {
   CurrentUser,
   AuthenticatedUser,
 } from '../../common/decorators/current-user.decorator';
+import { RepScopeService } from '../users/rep-scope.service';
 
 @ApiTags('reps')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'reps', version: '1' })
 export class RepsController {
-  constructor(private readonly reps: RepsService) {}
+  constructor(
+    private readonly reps: RepsService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -48,8 +52,8 @@ export class RepsController {
     description: 'List sales reps with optional filters and pagination.',
   })
   @ApiOkResponse({ description: 'Paginated rep list' })
-  list(@Query() query: ListRepsQuery) {
-    return this.reps.list(query);
+  async list(@Query() query: ListRepsQuery, @CurrentUser() user: AuthenticatedUser) {
+    return this.reps.list(query, await this.repScope.visibleRepIds(user));
   }
 
   @Get('me')
@@ -77,7 +81,11 @@ export class RepsController {
   @ApiOperation({ summary: 'Get rep', description: 'Fetch a single rep by id.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiOkResponse({ description: 'The rep' })
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.repScope.assertCanSeeRep(user, id);
     return this.reps.findOne(id);
   }
 
@@ -88,7 +96,11 @@ export class RepsController {
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiOkResponse({ description: 'KPI snapshot' })
-  kpis(@Param('id', ParseUUIDPipe) id: string) {
+  async kpis(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.repScope.assertCanSeeRep(user, id);
     return this.reps.kpis(id);
   }
 

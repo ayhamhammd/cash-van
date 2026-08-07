@@ -4,6 +4,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Customer } from './entities/customer.entity';
 import { CustomerAiProfile } from './entities/customer-ai-profile.entity';
 import { CustomerVisit } from './entities/customer-visit.entity';
+import { forwardRef } from '@nestjs/common';
+import { ApprovalsModule } from '../approvals/approvals.module';
+import { PendingCustomerPhoto } from './entities/pending-customer-photo.entity';
 import { CustomerAttachment } from './entities/customer-attachment.entity';
 import { User } from '../users/entities/user.entity';
 import {
@@ -13,10 +16,12 @@ import {
 import { CustomerProximityService } from './customer-proximity.service';
 import { CustomersController } from './customers.controller';
 import { JobsService } from '../../common/jobs/jobs.service';
+import { UsersModule } from '../users/users.module';
 
 @Module({
-  imports: [
+  imports: [UsersModule, forwardRef(() => ApprovalsModule), 
     TypeOrmModule.forFeature([
+      PendingCustomerPhoto,
       Customer,
       CustomerAiProfile,
       CustomerVisit,

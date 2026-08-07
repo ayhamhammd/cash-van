@@ -151,15 +151,24 @@ export class ItemsController {
   @Get('balance/list')
   @ApiOperation({
     summary: 'List item balances',
-    description: 'Read the item_balance view (quantity per item per store).',
+    description:
+      'Read the item_balance view (quantity per item per stock pool per store). ' +
+      "A variant unit owns its own pool; '' is the item's base pieces.",
   })
   @ApiQuery({ name: 'itemNumber', required: false, description: 'Filter by item number', example: 'IT-1001' })
   @ApiQuery({ name: 'stockNumber', required: false, description: 'Filter by store/stock number', example: 'ST-01' })
+  @ApiQuery({
+    name: 'stockUnitCode',
+    required: false,
+    description: "Filter to one stock pool — '' is the item's base pieces",
+    example: 'أحمر',
+  })
   @ApiOkResponse({ description: 'Item balance rows' })
   balances(
     @Query('itemNumber') itemNumber?: string,
     @Query('stockNumber') stockNumber?: string,
+    @Query('stockUnitCode') stockUnitCode?: string,
   ) {
-    return this.itemBalance.list({ itemNumber, stockNumber });
+    return this.itemBalance.list({ itemNumber, stockNumber, stockUnitCode });
   }
 }
