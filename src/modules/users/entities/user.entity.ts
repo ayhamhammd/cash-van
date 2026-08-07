@@ -75,6 +75,14 @@ export class User extends BaseEntity {
   @Column({ name: 'rep_scope_mode', type: 'text', default: 'all' })
   repScopeMode!: RepScopeMode;
 
+  /**
+   * May this salesman's printed receipt show the discount on each row?
+   * Off by default — a per-line discount on a slip left on a counter tells the
+   * next customer what rate the last one got.
+   */
+  @Column({ name: 'can_print_line_discount', type: 'boolean', default: false })
+  canPrintLineDiscount!: boolean;
+
   @Column({ name: 'can_create_customer_direct', type: 'boolean', default: false })
   canCreateCustomerDirect!: boolean;
 

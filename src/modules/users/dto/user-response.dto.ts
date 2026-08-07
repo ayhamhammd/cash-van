@@ -22,6 +22,7 @@ export class UserResponseDto {
   @ApiPropertyOptional({ type: [String] }) repIds?: string[];
   @ApiProperty() canAddCustomer!: boolean;
   @ApiProperty() canCreateCustomerDirect!: boolean;
+  @ApiProperty() canPrintLineDiscount!: boolean;
   @ApiProperty() canEditCustomerCredit!: boolean;
   @ApiProperty() canAddItems!: boolean;
   @ApiProperty() canEditExpiry!: boolean;
@@ -46,6 +47,7 @@ export class UserResponseDto {
       repScopeMode: u.repScopeMode,
       canAddCustomer: u.canAddCustomer,
       canCreateCustomerDirect: u.canCreateCustomerDirect,
+      canPrintLineDiscount: u.canPrintLineDiscount,
       canEditCustomerCredit: u.canEditCustomerCredit,
       canAddItems: u.canAddItems,
       canEditExpiry: u.canEditExpiry,

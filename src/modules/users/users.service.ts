@@ -47,6 +47,7 @@ export class UsersService {
       canEditVoucher: dto.canEditVoucher ?? false,
       canAddCustomer: dto.canAddCustomer ?? false,
       canCreateCustomerDirect: dto.canCreateCustomerDirect ?? false,
+      canPrintLineDiscount: dto.canPrintLineDiscount ?? false,
       canEditCustomerCredit: dto.canEditCustomerCredit ?? false,
       canAddItems: dto.canAddItems ?? false,
       canEditExpiry: dto.canEditExpiry ?? false,

@@ -102,6 +102,12 @@ export class CreateUserDto {
       'Salesman may create a customer WITHOUT admin approval. Without it, canAddCustomer still lets them submit one for review.',
   })
   @IsOptional() @IsBoolean() canCreateCustomerDirect?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      "Show the discount value on each row of this salesman's printed receipt. Off by default — a per-line rate on a slip left at a counter is visible to the next customer.",
+  })
+  @IsOptional() @IsBoolean() canPrintLineDiscount?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditCustomerCredit?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canAddItems?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditExpiry?: boolean;
