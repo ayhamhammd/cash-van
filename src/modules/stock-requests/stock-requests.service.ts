@@ -395,6 +395,75 @@ export class StockRequestsService {
 
   // ── Internals ─────────────────────────────────────────────────────────────
 
+  /**
+   * Hide a decided request from the queue without destroying it.
+   *
+   * Only requests that never moved stock. An approved-and-received one is the
+   * paperwork behind a real transfer voucher, and hiding it would leave that
+   * voucher with nothing explaining why it exists.
+   */
+  async softDelete(id: string, user: AuthenticatedUser): Promise<{ id: string }> {
+    const row = await this.findOneOrThrow(id);
+    if (row.repId) await this.repScope.assertCanSeeRep(user, row.repId);
+    if (row.status === 'pending') {
+      throw new ConflictException(
+        'Decide the request first — rejecting it tells the salesman why, deleting it does not.',
+      );
+    }
+    if (row.status === 'received' || row.transferVoucherNumber) {
+      throw new ConflictException(
+        `Cannot delete ${row.requestNumber}: stock moved against it${
+          row.transferVoucherNumber ? ` on voucher ${row.transferVoucherNumber}` : ''
+        }.`,
+      );
+    }
+    await this.repo.softDelete(id);
+    return { id };
+  }
+
+  /**
+   * Record that the office raised the transfer for an approved request.
+   *
+   * Called when a transfer voucher is posted against a request from the
+   * dashboard or the ERP. It closes the request the same way the van's own
+   * receipt does — because the goods have already moved, and leaving it open
+   * would let [markReceived] raise a SECOND transfer for the same lines.
+   */
+  async attachTransfer(
+    id: string,
+    voucherNumber: string,
+    user: AuthenticatedUser,
+  ): Promise<StockRequest> {
+    const row = await this.findOneOrThrow(id);
+    if (row.repId) await this.repScope.assertCanSeeRep(user, row.repId);
+    if (row.status !== 'approved') {
+      throw new ConflictException(
+        `Only an approved request can be fulfilled by a transfer; ${row.requestNumber} is ${row.status}.`,
+      );
+    }
+    row.status = 'received';
+    row.receivedAt = new Date();
+    row.transferVoucherNumber = voucherNumber;
+    await this.repo.save(row);
+
+    // The rep is waiting on this: their van's stock just changed and the button
+    // they were going to press has gone away.
+    await this.notifications.notifyUser(row.requesterUser, {
+      kind: 'stock-request.decided',
+      titleAr: `تم تحميل طلب البضاعة ${row.requestNumber} — سند ${voucherNumber}`,
+      titleEn: `Stock request ${row.requestNumber} loaded — voucher ${voucherNumber}`,
+      refType: 'stock-request',
+      refId: row.id,
+    });
+    this.events.emit('stock-request.received', {
+      id: row.id,
+      requestNumber: row.requestNumber,
+      repId: row.repId,
+      voucherNumber,
+    });
+    return this.findOneOrThrow(row.id);
+  }
+
   private async findOneOrThrow(id: string): Promise<StockRequest> {
     const row = await this.repo.findOne({ where: { id }, relations: { items: true } });
     if (!row) throw new NotFoundException(`Stock request ${id} not found`);

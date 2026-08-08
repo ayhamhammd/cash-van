@@ -135,6 +135,14 @@ export class RejectStockRequestDto {
   reason!: string;
 }
 
+export class AttachTransferDto {
+  @ApiProperty({ description: 'The TRANSFER voucher number that fulfilled this request.' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  voucherNumber!: string;
+}
+
 export class ListStockRequestsQueryDto {
   @ApiPropertyOptional({ enum: STOCK_REQUEST_STATUSES })
   @IsOptional()

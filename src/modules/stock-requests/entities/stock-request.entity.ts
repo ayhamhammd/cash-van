@@ -1,6 +1,7 @@
 import {
   Column,
   CreateDateColumn,
+  DeleteDateColumn,
   Entity,
   Index,
   OneToMany,
@@ -96,6 +97,16 @@ export class StockRequest {
 
   @Column({ name: 'received_at', type: 'timestamptz', nullable: true })
   receivedAt?: Date | null;
+
+  /**
+   * Hidden from the queue, kept in the table.
+   *
+   * A refused request is evidence — of what a rep asked for and what the office
+   * said — so "delete" clears the list without destroying the record. TypeORM
+   * excludes these from find() automatically, so no query needs to remember.
+   */
+  @DeleteDateColumn({ name: 'deleted_at', type: 'timestamptz', nullable: true })
+  deletedAt?: Date | null;
 
   @OneToMany(() => StockRequestItem, (i) => i.request, { cascade: true })
   items!: StockRequestItem[];

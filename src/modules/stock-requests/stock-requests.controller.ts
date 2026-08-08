@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -23,6 +24,7 @@ import {
   CreateStockRequestDto,
   ListStockRequestsQueryDto,
   RejectStockRequestDto,
+  AttachTransferDto,
 } from './dto/stock-request.dto';
 import {
   CurrentUser,
@@ -121,6 +123,39 @@ export class StockRequestsController {
   @ApiOkResponse({ description: 'Cancelled request' })
   cancel(@Param('id', ParseUUIDPipe) id: string, @CurrentUser('sub') userId: string) {
     return this.service.cancel(id, userId);
+  }
+
+  @Post(':id/transfer')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: 'Record the transfer the office raised for this request',
+    description:
+      'Called after posting a TRANSFER voucher from an approved request. Closes the request, ' +
+      'so the salesman cannot then raise a second transfer for the same lines.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ description: 'Received request, with transferVoucherNumber set' })
+  attachTransfer(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AttachTransferDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.attachTransfer(id, dto.voucherNumber, user);
+  }
+
+  @Delete(':id')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: 'Hide a decided request',
+    description:
+      'Soft delete — the row is kept for history and disappears from the queue. Refused only ' +
+      'for pending requests (reject them instead, so the salesman gets a reason) and for any ' +
+      'request that stock has already moved against.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ description: '{ id }' })
+  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.service.softDelete(id, user);
   }
 
   @Post(':id/receive')
