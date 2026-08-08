@@ -1,0 +1,53 @@
+# Build context for the combined VanFlow suite image.
+#
+# The context is the PARENT of the three projects, because one image needs all
+# three sources. That parent also holds unrelated repos and ~GB of build output,
+# so this file is deny-by-default: ignore everything, then re-admit only the
+# three project directories, then strip their heavy subdirectories.
+#
+# Without the deny-by-default first line the context was several gigabytes —
+# ERP/integration-hub alone is 630 MB of node_modules and .next.
+*
+
+!ERP/
+!cash-van-dashboard/
+!cash-van-dashboard-frontend/
+
+# The entrypoint lives at the context root, so deny-by-default excludes it too.
+# Missing this failed the build at the COPY with a bare "not found".
+!suite-entrypoint.sh
+
+# Re-admitted above, now strip what must never enter an image: dependencies are
+# installed inside the build, and build output is produced there.
+**/node_modules
+**/.next
+**/dist
+**/.git
+**/.gradle
+**/coverage
+**/.turbo
+
+# A whole second Next.js app sitting untracked inside the ERP working tree.
+ERP/integration-hub
+
+# Local-only and secret-bearing files. An .env baked into an image is a
+# credential shipped to whoever can pull it.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/.DS_Store
+**/.claude
+**/*.log
+
+# Runtime data, anchored to the exact directories that hold it.
+#
+# These were once written as **/storage and **/uploads, which match ANY path
+# segment with that name — and so silently excluded three SOURCE directories:
+# cash-van-dashboard/src/common/storage (the StorageService itself, which failed
+# the build with "Cannot find module"), ERP/src/app/api/uploads, and
+# cash-van-dashboard-frontend/fe-academy/.../storage. A bare ** glob on a common
+# word will eventually match source; anchor it.
+/cash-van-dashboard/storage
+/ERP/public/uploads

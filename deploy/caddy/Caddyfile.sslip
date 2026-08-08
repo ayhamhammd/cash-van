@@ -1,0 +1,77 @@
+# VanFlow - production reverse proxy using sslip.io.
+#
+# sslip.io resolves any <anything>.<ip>.sslip.io to that IP, so real Let's
+# Encrypt certificates work with no DNS to own or configure. Verified:
+#   erp.94.142.51.91.sslip.io -> 94.142.51.91
+#
+# Swap the IP below if the server's public address changes - that is the whole
+# maintenance burden of this approach, and also its weakness: the hostname IS
+# the IP, so a new IP means new hostnames and a new certificate.
+#
+# Forward ONLY 80 and 443. Port 80 is required for the ACME challenge.
+
+{
+	email admin@7softwarejo.com
+}
+
+(security) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
+# Office LAN. EDIT to the client's real subnet before deploying - staff get 403
+# on their own ERP if this is wrong.
+(office_only) {
+	@public not remote_ip 192.168.100.0/24 127.0.0.1 ::1
+	respond @public "Not available from this network" 403
+}
+
+# --- ERP: accounting. LAN only. ---------------------------------------------
+erp.94.142.51.91.sslip.io {
+	import security
+	import office_only
+	reverse_proxy host.docker.internal:3000
+	encode gzip
+	log {
+		output file /var/log/caddy/erp.log
+		format json
+	}
+}
+
+# --- Office dashboard: LAN only. --------------------------------------------
+app.94.142.51.91.sslip.io {
+	import security
+	import office_only
+	reverse_proxy host.docker.internal:3001
+	encode gzip
+	log {
+		output file /var/log/caddy/dashboard.log
+		format json
+	}
+}
+
+# --- Backend API: public, because the vans are in the field -----------------
+api.94.142.51.91.sslip.io {
+	import security
+	reverse_proxy host.docker.internal:3100 {
+		# The app logs the van's real IP instead of Caddy's.
+		header_up X-Real-IP {remote_host}
+	}
+	log {
+		output file /var/log/caddy/api.log
+		format json
+	}
+}
+
+# Requests by raw IP or an unknown name get nothing. Without this Caddy serves
+# the FIRST site defined to any Host header - which would hand the ERP to
+# anyone who connects to the IP directly.
+:443 {
+	tls internal
+	respond 404
+}

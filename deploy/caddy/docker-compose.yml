@@ -1,0 +1,25 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: erp-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./logs/caddy:/var/log/caddy
+      # Named volumes hold the issued certificates and the ACME account key.
+      # Lose them and every certificate is re-requested - Let's Encrypt allows
+      # 5 per hostname per week.
+      - caddy_data:/data
+      - caddy_config:/config
+    # The apps bind to 127.0.0.1 on the HOST, which is not the container's
+    # localhost. This is how Caddy reaches them.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  caddy_data:
+  caddy_config:

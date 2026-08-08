@@ -4,6 +4,10 @@ coverage
 .env
 .env.local
 .env.*.local
+.env.production
+.env.app
+deploy/caddy/.env
+deploy/caddy/Caddyfile
 *.log
 .DS_Store
 .idea

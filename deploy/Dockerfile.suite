@@ -1,0 +1,138 @@
+# VanFlow suite — ERP + backend + office dashboard in ONE image.
+#
+# For an on-prem client who runs a single box: `docker run` once and all three
+# are up. Not for cloud, where you would want them scaled and restarted
+# independently — see "Trade-off" at the bottom.
+#
+# Build from the PARENT of the three repos, so all three sources are in context:
+#   docker build -f Dockerfile.suite -t vanflow-suite:latest .
+#
+# Ports inside the container (all three default to 3000 on their own, which is
+# exactly the collision this file has to resolve):
+#   3000  ERP            (Next.js)
+#   3100  backend        (NestJS)
+#   3001  office dashboard (Next.js)
+
+ARG NODE_VERSION=20-alpine
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ERP
+# ─────────────────────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION} AS erp-deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+COPY ERP/package.json ERP/package-lock.json ./
+RUN npm ci
+
+FROM node:${NODE_VERSION} AS erp-build
+WORKDIR /app
+ARG NEXT_PUBLIC_APP_URL="http://localhost:3000"
+ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+ENV NEXT_TELEMETRY_DISABLED=1
+# Next collects pages at build time and some import the db module. A real URL is
+# not needed and must not be baked in — this one only has to parse.
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build"
+COPY --from=erp-deps /app/node_modules ./node_modules
+COPY ERP/ ./
+RUN npm run build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backend (NestJS)
+# ─────────────────────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION} AS be-deps
+WORKDIR /app
+COPY cash-van-dashboard/package.json cash-van-dashboard/package-lock.json ./
+RUN npm ci
+
+FROM node:${NODE_VERSION} AS be-build
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=be-deps /app/node_modules ./node_modules
+COPY cash-van-dashboard/ ./
+# prune AFTER building: the build needs devDependencies (nest cli, typescript).
+RUN npm run build && npm prune --omit=dev
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Office dashboard (Next.js)
+# ─────────────────────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION} AS fe-deps
+WORKDIR /app
+COPY cash-van-dashboard-frontend/package.json cash-van-dashboard-frontend/package-lock.json ./
+RUN npm ci
+
+FROM node:${NODE_VERSION} AS fe-build
+WORKDIR /app
+# NEXT_PUBLIC_* are inlined into the browser bundle at BUILD time, so these are
+# the URLs the BROWSER will use — the host's, not the container's. Defaulting to
+# localhost matches a single-box deployment; override for a named host.
+ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:3100/api/v1
+ARG NEXT_PUBLIC_WS_URL=http://localhost:3100
+ARG NEXT_PUBLIC_AI_ENABLED=false
+ARG NEXT_PUBLIC_DEFAULT_LOCALE=ar
+# Left as a placeholder and substituted at RUNTIME by the entrypoint, so one
+# image can ship to clients with different keys.
+ARG NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=__RUNTIME_GOOGLE_MAPS_API_KEY__
+ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL \
+    NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL \
+    NEXT_PUBLIC_AI_ENABLED=$NEXT_PUBLIC_AI_ENABLED \
+    NEXT_PUBLIC_DEFAULT_LOCALE=$NEXT_PUBLIC_DEFAULT_LOCALE \
+    NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=$NEXT_PUBLIC_GOOGLE_MAPS_API_KEY \
+    NEXT_TELEMETRY_DISABLED=1
+COPY --from=fe-deps /app/node_modules ./node_modules
+COPY cash-van-dashboard-frontend/ ./
+RUN npm run build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime — all three, one container
+# ─────────────────────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION} AS runtime
+RUN apk add --no-cache libc6-compat tini curl
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+
+# One unprivileged user for all three. They share a container, so isolating them
+# from each other here would be theatre — the boundary that matters is the
+# container's.
+RUN addgroup -g 1001 -S vanflow && adduser -S vanflow -u 1001 -G vanflow
+
+WORKDIR /srv
+
+# ERP → /srv/erp  (Next standalone puts its entrypoint at server.js)
+COPY --from=erp-build --chown=vanflow:vanflow /app/.next/standalone ./erp/
+COPY --from=erp-build --chown=vanflow:vanflow /app/.next/static ./erp/.next/static
+COPY --from=erp-build --chown=vanflow:vanflow /app/public ./erp/public
+COPY --from=erp-build --chown=vanflow:vanflow /app/docs/customer-manual ./erp/docs/customer-manual
+
+# Backend → /srv/backend
+COPY --from=be-build --chown=vanflow:vanflow /app/dist ./backend/dist
+COPY --from=be-build --chown=vanflow:vanflow /app/node_modules ./backend/node_modules
+COPY --from=be-build --chown=vanflow:vanflow /app/package.json ./backend/
+COPY --from=be-build --chown=vanflow:vanflow /app/assets ./backend/assets
+
+# Dashboard → /srv/dashboard
+COPY --from=fe-build --chown=vanflow:vanflow /app/.next/standalone ./dashboard/
+COPY --from=fe-build --chown=vanflow:vanflow /app/.next/static ./dashboard/.next/static
+COPY --from=fe-build --chown=vanflow:vanflow /app/public ./dashboard/public
+
+COPY --chown=vanflow:vanflow suite-entrypoint.sh /srv/suite-entrypoint.sh
+RUN chmod +x /srv/suite-entrypoint.sh
+
+USER vanflow
+EXPOSE 3000 3001 3100
+
+# tini as PID 1: three background node processes in one container orphan their
+# children on exit, and without an init that reaps them the container
+# accumulates zombies until it runs out of process slots.
+ENTRYPOINT ["/sbin/tini", "--", "/srv/suite-entrypoint.sh"]
+
+# Healthy only when the BACKEND answers — it is the one the other two and the
+# vans depend on. A container whose ERP is up but whose API is dead is not
+# serving anyone, and should not report healthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:3100/api/v1/health || exit 1
+
+# ── Trade-off, stated plainly ────────────────────────────────────────────────
+# Three apps in one container means they share a lifecycle: any one crashing
+# takes the container down (by design — see the entrypoint), and you cannot
+# restart or scale one without the others. That is the right shape for a single
+# on-prem box and the wrong shape for anything cloud-hosted, where the three
+# separate images and a compose file are the better answer.
