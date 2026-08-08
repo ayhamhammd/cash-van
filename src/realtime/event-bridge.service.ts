@@ -192,4 +192,25 @@ export class EventBridgeService {
   onNotificationCreated(p: Record<string, unknown>): void {
     this.gateway.broadcast('notification.created', p);
   }
+
+  // Van stock requests. Scoped like approvals: a supervisor sees requests from
+  // their own salesmen and no one else's.
+  @OnEvent('stock-request.requested')
+  onStockRequested(p: Record<string, unknown>): void {
+    this.gateway.broadcastForRep('stock-request.requested', p, repIdOf(p));
+  }
+
+  @OnEvent('stock-request.decided')
+  onStockDecided(p: Record<string, unknown>): void {
+    this.gateway.broadcastForRep('stock-request.decided', p, repIdOf(p));
+    // The salesman is waiting on this specific answer, so it also goes straight
+    // to their device rather than only to the dashboards watching them.
+    const repId = repIdOf(p);
+    if (repId) this.gateway.emitToRep(repId, 'stock-request.decided', p);
+  }
+
+  @OnEvent('stock-request.received')
+  onStockReceived(p: Record<string, unknown>): void {
+    this.gateway.broadcastForRep('stock-request.received', p, repIdOf(p));
+  }
 }

@@ -44,6 +44,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { SyncModule } from './modules/sync/sync.module';
 import { ErpSyncModule } from './modules/erp-sync/erp-sync.module';
 import { ApprovalsModule } from './modules/approvals/approvals.module';
+import { StockRequestsModule } from './modules/stock-requests/stock-requests.module';
 import { AgentModule } from './modules/agent/agent.module';
 import { OffersModule } from './modules/offers/offers.module';
 import { ProspectingModule } from './modules/prospecting/prospecting.module';
@@ -104,6 +105,7 @@ import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module
     UnitsModule,
     NotificationsModule,
     ApprovalsModule,
+    StockRequestsModule,
     SyncModule,
     ErpSyncModule,
     AgentModule,

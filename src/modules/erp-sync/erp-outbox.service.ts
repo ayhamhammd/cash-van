@@ -11,6 +11,8 @@ import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity'
 import { Collection } from '../collections/entities/collection.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
+import { StockRequest } from '../stock-requests/entities/stock-request.entity';
+import { Rep } from '../reps/entities/rep.entity';
 import { SettingsService } from '../settings/settings.service';
 import { CashAccountsService } from '../cash-accounts/cash-accounts.service';
 import { ErpHttpClient } from './erp-http.client';
@@ -70,6 +72,8 @@ export class ErpOutboxService {
     @InjectRepository(SalesmanSettlement) private readonly salesmanSettlements: Repository<SalesmanSettlement>,
     @InjectRepository(Payment) private readonly payments: Repository<Payment>,
     @InjectRepository(ItemUnit) private readonly itemUnits: Repository<ItemUnit>,
+    @InjectRepository(StockRequest) private readonly stockRequests: Repository<StockRequest>,
+    @InjectRepository(Rep) private readonly reps: Repository<Rep>,
   ) {}
 
   /** Queue a van document for push to the ERP (best-effort; never throws to the caller). */
@@ -301,6 +305,7 @@ export class ErpOutboxService {
     row: ErpOutbox,
   ): Promise<{ path: string; body: Record<string, unknown> } | null> {
     if (row.kind === 'CUSTOMER') return this.buildCustomer(row.ref);
+    if (row.kind === 'VAN_STOCK_REQUEST') return this.buildVanStockRequest(row.ref);
     if (row.kind === 'SALE_INVOICE') return this.buildSale(row.ref);
     if (row.kind === 'SALES_RETURN') return this.buildReturn(row.ref);
     if (row.kind === 'SALES_ORDER') return this.buildOrder(row.ref);
@@ -362,6 +367,68 @@ export class ErpOutboxService {
         ...(c.tin ? { taxNumber: c.tin } : {}),
         // JOD major here; the ERP scales it on receipt.
         ...(c.creditLimit != null ? { creditLimit: Number(c.creditLimit) } : {}),
+      },
+    };
+  }
+
+  /**
+   * Build the ERP's copy of an APPROVED van stock request.
+   *
+   * Informational only — it tells the warehouse what a van is owed. No stock
+   * moves from it. The movement reaches the ERP separately, as the TRANSFER
+   * voucher the van raises on receipt, and pushing both as movements here would
+   * double every request.
+   *
+   * Lines granted zero are dropped: the manager reviewed and refused them, so
+   * putting them in front of the warehouse as work would be wrong.
+   */
+  private async buildVanStockRequest(
+    requestId: string,
+  ): Promise<{ path: string; body: Record<string, unknown>; idem: string } | null> {
+    const req = await this.stockRequests.findOne({
+      where: { id: requestId },
+      relations: { items: true },
+    });
+    if (!req) return null;
+    if (req.status !== 'approved' && req.status !== 'received') {
+      // Queued then rejected/cancelled before the drain ran. Nothing to send,
+      // and nothing that will change — dead-letter rather than retry forever.
+      throw new TerminalPayloadError(
+        `Stock request ${req.requestNumber} is ${req.status}; only approved requests go to the ERP.`,
+      );
+    }
+
+    const lines = req.items
+      .filter((i) => Number(i.approvedBaseQty ?? 0) > 0)
+      .map((i) => ({
+        skuCode: i.itemNumber,
+        label: i.itemName,
+        requestedQty: Math.round(Number(i.baseQty) || 0),
+        approvedQty: Math.round(Number(i.approvedBaseQty) || 0),
+      }))
+      .filter((l) => l.approvedQty > 0);
+    if (!lines.length) {
+      throw new TerminalPayloadError(
+        `Stock request ${req.requestNumber} has no approved lines to send.`,
+      );
+    }
+
+    const rep = req.repId ? await this.reps.findOne({ where: { id: req.repId } }) : null;
+
+    return {
+      path: 'van-stock-requests',
+      idem: req.requestNumber,
+      body: {
+        externalId: req.id,
+        requestNumber: req.requestNumber,
+        vanWarehouseCode: req.vanStoreNumber,
+        ...(req.sourceStoreNumber ? { sourceWarehouseCode: req.sourceStoreNumber } : {}),
+        ...(rep?.code ? { repCode: rep.code } : {}),
+        ...(rep?.nameAr ? { repName: rep.nameAr } : {}),
+        ...(req.note ? { note: req.note } : {}),
+        requestedAt: req.createdAt.toISOString(),
+        ...(req.decidedAt ? { approvedAt: req.decidedAt.toISOString() } : {}),
+        lines,
       },
     };
   }
