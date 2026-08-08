@@ -31,6 +31,9 @@ import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
 import { CreateVoucherDto } from '../vouchers/dto/create-voucher.dto';
 import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
+/** One message for every decision gate, so a refusal reads the same everywhere. */
+const CANNOT_DECIDE = 'You are not allowed to decide stock requests.';
+
 @Injectable()
 export class StockRequestsService {
   private readonly logger = new Logger(StockRequestsService.name);
@@ -73,6 +76,7 @@ export class StockRequestsService {
    * can be days old, and the manager has to review what the item IS.
    */
   async create(dto: CreateStockRequestDto, user: AuthenticatedUser): Promise<StockRequest> {
+    await this.assertCan(user, 'canRequestStock', 'You are not allowed to request stock.');
     const rep = await this.reps.findOne({ where: { userId: user.sub } });
     if (!rep) {
       throw new ForbiddenException('Only a salesman can request stock for a van');
@@ -213,6 +217,7 @@ export class StockRequestsService {
     dto: ApproveStockRequestDto,
     reviewer: AuthenticatedUser,
   ): Promise<StockRequest> {
+    await this.assertCan(reviewer, 'canApproveStockRequest', CANNOT_DECIDE);
     const row = await this.findOneOrThrow(id);
     if (row.repId) await this.repScope.assertCanSeeRep(reviewer, row.repId);
     if (row.status !== 'pending') {
@@ -278,6 +283,7 @@ export class StockRequestsService {
     reason: string,
     reviewer: AuthenticatedUser,
   ): Promise<StockRequest> {
+    await this.assertCan(reviewer, 'canApproveStockRequest', CANNOT_DECIDE);
     const row = await this.findOneOrThrow(id);
     if (row.repId) await this.repScope.assertCanSeeRep(reviewer, row.repId);
     if (row.status !== 'pending') {
@@ -403,6 +409,7 @@ export class StockRequestsService {
    * voucher with nothing explaining why it exists.
    */
   async softDelete(id: string, user: AuthenticatedUser): Promise<{ id: string }> {
+    await this.assertCan(user, 'canApproveStockRequest', CANNOT_DECIDE);
     const row = await this.findOneOrThrow(id);
     if (row.repId) await this.repScope.assertCanSeeRep(user, row.repId);
     if (row.status === 'pending') {
@@ -434,6 +441,7 @@ export class StockRequestsService {
     voucherNumber: string,
     user: AuthenticatedUser,
   ): Promise<StockRequest> {
+    await this.assertCan(user, 'canApproveStockRequest', CANNOT_DECIDE);
     const row = await this.findOneOrThrow(id);
     if (row.repId) await this.repScope.assertCanSeeRep(user, row.repId);
     if (row.status !== 'approved') {
@@ -462,6 +470,24 @@ export class StockRequestsService {
       voucherNumber,
     });
     return this.findOneOrThrow(row.id);
+  }
+
+  /**
+   * Per-user capability check.
+   *
+   * Read from the DATABASE, not from the token's permissions map: a JWT lives
+   * for hours, so a permission revoked this morning would keep working until
+   * the user happened to log in again. An admin passes everything, which is the
+   * same rule the voucher policy uses.
+   */
+  private async assertCan(
+    user: AuthenticatedUser,
+    flag: 'canRequestStock' | 'canApproveStockRequest',
+    message: string,
+  ): Promise<void> {
+    if (user.role === 'admin' || user.userType === 'ADMIN') return;
+    const row = await this.users.findOne({ where: { id: user.sub } });
+    if (!row?.[flag]) throw new ForbiddenException(message);
   }
 
   private async findOneOrThrow(id: string): Promise<StockRequest> {

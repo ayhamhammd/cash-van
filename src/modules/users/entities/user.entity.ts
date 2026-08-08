@@ -96,6 +96,26 @@ export class User extends BaseEntity {
   canEditExpiry!: boolean;
 
   /**
+   * May this salesman ask for stock to be loaded onto their van?
+   *
+   * Off by default, like every other capability here. A rep who cannot request
+   * simply has no such screen; the server refuses regardless, because the app
+   * on a phone is not a place to enforce anything.
+   */
+  @Column({ name: 'can_request_stock', type: 'boolean', default: false })
+  canRequestStock!: boolean;
+
+  /**
+   * May this user decide someone else's stock request?
+   *
+   * Separate from the admin/manager role on purpose: deciding what goes onto a
+   * van is a warehouse job, and the person who does it is not always the person
+   * who runs the office. Admins pass every gate regardless of this flag.
+   */
+  @Column({ name: 'can_approve_stock_request', type: 'boolean', default: false })
+  canApproveStockRequest!: boolean;
+
+  /**
    * Granular dashboard permission keys (e.g. "vouchers.create", "items.edit").
    * The flexible, admin-managed permission set for dashboard users. Admin role
    * implicitly has everything regardless of this list.

@@ -23,6 +23,8 @@ export class UserResponseDto {
   @ApiProperty() canAddCustomer!: boolean;
   @ApiProperty() canCreateCustomerDirect!: boolean;
   @ApiProperty() canPrintLineDiscount!: boolean;
+  @ApiProperty() canRequestStock!: boolean;
+  @ApiProperty() canApproveStockRequest!: boolean;
   @ApiProperty() canEditCustomerCredit!: boolean;
   @ApiProperty() canAddItems!: boolean;
   @ApiProperty() canEditExpiry!: boolean;
@@ -48,6 +50,8 @@ export class UserResponseDto {
       canAddCustomer: u.canAddCustomer,
       canCreateCustomerDirect: u.canCreateCustomerDirect,
       canPrintLineDiscount: u.canPrintLineDiscount,
+      canRequestStock: u.canRequestStock,
+      canApproveStockRequest: u.canApproveStockRequest,
       canEditCustomerCredit: u.canEditCustomerCredit,
       canAddItems: u.canAddItems,
       canEditExpiry: u.canEditExpiry,

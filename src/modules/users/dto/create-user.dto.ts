@@ -108,6 +108,12 @@ export class CreateUserDto {
       "Show the discount value on each row of this salesman's printed receipt. Off by default — a per-line rate on a slip left at a counter is visible to the next customer.",
   })
   @IsOptional() @IsBoolean() canPrintLineDiscount?: boolean;
+
+  @ApiPropertyOptional({ description: 'May raise a van stock request.' })
+  @IsOptional() @IsBoolean() canRequestStock?: boolean;
+
+  @ApiPropertyOptional({ description: "May approve or reject someone else's stock request." })
+  @IsOptional() @IsBoolean() canApproveStockRequest?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditCustomerCredit?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canAddItems?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditExpiry?: boolean;
