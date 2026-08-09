@@ -53,19 +53,50 @@ export class ProspectsService {
     dto: CreateProspectSearchDto,
     userId?: string,
   ): Promise<{ search: ProspectSearch; prospects: Prospect[] }> {
-    const bad = dto.categories.filter(
+    const categories = dto.categories ?? [];
+    // Case-insensitively de-duplicated: the same term twice is the same search
+    // run twice, and each one is a billed call. The first spelling wins, so
+    // what comes back is what the user typed first.
+    const seen = new Set<string>();
+    const keywords = (dto.keywords ?? [])
+      .map((k) => k.trim())
+      .filter((k) => {
+        if (!k || seen.has(k.toLowerCase())) return false;
+        seen.add(k.toLowerCase());
+        return true;
+      });
+
+    if (!categories.length && !keywords.length) {
+      throw new BadRequestException(
+        'Provide at least one category or search term.',
+      );
+    }
+
+    const bad = categories.filter(
       (c) => !PROSPECT_CATEGORIES.includes(c as never),
     );
     if (bad.length) {
       throw new BadRequestException(`Unsupported categories: ${bad.join(', ')}`);
     }
 
-    const found = await this.places.searchNearby(
-      dto.lat,
-      dto.lng,
-      dto.radiusM,
-      dto.categories,
+    // Two Places SKUs, one pipeline: the ticked types ride along in a single
+    // nearby call, each of the caller's own terms costs a text search. A place
+    // can come back from several (a term matching a supermarket's name while
+    // `supermarket` is also ticked), so they are de-duplicated by place id
+    // before we spend a Details call each.
+    const [byCategory, ...byKeyword] = await Promise.all([
+      categories.length
+        ? this.places.searchNearby(dto.lat, dto.lng, dto.radiusM, categories)
+        : Promise.resolve([]),
+      ...keywords.map((k) =>
+        this.places.searchTextNearby(k, dto.lat, dto.lng, dto.radiusM),
+      ),
+    ]);
+
+    const byId = new Map(
+      [...byCategory, ...byKeyword.flat()].map((p) => [p.placeId, p]),
     );
+    const found = [...byId.values()];
 
     // Only customers that can actually match on something are worth loading.
     const candidates = (await this.customers.find({
@@ -84,7 +115,8 @@ export class ProspectsService {
         centerLat: String(dto.lat),
         centerLng: String(dto.lng),
         radiusM: dto.radiusM,
-        categories: dto.categories,
+        categories,
+        keywords,
         foundCount: found.length,
         newCount: 0,
         createdBy: userId ?? null,

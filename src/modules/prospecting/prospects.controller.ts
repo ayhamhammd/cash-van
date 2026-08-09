@@ -24,7 +24,10 @@ import {
 import { ProspectsService } from './prospects.service';
 import { PlacesService } from './places.service';
 import { WhatsappService } from './whatsapp.service';
-import { PROSPECT_CATEGORIES } from './prospecting.types';
+import {
+  PROSPECT_CATEGORIES,
+  PROSPECT_FEATURED_CATEGORIES,
+} from './prospecting.types';
 import {
   ConvertProspectDto,
   CreateProspectSearchDto,
@@ -73,10 +76,19 @@ export class ProspectsController {
   }
 
   @Get('categories')
-  @ApiOperation({ summary: 'Searchable business categories (allow-list)' })
+  @ApiOperation({
+    summary: 'Searchable business categories (allow-list)',
+    description:
+      'The full allow-list plus the short `featured` subset the dashboard ' +
+      'shows as one-tap chips. Fixed data — the client caches it and does its ' +
+      'own contains-matching in the picker rather than querying per keystroke.',
+  })
   @ApiOkResponse({ description: 'Google Places types offered in the UI' })
   categories() {
-    return { categories: PROSPECT_CATEGORIES };
+    return {
+      categories: PROSPECT_CATEGORIES,
+      featured: PROSPECT_FEATURED_CATEGORIES,
+    };
   }
 
   @Get('stats')

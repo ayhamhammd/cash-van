@@ -17,6 +17,10 @@ export class ProspectSearch extends BaseEntity {
   @Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
   categories!: string[];
 
+  /** The rep's own terms, matched against business names. */
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
+  keywords!: string[];
+
   /** Total businesses Places returned. */
   @Column({ name: 'found_count', type: 'integer', default: 0 })
   foundCount!: number;
