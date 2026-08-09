@@ -33,6 +33,7 @@ import {
   AuthenticatedUser,
 } from '../../common/decorators/current-user.decorator';
 import { RepScopeService } from '../users/rep-scope.service';
+import { AllowTrackingToken } from '../../common/decorators/tracking-token.decorator';
 
 @ApiTags('reps-locations')
 @ApiBearerAuth()
@@ -46,6 +47,7 @@ export class LocationsController {
   ) {}
 
   @Post(':id/heartbeat')
+  @AllowTrackingToken()
   @ApiOperation({
     summary: 'Liveness heartbeat',
     description:
@@ -69,32 +71,58 @@ export class LocationsController {
   }
 
   @Post(':id/location')
+  @AllowTrackingToken()
   @ApiOperation({
     summary: 'Record GPS ping',
-    description: 'Record a single GPS ping for a rep (mobile foreground tracking).',
+    description:
+      'Record a single GPS ping for a rep (mobile foreground tracking). ' +
+      'Reachable with the long-lived device tracking token, so a signed-out ' +
+      'handset keeps reporting.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiCreatedResponse({ description: 'Ping recorded' })
   record(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: RecordLocationDto,
+    @CurrentUser('repId') callerRepId: string | null,
   ) {
+    this.assertOwnRep(id, callerRepId);
     return this.locations.record(id, dto);
   }
 
   @Post(':id/location/bulk')
+  @AllowTrackingToken()
   @ApiOperation({
     summary: 'Bulk record GPS pings',
     description:
-      'Bulk-record GPS pings collected while offline (mobile offline-flush). Up to 500 points per request.',
+      'Bulk-record GPS pings collected while offline (mobile offline-flush). ' +
+      'Up to 500 points per request. Reachable with the long-lived device ' +
+      'tracking token, so a signed-out handset can still drain its queue.',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiCreatedResponse({ description: 'Pings recorded (count returned)' })
   recordBulk(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: BulkRecordLocationDto,
+    @CurrentUser('repId') callerRepId: string | null,
   ) {
+    this.assertOwnRep(id, callerRepId);
     return this.locations.recordBulk(id, dto);
+  }
+
+  /**
+   * A rep may only report as themselves. Previously only the heartbeat checked
+   * this; the location routes now must, because the tracking token reaches them
+   * while signed out and a handset must never be able to write another rep's
+   * trail. Admins/managers (repId null) still pass, as they do elsewhere.
+   */
+  private assertOwnRep(targetRepId: string, callerRepId: string | null): void {
+    if (callerRepId && callerRepId !== targetRepId) {
+      throw new ForbiddenException({
+        message: 'Location must be reported for your own rep id',
+        code: 'forbidden_rep',
+      });
+    }
   }
 
   @Get('locations/latest')

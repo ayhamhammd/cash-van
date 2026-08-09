@@ -13,6 +13,7 @@ import { typeOrmAsyncConfig } from './config/database.config';
 import { HealthController } from './health/health.controller';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { PermissionsGuard } from './common/guards/permissions.guard';
+import { TrackingTokenGuard } from './common/guards/tracking-token.guard';
 
 import { UserContextModule } from './common/context/user-context.module';
 import { StorageModule } from './common/storage/storage.module';
@@ -45,6 +46,7 @@ import { SyncModule } from './modules/sync/sync.module';
 import { ErpSyncModule } from './modules/erp-sync/erp-sync.module';
 import { ApprovalsModule } from './modules/approvals/approvals.module';
 import { StockRequestsModule } from './modules/stock-requests/stock-requests.module';
+import { DevicesModule } from './modules/devices/devices.module';
 import { AgentModule } from './modules/agent/agent.module';
 import { OffersModule } from './modules/offers/offers.module';
 import { ProspectingModule } from './modules/prospecting/prospecting.module';
@@ -106,6 +108,7 @@ import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module
     NotificationsModule,
     ApprovalsModule,
     StockRequestsModule,
+    DevicesModule,
     SyncModule,
     ErpSyncModule,
     AgentModule,
@@ -120,6 +123,7 @@ import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: TrackingTokenGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
   ],
 })

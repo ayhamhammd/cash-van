@@ -2,16 +2,24 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { randomUUID } from 'node:crypto';
 import * as bcrypt from 'bcrypt';
 
 import { UsersService } from '../users/users.service';
 import { RepsService } from '../reps/reps.service';
+import { DevicesService } from '../devices/devices.service';
 import { LoginDto } from './dto/login.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 import { User } from '../users/entities/user.entity';
 
 export interface LoginResponse {
   accessToken: string;
+  /**
+   * Long-lived, location-only credential, returned only when the caller
+   * identified a device. The app stores it outside the session so signing out
+   * does not take the trail down with it.
+   */
+  trackingToken?: string;
   user: {
     id: string;
     userNumber: string;
@@ -34,9 +42,15 @@ export class AuthService {
     private readonly usersService: UsersService,
     private readonly repsService: RepsService,
     private readonly jwtService: JwtService,
+    private readonly devices: DevicesService,
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
   ) {}
+
+  /** Sign-out: end the interactive session, leave the device tracking. */
+  async closeDeviceSession(deviceId: string): Promise<void> {
+    await this.devices.closeSessionByDevice(deviceId);
+  }
 
   async login(dto: LoginDto): Promise<LoginResponse> {
     const user = await this.usersService.findByUserNumberWithSecret(dto.userNumber);
@@ -88,8 +102,43 @@ export class AuthService {
     };
     const accessToken = await this.jwtService.signAsync(payload);
 
+    // Device binding + the tracking token that outlives sign-out. Only the
+    // mobile app sends a deviceId; the dashboard logs in without one and is
+    // unaffected, because binding a browser to a salesman would be nonsense.
+    let trackingToken: string | undefined;
+    if (dto.deviceId) {
+      const sessionJti = randomUUID();
+      const trackingJti = randomUUID();
+      // Claim first: it throws on a conflict, so no token is ever minted for a
+      // sign-in that is about to be refused.
+      await this.devices.claim(
+        user.id,
+        { deviceId: dto.deviceId, platform: dto.platform, model: dto.deviceModel },
+        sessionJti,
+        trackingJti,
+      );
+      trackingToken = await this.jwtService.signAsync(
+        {
+          sub: user.id,
+          v: 2,
+          userNumber: user.userNumber,
+          userType: user.userType,
+          role: user.role ?? 'viewer',
+          repId,
+          permissions: {},
+          typ: 'tracking',
+          deviceId: dto.deviceId,
+        } satisfies JwtPayload,
+        // Long-lived on purpose: the handset must keep reporting through
+        // sign-out, reboot and a night off. Releasing the device is the kill
+        // switch (checked per request), not expiry.
+        { expiresIn: '3650d', jwtid: trackingJti },
+      );
+    }
+
     return {
       accessToken,
+      trackingToken,
       user: {
         id: user.id,
         userNumber: user.userNumber,
