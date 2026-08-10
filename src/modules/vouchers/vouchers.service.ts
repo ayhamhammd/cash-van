@@ -1180,6 +1180,7 @@ export class VouchersService implements OnModuleInit {
 
   async list(
     q: ListVouchersQueryDto = {},
+    visibleRepIds: string[] | null = null,
   ): Promise<
     Array<
       VoucherHeader & {
@@ -1212,6 +1213,22 @@ export class VouchersService implements OnModuleInit {
       )
       .groupBy('h.id')
       .orderBy('h.in_date', 'DESC');
+
+    // Scope by WHO MADE the voucher, not who the customer belongs to: the
+    // question a supervisor's report answers is "what did my salesmen do",
+    // and a rep can sell to a customer assigned to someone else. The link is
+    // userCode → users.user_number → reps.user_id, since the header carries no
+    // rep id of its own.
+    if (visibleRepIds !== null) {
+      qb.leftJoin('users', 'vu', 'vu.user_number = h.user_code')
+        .leftJoin('reps', 'vrep', 'vrep.user_id = vu.id');
+      if (visibleRepIds.length === 0) {
+        // Scoped to nobody — return nothing rather than everything.
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere('vrep.id IN (:...visibleRepIds)', { visibleRepIds });
+      }
+    }
 
     if (q.transKind) {
       // Accept a single kind or a comma list (SALE,RETURN,ORDER) for the

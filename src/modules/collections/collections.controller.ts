@@ -26,13 +26,21 @@ import { ListCollectionsQuery } from './dto/query.dto';
 import { BatchDepositDto } from './dto/collection-actions.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { RepScopeService } from '../users/rep-scope.service';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 
 @ApiTags('collections')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'collections', version: '1' })
 export class CollectionsController {
-  constructor(private readonly collections: CollectionsService) {}
+  constructor(
+    private readonly collections: CollectionsService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -40,8 +48,11 @@ export class CollectionsController {
     description: 'List cash/cheque collections with optional filters.',
   })
   @ApiOkResponse({ description: 'Collection list' })
-  list(@Query() query: ListCollectionsQuery) {
-    return this.collections.list(query);
+  async list(
+    @Query() query: ListCollectionsQuery,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.collections.list(query, await this.repScope.visibleRepIds(user));
   }
 
   @Get('summary')

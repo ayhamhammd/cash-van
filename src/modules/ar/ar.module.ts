@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { UsersModule } from '../users/users.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Customer } from '../customers/entities/customer.entity';
@@ -15,6 +16,7 @@ import { ArService } from './ar.service';
  */
 @Module({
   imports: [
+    UsersModule,
     TypeOrmModule.forFeature([Customer, Rep, ErpIdMap]),
     ErpSyncModule, // provides ErpHttpClient
   ],

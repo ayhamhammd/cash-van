@@ -59,9 +59,21 @@ export class CollectionsService {
     private readonly events: EventEmitter2,
   ) {}
 
-  async list(q: ListCollectionsQuery): Promise<{ items: CollectionListItem[]; total: number }> {
+  async list(
+    q: ListCollectionsQuery,
+    visibleRepIds: string[] | null = null,
+  ): Promise<{ items: CollectionListItem[]; total: number }> {
     const where: Record<string, unknown> = {};
     if (q.repId) where.repId = q.repId;
+    // Scope wins over the caller's filter: a supervisor limited to their own
+    // team asking for someone else's rep must get nothing, not that rep's
+    // collections. An empty scope means "sees nobody", so In([]) is correct —
+    // leaving it unfiltered would show everyone.
+    if (visibleRepIds !== null) {
+      where.repId = q.repId && !visibleRepIds.includes(q.repId)
+        ? In([])
+        : In(q.repId ? [q.repId] : visibleRepIds);
+    }
     if (q.customerId) where.customerId = q.customerId;
     if (q.method) where.method = q.method;
     if (q.status) where.status = q.status;

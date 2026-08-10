@@ -72,7 +72,7 @@ export class ArService {
     warehouseCode?: string;
     page: number;
     pageSize: number;
-  }): Promise<OrgAgingResponse & { stale?: boolean }> {
+  }, visibleRepIds: string[] | null = null): Promise<OrgAgingResponse & { stale?: boolean }> {
     let body: OrgAgingResponse;
     try {
       body = await this.erp.getJson<OrgAgingResponse>('ar/aging', {
@@ -107,12 +107,33 @@ export class ArService {
       }
     }
 
+    const enriched = rows.map((r) => ({
+      ...r,
+      ...(r.customerCode ? repByCustomer.get(r.customerCode) ?? { repId: null, repName: null } : { repId: null, repName: null }),
+    }));
+
+    // Scope AFTER enrichment, because the rep assignment is what a row is
+    // scoped by and it only exists once enriched. A customer with no rep is
+    // nobody's, so a scoped caller does not see it.
+    const data =
+      visibleRepIds === null
+        ? enriched
+        : enriched.filter((r) => r.repId !== null && visibleRepIds.includes(r.repId));
+
+    // The ERP paginated before we filtered, so the count would overstate what
+    // this caller can actually see.
     return {
       ...body,
-      data: rows.map((r) => ({
-        ...r,
-        ...(r.customerCode ? repByCustomer.get(r.customerCode) ?? { repId: null, repName: null } : { repId: null, repName: null }),
-      })),
+      data,
+      ...(visibleRepIds === null
+        ? {}
+        : {
+            pagination: {
+              page: body.pagination?.page ?? q.page,
+              pageSize: body.pagination?.pageSize ?? q.pageSize,
+              total: data.length,
+            },
+          }),
     };
   }
 
@@ -294,15 +315,18 @@ export class ArService {
    * YYYY-MM-DD, applied to sales, collections and returns) and `customerNumber` filter
    * (number or name). Only customers with a remaining balance are returned.
    */
-  async receivables(q: {
-    from?: string;
-    to?: string;
-    customerNumber?: string;
-  }): Promise<ReceivablesResult> {
+  async receivables(
+    q: {
+      from?: string;
+      to?: string;
+      customerNumber?: string;
+    },
+    visibleRepIds: string[] | null = null,
+  ): Promise<ReceivablesResult> {
     const from = q.from && /^\d{4}-\d{2}-\d{2}$/.test(q.from) ? q.from : null;
     const to = q.to && /^\d{4}-\d{2}-\d{2}$/.test(q.to) ? q.to : null;
     const cust = q.customerNumber?.trim() || null;
-    const params = [from, to, cust];
+    const params = [from, to, cust, visibleRepIds];
 
     // Credit SALE vouchers, one row per voucher (the debits), oldest-first.
     const saleRows: Array<{
@@ -321,6 +345,7 @@ export class ArService {
           AND ($1::date IS NULL OR h.created_at >= $1::date)
           AND ($2::date IS NULL OR h.created_at < ($2::date + 1))
           AND ($3::text IS NULL OR h.customer_number = $3 OR c.customer_name ILIKE '%' || $3 || '%')
+          AND ($4::uuid[] IS NULL OR c.rep_id = ANY($4::uuid[]))
         GROUP BY h.customer_number, c.customer_name, h.voucher_number, h.created_at
         ORDER BY h.customer_number, h.created_at ASC`,
       params,
@@ -336,6 +361,7 @@ export class ArService {
           AND ($1::date IS NULL OR co.collected_at >= $1::date)
           AND ($2::date IS NULL OR co.collected_at < ($2::date + 1))
           AND ($3::text IS NULL OR c.customer_number = $3 OR c.customer_name ILIKE '%' || $3 || '%')
+          AND ($4::uuid[] IS NULL OR c.rep_id = ANY($4::uuid[]))
         GROUP BY c.customer_number`,
       params,
     );

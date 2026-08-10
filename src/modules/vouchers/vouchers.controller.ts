@@ -30,6 +30,11 @@ import { PreviewVoucherNumberQueryDto } from './dto/preview-number.query';
 import { CreateChequeDto } from './dto/create-cheque.dto';
 import { CreateTransactionKindDto } from './dto/create-transaction-kind.dto';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
+import { RepScopeService } from '../users/rep-scope.service';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 
 @ApiTags('vouchers')
 @ApiBearerAuth()
@@ -38,6 +43,7 @@ export class VouchersController {
   constructor(
     private readonly vouchersService: VouchersService,
     private readonly transactionKindsService: TransactionKindsService,
+    private readonly repScope: RepScopeService,
   ) {}
 
   // ---- Transaction kinds (lookup) -------------------------------------------
@@ -88,8 +94,11 @@ export class VouchersController {
       'List vouchers, optionally filtered by transKind, userCode, store and date range.',
   })
   @ApiOkResponse({ description: 'Voucher list' })
-  list(@Query() query: ListVouchersQueryDto) {
-    return this.vouchersService.list(query);
+  async list(
+    @Query() query: ListVouchersQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.vouchersService.list(query, await this.repScope.visibleRepIds(user));
   }
 
   @Get(':id')

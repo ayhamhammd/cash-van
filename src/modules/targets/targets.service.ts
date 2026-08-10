@@ -68,9 +68,16 @@ export class TargetsService {
   ) {}
 
   /** All active salesmen with their target for the month + actual sales + progress. */
-  async list(year: number, month: number): Promise<TargetRow[]> {
+  async list(
+    year: number,
+    month: number,
+    visibleRepIds: string[] | null = null,
+  ): Promise<TargetRow[]> {
     const [start, end] = periodBounds(year, month);
 
+    // A scoped supervisor sees their own team's targets only — theirs is a
+    // league table of their people, not the company's. `null` = unrestricted;
+    // an empty array means "sees nobody" and correctly returns no rows.
     const rows: Array<Record<string, string | null>> = await this.ds.query(
       `
       SELECT ${SELECT_COLS}
@@ -79,9 +86,10 @@ export class TargetsService {
       LEFT JOIN sales_targets t ON t.rep_id = r.id AND t.year = $3 AND t.month = $4
       ${ACTUALS_JOINS}
       WHERE r.is_active = true AND r.deleted_at IS NULL
+        AND ($5::uuid[] IS NULL OR r.id = ANY($5::uuid[]))
       ORDER BY COALESCE(r.name_ar, r.name_en)
       `,
-      [start, end, year, month],
+      [start, end, year, month, visibleRepIds],
     );
 
     return rows.map(mapRow);

@@ -6,6 +6,7 @@ import { Cheque } from './entities/cheque.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { CustomersModule } from '../customers/customers.module';
+import { UsersModule } from '../users/users.module';
 
 import { CollectionsService } from './collections.service';
 import { ChequesService } from './cheques.service';
@@ -17,6 +18,7 @@ import { ReferenceController } from './reference.controller';
   imports: [
     TypeOrmModule.forFeature([Collection, Cheque, Rep, Customer]),
     CustomersModule,
+    UsersModule,
   ],
   controllers: [CollectionsController, ChequesController, ReferenceController],
   providers: [CollectionsService, ChequesService],
