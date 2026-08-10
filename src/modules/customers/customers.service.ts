@@ -19,6 +19,7 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { PendingCustomerPhoto } from './entities/pending-customer-photo.entity';
 import { CustomerAttachment } from './entities/customer-attachment.entity';
+import { User } from '../users/entities/user.entity';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { ListCustomersQuery } from './dto/list-customers.query';
@@ -73,6 +74,8 @@ export class CustomersService {
     private readonly visits: Repository<CustomerVisit>,
     @InjectRepository(CustomerAttachment)
     private readonly attachments: Repository<CustomerAttachment>,
+    @InjectRepository(User)
+    private readonly users: Repository<User>,
     private readonly jobs: JobsService,
     private readonly storage: StorageService,
     private readonly events: EventEmitter2,
@@ -143,7 +146,17 @@ export class CustomersService {
       throw new BadRequestException('That photo already belongs to another customer');
     }
 
-    if (user.permissions?.canCreateCustomerDirect) {
+    // Read FRESH rather than trusting the JWT claim. The office flips this
+    // switch in the dashboard and expects the next customer to obey it — not
+    // the next one after the salesman happens to sign out and back in, which
+    // on a field phone can be days. A create already costs a photo upload and
+    // several round trips; one indexed lookup does not register. A missing row
+    // falls through to approval, which is the safe direction.
+    const actor = await this.users.findOne({
+      where: { id: user.sub },
+      select: { id: true, canCreateCustomerDirect: true },
+    });
+    if (actor?.canCreateCustomerDirect) {
       const customer = await this.create(dto);
       await this.claimPhoto(photo, customer.id, user.sub);
       return customer;

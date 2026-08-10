@@ -85,7 +85,18 @@ Behaviour worth knowing:
 
 `POST /customers` answers one of two shapes, and
 [CustomerApi.kt](../../FlowVan/core/network/src/commonMain/kotlin/com/jehadalomour/flowvan/core/network/api/CustomerApi.kt)
-already reads both: the customer, or `{ pendingApprovalId, status: "pending" }`.
+reads both: the customer, or `{ pendingApprovalId, status: "pending" }`. On the
+pending shape the create screen stays put, polls the request, and shows the
+decision — a rep sent back to a list with no idea whether the shop exists is a
+rep who phones the office.
+
+The screen also says so **before** the save, from
+`SessionStore.canCreateCustomerDirect` (set at login and refreshed from
+`/auth/me` on every catalog sync). Creating a customer means photographing a
+document in front of the shopkeeper; learning only from the answer that the shop
+is not open for business yet wastes the visit. The banner is advisory — the
+server owns the decision and reports it either way, so a stale copy misleads for
+one screen and can never create a customer that should have been reviewed.
 
 ### Dashboard (`cash-van-dashboard-frontend`)
 
@@ -144,13 +155,16 @@ a second list beside them:
 2. Admin approves → the customer now exists, the photo is attached to it, and
    the salesman's app reflects it on next refresh.
 3. Admin rejects → still no customer; the salesman sees the rejection note.
-4. **Untick** «إضافة العميل تتطلب موافقة الإدارة», salesman signs in again *(the
-   flag rides in the JWT, so it takes effect on their next login — not
-   instantly)*, adds a customer → created immediately, no request raised.
+4. **Untick** «إضافة العميل تتطلب موافقة الإدارة» and the salesman's *next*
+   customer is created immediately, with no request raised — no re-login.
 5. Salesman without `canAddCustomer` → refused in both configurations.
 
-Step 4's re-login caveat is worth telling the office: flipping the switch does
-not change a salesman already signed in.
+**Step 4 used to carry a re-login caveat, and no longer does.** `createAsUser`
+read the flag off the JWT claim, so flipping the switch changed nothing until the
+salesman signed out and back in — which on a field phone can be days. It now
+reads the column fresh on each create. That costs one indexed lookup on an
+operation that already uploads a photo, and it is what makes the switch behave
+the way the office expects: flip it, and the next customer obeys.
 
 The dashboard half of this was verified on the running stack: opening a salesman
 shows the box ticked while `can_create_customer_direct` is `false`; unticking and
