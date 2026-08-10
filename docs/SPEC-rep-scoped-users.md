@@ -74,6 +74,8 @@ All of the below are **implemented**.
 | Collections | `GET collections`, `collections/summary` | only collections whose `rep_id` is visible |
 | Collections | `GET collections/aging` | cheques scoped through the collection that banked them — a cheque carries no rep of its own |
 | Tax | `GET tax/report`, `tax/ledger`, `tax/report/export` | ledger entries scoped via `document_id` → `invoices.rep_id` (SALE) or `credit_notes.rep_id` (RETURN) |
+| Stores | `GET warehouses` | depots always; VAN stores only for visible reps — this one list feeds every store dropdown in the app |
+| Stores | `GET warehouses/:id` | **403** when the store is a van outside scope |
 | Tracking | `GET reps` | list filtered |
 | Tracking | `GET reps/:id`, `:id/kpis` | **403** when out of scope |
 | Tracking | `:id/locations`, `:id/visits`, `:id/sale-points`, `:id/tracking-summary`, `:id/locations.geojson` | **403** when out of scope |
@@ -103,6 +105,20 @@ in it", and both have to be asked.
 sums one supervisor's salesmen; only an unscoped user sees the number that goes
 to the ISTD. The XLSX export is scoped identically — otherwise the download is
 the way round the screen.
+
+**A van store is a salesman; a depot is not.** Van stores are created with a
+salesman, named after them and hold their stock, so they follow the salesman's
+scope — which is why a scoped supervisor's store dropdowns stop listing other
+people's vans. Depots (`is_van = false`) belong to nobody and stay visible to
+everyone: stock still has to move out of one and purchases still land in one, so
+hiding them would break transfers rather than protect anything. A van with no
+salesman assigned is nobody's, and under scope that means not yours.
+
+**Sign-out drops the whole query cache** (`qc.clear()` in the topbar). Once every
+list is scoped to who asked for it, cache keys that name only the resource are
+no longer unique per viewer — without the clear, the next person to sign in on
+that tab is served the previous one's rows until they go stale, and warehouses
+hold for five minutes.
 
 ## Realtime
 
