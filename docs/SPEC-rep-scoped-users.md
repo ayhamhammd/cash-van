@@ -67,6 +67,13 @@ All of the below are **implemented**.
 | Approvals | `GET approvals` | only requests whose `rep_id` is visible |
 | Approvals | `POST approvals/:id/approve` / `reject` | **403** when out of scope |
 | Customers | `GET customers` | only customers whose `rep_id` is visible |
+| Sales | `GET vouchers` | scoped by WHO MADE the voucher — `user_code` → `users.user_number` → `reps.user_id` |
+| Targets | `GET targets` | only visible reps' targets and actuals |
+| Receivables | `GET ar/aging`, `ar/receivables` | filtered after the ERP enrichment, where the rep assignment first exists |
+| Receivables | `GET ar/arrears-summary` | credit-sold by the voucher's rep, collected by the collector, receivable + arrears by the customer's rep |
+| Collections | `GET collections`, `collections/summary` | only collections whose `rep_id` is visible |
+| Collections | `GET collections/aging` | cheques scoped through the collection that banked them — a cheque carries no rep of its own |
+| Tax | `GET tax/report`, `tax/ledger`, `tax/report/export` | ledger entries scoped via `document_id` → `invoices.rep_id` (SALE) or `credit_notes.rep_id` (RETURN) |
 | Tracking | `GET reps` | list filtered |
 | Tracking | `GET reps/:id`, `:id/kpis` | **403** when out of scope |
 | Tracking | `:id/locations`, `:id/visits`, `:id/sale-points`, `:id/tracking-summary`, `:id/locations.geojson` | **403** when out of scope |
@@ -84,6 +91,18 @@ else's `repId`.
 "this salesman didn't move today" — a different and misleading statement from
 "not yours". `locations.geojson` is guarded for the same reason as the trail it
 exports, or the export becomes a way around the guard.
+
+**A filter over unscoped data is decoration.** Every salesman dropdown in the
+dashboard is fed by `GET reps`, so a scoped supervisor has only ever been
+offered their own people. That is why the gaps above were easy to miss: the
+control looked right while the rows underneath it were everyone's. Granting
+someone a report answers "may they open it"; scope answers "whose numbers are
+in it", and both have to be asked.
+
+**The scoped tax report is a slice, not the filing.** `tax/report` under scope
+sums one supervisor's salesmen; only an unscoped user sees the number that goes
+to the ISTD. The XLSX export is scoped identically — otherwise the download is
+the way round the screen.
 
 ## Realtime
 

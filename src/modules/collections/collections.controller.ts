@@ -62,8 +62,11 @@ export class CollectionsController {
   })
   @ApiQuery({ name: 'date', required: false, description: 'Day to summarize (YYYY-MM-DD); defaults to today', example: '2026-05-23' })
   @ApiOkResponse({ description: 'Daily collection totals' })
-  summary(@Query('date') date?: string) {
-    return this.collections.summary(date);
+  async summary(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('date') date?: string,
+  ) {
+    return this.collections.summary(date, await this.repScope.visibleRepIds(user));
   }
 
   @Get('aging')
@@ -72,8 +75,8 @@ export class CollectionsController {
     description: 'Uncleared-cheque aging buckets (0-7 / 8-30 / 31-60 / 60+ days).',
   })
   @ApiOkResponse({ description: 'Aging buckets' })
-  aging() {
-    return this.collections.aging();
+  async aging(@CurrentUser() user: AuthenticatedUser) {
+    return this.collections.aging(await this.repScope.visibleRepIds(user));
   }
 
   @Post()

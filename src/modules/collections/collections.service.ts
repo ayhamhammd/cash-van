@@ -13,6 +13,7 @@ import {
   LessThanOrEqual,
   MoreThanOrEqual,
   Repository,
+  type SelectQueryBuilder,
 } from 'typeorm';
 
 import { Collection } from './entities/collection.entity';
@@ -365,13 +366,21 @@ export class CollectionsService {
     return { deposited, skipped };
   }
 
-  async summary(date?: string): Promise<CollectionsSummary> {
+  async summary(
+    date?: string,
+    visibleRepIds: string[] | null = null,
+  ): Promise<CollectionsSummary> {
     const day = date ?? new Date().toISOString().slice(0, 10);
     const start = new Date(`${day}T00:00:00.000Z`);
     const end = new Date(`${day}T23:59:59.999Z`);
 
     const dayRows = await this.collections.find({
-      where: { collectedAt: Between(start, end) },
+      where: {
+        collectedAt: Between(start, end),
+        // In([]) compiles to 0=1, so a scope of nobody sums nothing rather than
+        // falling through to the company total.
+        ...(visibleRepIds === null ? {} : { repId: In(visibleRepIds) }),
+      },
     });
     const sumBy = (pred: (c: Collection) => boolean) =>
       dayRows.filter(pred).reduce((a, c) => a + c.amount, 0);
@@ -383,12 +392,13 @@ export class CollectionsService {
 
     // Overdue cheques: uncleared, due_date < today.
     const today = new Date().toISOString().slice(0, 10);
-    const overdue = (await this.cheques
+    const overdueQb = this.cheques
       .createQueryBuilder('ch')
       .select('COALESCE(SUM(ch.amount),0)', 'sum')
       .where('ch.status = :st', { st: 'pending' })
-      .andWhere('ch.due_date IS NOT NULL AND ch.due_date < :today', { today })
-      .getRawOne()) as { sum: string };
+      .andWhere('ch.due_date IS NOT NULL AND ch.due_date < :today', { today });
+    this.scopeCheques(overdueQb, visibleRepIds);
+    const overdue = (await overdueQb.getRawOne()) as { sum: string };
 
     return {
       date: day,
@@ -400,11 +410,32 @@ export class CollectionsService {
     };
   }
 
+  /**
+   * Restrict a cheque query to cheques taken by the caller's own salesmen.
+   *
+   * A cheque carries no rep of its own — it hangs off the collection that
+   * banked it, and that is the row with the rep. `null` leaves the query alone;
+   * an empty scope is "sees nobody" and must return nothing, not everything.
+   */
+  private scopeCheques(
+    qb: SelectQueryBuilder<Cheque>,
+    visibleRepIds: string[] | null,
+  ): void {
+    if (visibleRepIds === null) return;
+    qb.innerJoin('collections', 'chc', 'chc.id = ch.collection_id');
+    if (visibleRepIds.length === 0) qb.andWhere('1 = 0');
+    else qb.andWhere('chc.rep_id IN (:...visibleRepIds)', { visibleRepIds });
+  }
+
   /** Aging of uncleared cheques by days past due_date. */
-  async aging(): Promise<AgingBuckets> {
+  async aging(visibleRepIds: string[] | null = null): Promise<AgingBuckets> {
     const today = new Date();
     const todayStr = today.toISOString().slice(0, 10);
-    const pending = await this.cheques.find({ where: { status: 'pending' } });
+    const pendingQb = this.cheques
+      .createQueryBuilder('ch')
+      .where('ch.status = :st', { st: 'pending' });
+    this.scopeCheques(pendingQb, visibleRepIds);
+    const pending = await pendingQb.getMany();
 
     const defs = [
       { label: '0-7', min: 0, max: 7 },

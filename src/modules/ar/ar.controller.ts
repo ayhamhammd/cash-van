@@ -73,8 +73,11 @@ export class ArController {
   /** Arrears + monthly-collection widget (month = YYYY-MM, default current). */
   @Get('arrears-summary')
   @ApiOkResponse({ description: 'Monthly credit-sold vs collected + arrears list' })
-  arrearsSummary(@Query('month') month?: string) {
-    return this.ar.arrearsSummary(month);
+  async arrearsSummary(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('month') month?: string,
+  ) {
+    return this.ar.arrearsSummary(month, await this.repScope.visibleRepIds(user));
   }
 
   /** Single-customer aging (due/invoice basis). */

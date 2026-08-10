@@ -208,7 +208,7 @@ export class ArService {
    * from local vouchers + collections; the arrears list (past-due customers) comes from
    * the ERP org aging (capped) with a local total-debt fallback. `month` = YYYY-MM.
    */
-  async arrearsSummary(month?: string) {
+  async arrearsSummary(month?: string, visibleRepIds: string[] | null = null) {
     const now = new Date();
     const ym = month && /^\d{4}-\d{2}$/.test(month)
       ? month
@@ -217,28 +217,42 @@ export class ArService {
     const [y, m] = ym.split('-').map(Number);
     const nextMonth = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
 
-    // Local monthly figures (JOD major).
+    // Every figure below is scoped the same way the rest of the dashboard is:
+    // `null` applies no filter, and an array — empty included — is exhaustive,
+    // so a supervisor assigned nobody gets zeros rather than the company's book.
+    // Credit SOLD is scoped by who made the voucher (the header carries a
+    // user_code, not a rep id); collections by who collected; the receivable
+    // and the arrears list by who owns the customer, since a debt belongs to
+    // the account, not to whoever last sold to it.
     const soldRows: Array<{ credit_sold: string }> = await this.ds.query(
       `SELECT COALESCE(SUM(p.amount),0)::text AS credit_sold
          FROM payments p
          JOIN voucher_headers h ON h.voucher_number = p.voucher_number
+         LEFT JOIN users u ON u.user_number = h.user_code
+         LEFT JOIN reps r ON r.user_id = u.id
         WHERE p.payment_type = 'CREDIT' AND h.trans_kind = 'SALE'
-          AND h.created_at >= $1::date AND h.created_at < $2::date`,
-      [start, nextMonth],
+          AND h.created_at >= $1::date AND h.created_at < $2::date
+          AND ($3::uuid[] IS NULL OR r.id = ANY($3::uuid[]))`,
+      [start, nextMonth, visibleRepIds],
     );
     const collectedRows: Array<{ collected_fils: string }> = await this.ds.query(
       `SELECT COALESCE(SUM(amount),0)::text AS collected_fils
          FROM collections
         WHERE status IN ('confirmed','deposited')
-          AND collected_at >= $1::date AND collected_at < $2::date`,
-      [start, nextMonth],
+          AND collected_at >= $1::date AND collected_at < $2::date
+          AND ($3::uuid[] IS NULL OR rep_id = ANY($3::uuid[]))`,
+      [start, nextMonth, visibleRepIds],
     );
     const creditSold = Number(soldRows[0]?.credit_sold ?? 0);
     const collected = Number(collectedRows[0]?.collected_fils ?? 0) / 1000; // fils → JOD
 
     // Total receivable (local mirror of ERP balance).
     const totalRows: Array<{ total_debt: string }> = await this.ds.query(
-      `SELECT COALESCE(SUM(total_debt),0)::text AS total_debt FROM customers WHERE total_debt > 0`,
+      `SELECT COALESCE(SUM(total_debt),0)::text AS total_debt
+         FROM customers
+        WHERE total_debt > 0
+          AND ($1::uuid[] IS NULL OR rep_id = ANY($1::uuid[]))`,
+      [visibleRepIds],
     );
     const totalReceivable = Number(totalRows[0]?.total_debt ?? 0);
 
@@ -253,14 +267,23 @@ export class ArService {
         basis: 'due', page: 1, pageSize: 200,
       });
       const overdueRows = (aging.data ?? []).filter((r) => (r.overdue ?? 0) > 0);
-      arrears = await this.attachLocal(overdueRows.map((r) => ({
+      const attached = await this.attachLocal(overdueRows.map((r) => ({
         customerCode: r.customerCode, customerName: r.customerName,
         balance: r.totalOpen, overdue: r.overdue,
       })));
+      // Filtered after attaching, because the rep assignment is local and only
+      // exists once attached. A customer with no rep is nobody's and stays out.
+      arrears =
+        visibleRepIds === null
+          ? attached
+          : attached.filter((r) => r.repId !== null && visibleRepIds.includes(r.repId));
     } catch {
       stale = true;
       const owing = await this.customers.find({
-        where: {},
+        // Scoped in the query rather than after: the cap is 50 rows, so
+        // filtering afterwards would hand a scoped caller whatever survived of
+        // the company's top 50 instead of their own top 50.
+        where: visibleRepIds === null ? {} : { repId: In(visibleRepIds) },
         order: { totalDebt: 'DESC' },
         take: 50,
       });
