@@ -1,0 +1,99 @@
+# cash-van (VanFlow API) — build → push to GHCR → deploy over SSH.
+#
+# Goes in the cash-van repo at .github/workflows/deploy.yml
+#
+# Branch → environment mapping:
+#   dev         → dev
+#   staging     → staging
+#   production  → production   (gated by a GitHub Environment approval)
+#
+# The backend image has NO build-time URLs baked in, so ONE image per commit
+# would in principle serve all three environments. It is still built per branch
+# so each environment gets exactly the code on its own branch.
+
+name: Deploy API
+
+on:
+  push:
+    branches: [dev, staging, production]
+  workflow_dispatch:          # lets you redeploy the current branch by hand
+
+concurrency:
+  # Never let two deploys of the same branch overlap — the second would race the
+  # first's `docker compose up` and could leave containers half-swapped.
+  group: deploy-api-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      env_name: ${{ steps.pick.outputs.env_name }}
+    steps:
+      - id: pick
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            dev)        echo "env_name=dev"        >> "$GITHUB_OUTPUT" ;;
+            staging)    echo "env_name=staging"    >> "$GITHUB_OUTPUT" ;;
+            production) echo "env_name=production" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::branch ${GITHUB_REF_NAME} is not mapped to an environment"; exit 1 ;;
+          esac
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # required to push to GHCR
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: OmarThaerQ
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          platforms: linux/amd64
+          push: true
+          # Two tags: the moving environment tag the server pulls, and an
+          # immutable SHA tag so you can roll back to an exact build.
+          tags: |
+            ghcr.io/omarthaerq/cashvan-api:${{ needs.resolve.outputs.env_name }}
+            ghcr.io/omarthaerq/cashvan-api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: [resolve, build]
+    # Runs ON YOUR SERVER. GitHub cannot reach into your network, so the server
+    # connects out and picks the job up. Only the deploy runs here — the build
+    # above stays on GitHub's machines, so no source code lands on the server.
+    runs-on: self-hosted
+    # Production is protected: add required reviewers to this Environment in
+    # GitHub settings and every prod deploy waits for a human to approve.
+    environment: ${{ needs.resolve.outputs.env_name }}
+    steps:
+      - name: Deploy
+        run: |
+            set -euo pipefail
+            cd /opt/7software/${{ needs.resolve.outputs.env_name }}/vanflow
+            docker compose pull app
+            docker compose up -d app
+            # Fail the workflow if the API does not come back healthy, so a bad
+            # deploy shows up red here instead of silently sitting broken.
+            for i in $(seq 1 30); do
+              if docker compose exec -T app wget -qO- http://127.0.0.1:3000/api/v1/health | grep -q '"status":"ok"'; then
+                echo "API healthy"; exit 0
+              fi
+              sleep 5
+            done
+            echo "API did not become healthy in 150s"; docker compose logs --tail 50 app; exit 1
