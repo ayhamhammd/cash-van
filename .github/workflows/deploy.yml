@@ -89,7 +89,12 @@ jobs:
             set -euo pipefail
             cd /opt/7software/${{ needs.resolve.outputs.env_name }}/vanflow
             docker compose pull app
-            docker compose up -d app
+            # `up -d` with no service, not `up -d app`: the stack also contains
+            # the database and the Caddy proxy that actually listens on the
+            # host port. Naming only `app` leaves the proxy unstarted on a fresh
+            # environment, and the site answers 502. Compose only recreates what
+            # changed, so this stays cheap on later deploys.
+            docker compose up -d
             # Fail the workflow if the API does not come back healthy, so a bad
             # deploy shows up red here instead of silently sitting broken.
             for i in $(seq 1 30); do
