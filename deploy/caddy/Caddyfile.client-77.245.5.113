@@ -1,0 +1,96 @@
+# HTTPS for the client server at 77.245.5.113, via sslip.io.
+#
+# WHY THIS FILE EXISTS: the Caddyfile previously on this server was still
+# pinned to 94.142.51.91 — the OLD server's address. sslip.io hostnames ARE
+# the IP, so when the server moved, every hostname in that config stopped
+# matching and VanFlow lost HTTPS entirely. The dashboard was left reachable
+# only as http://77.245.5.113:3001, sending admin passwords in clear text.
+#
+#   https://77.245.5.113.sslip.io       → ERP          (unchanged)
+#   https://app.77.245.5.113.sslip.io   → VanFlow dashboard + API (ONE origin)
+#
+# The ERP keeps the bare hostname it already answers on, so existing bookmarks
+# and any ERP integration keep working. VanFlow gets its own subdomain rather
+# than taking the root — this migration adds HTTPS without moving the ERP.
+#
+# REQUIREMENT: ports 80 AND 443 must be reachable from the internet. Let's
+# Encrypt connects back on port 80 to verify the server and will not issue a
+# certificate if it cannot. Open both on the Windows firewall and the router.
+{
+	email admin@7softwarejo.com
+}
+
+(security) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Caddy names its version by default; a scanner reading that header
+		# learns exactly which exploits to try.
+		-Server
+	}
+}
+
+# ── VanFlow: dashboard + API on a single origin ──────────────────────────────
+# Serving both from one hostname is what makes the rest simple: the auth cookie
+# is first-party on every call, so there is no CORS to configure and no
+# SameSite problem, and the cookie can finally be marked Secure.
+#
+# It is also why the dashboard image is now built with RELATIVE URLs
+# (NEXT_PUBLIC_API_BASE_URL=/api/v1). The old image had
+# http://77.245.5.113:3002/api/v1 compiled into the browser bundle, which
+# breaks twice over here: it is plain HTTP inside an HTTPS page (browsers block
+# that as mixed content) and it dies the moment the server changes address.
+# Relative means the bundle simply calls whatever host it was loaded from.
+app.77.245.5.113.sslip.io {
+	import security
+
+	# Everything the backend owns. /storage/* is included because customer
+	# photo previews resolve against the app origin, not /api/v1.
+	@backend path /api/* /socket.io/* /storage/*
+	handle @backend {
+		reverse_proxy app:3000 {
+			# Without this the app logs and rate-limits Caddy's own IP, so
+			# every van in the field looks like one very busy client.
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	handle {
+		reverse_proxy dashboard:3000
+	}
+
+	encode gzip
+	log {
+		output file /var/log/caddy/vanflow.log
+		format json
+	}
+}
+
+# ── ERP: accounting ──────────────────────────────────────────────────────────
+77.245.5.113.sslip.io {
+	import security
+	reverse_proxy erp-app:3000
+	encode gzip
+	log {
+		output file /var/log/caddy/erp.log
+		format json
+	}
+}
+
+# ── Plain HTTP on the raw IP ─────────────────────────────────────────────────
+# Caddy already redirects http→https for the named hosts above. This covers the
+# bare-IP case only, which has no certificate and cannot serve HTTPS at all —
+# today it fails the TLS handshake, so anyone typing the IP gets a dead page.
+:80 {
+	redir https://77.245.5.113.sslip.io{uri} permanent
+}
+
+# Any other hostname, or a direct hit on the IP over TLS, gets nothing.
+# Without this Caddy would serve the FIRST site defined to an unknown Host
+# header, which quietly hands out whichever app happens to be listed first.
+:443 {
+	tls internal
+	respond 404
+}
