@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import * as ExcelJS from 'exceljs';
 
+import { PdfRendererService } from './pdf-renderer.service';
+
 import type { QueryResult, ReportFormat } from '../agent.types';
 
 export interface RenderedReport {
@@ -14,6 +16,7 @@ const CONTENT_TYPE: Record<ReportFormat, string> = {
   markdown: 'text/markdown; charset=utf-8',
   json: 'application/json; charset=utf-8',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pdf: 'application/pdf',
 };
 
 const EXTENSION: Record<ReportFormat, string> = {
@@ -21,11 +24,14 @@ const EXTENSION: Record<ReportFormat, string> = {
   markdown: 'md',
   json: 'json',
   xlsx: 'xlsx',
+  pdf: 'pdf',
 };
 
 /** Renders a query result into a downloadable artifact. */
 @Injectable()
 export class ReportRendererService {
+  constructor(private readonly pdf: PdfRendererService) {}
+
   async render(
     result: QueryResult,
     format: ReportFormat,
@@ -53,6 +59,8 @@ export class ReportRendererService {
         return Buffer.from(this.toText(result, title), 'utf-8');
       case 'xlsx':
         return this.toXlsx(result, title);
+      case 'pdf':
+        return this.pdf.render(result, title);
     }
   }
 

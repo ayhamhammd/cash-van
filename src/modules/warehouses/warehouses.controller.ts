@@ -24,6 +24,11 @@ import {
 import { WarehousesService } from './warehouses.service';
 import { CreateWarehouseDto } from './dto/create-warehouse.dto';
 import { UpdateWarehouseDto } from './dto/update-warehouse.dto';
+import { RepScopeService } from '../users/rep-scope.service';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 
 @ApiTags('warehouses')
@@ -31,7 +36,10 @@ import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 @UseGuards(ErpReadOnlyGuard)
 @Controller({ path: 'warehouses', version: '1' })
 export class WarehousesController {
-  constructor(private readonly warehousesService: WarehousesService) {}
+  constructor(
+    private readonly warehousesService: WarehousesService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Post()
   @ApiOperation({ summary: 'Create warehouse', description: 'Create a warehouse / van stock location.' })
@@ -41,17 +49,30 @@ export class WarehousesController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List warehouses', description: 'List all warehouses.' })
+  @ApiOperation({
+    summary: 'List warehouses',
+    description:
+      "List warehouses. A rep-scoped caller sees the depots plus only their own salesmen's vans.",
+  })
   @ApiOkResponse({ description: 'Warehouse list' })
-  list() {
-    return this.warehousesService.list();
+  async list(@CurrentUser() user: AuthenticatedUser) {
+    return this.warehousesService.list(await this.repScope.visibleRepIds(user));
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get warehouse', description: 'Fetch a single warehouse by id.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Warehouse id' })
   @ApiOkResponse({ description: 'The warehouse' })
-  getById(@Param('id', ParseUUIDPipe) id: string) {
+  async getById(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // Guarded as well as filtered, or the list filter is only a suggestion —
+    // a van's id is enough to read another salesman's stock boxes without it.
+    await this.warehousesService.assertVisible(
+      id,
+      await this.repScope.visibleRepIds(user),
+    );
     return this.warehousesService.findOneOrThrow(id);
   }
 

@@ -12,6 +12,11 @@ import * as ExcelJS from 'exceljs';
 
 import { TaxLedgerService } from './tax-ledger.service';
 import { LedgerEntryType } from './entities/tax-ledger-entry.entity';
+import { RepScopeService } from '../users/rep-scope.service';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { filsToJod } from '../../common/utils/currency.util';
@@ -22,7 +27,10 @@ import { filsToJod } from '../../common/utils/currency.util';
 @Roles('admin', 'manager')
 @Controller({ path: 'tax', version: '1' })
 export class TaxReportController {
-  constructor(private readonly ledger: TaxLedgerService) {}
+  constructor(
+    private readonly ledger: TaxLedgerService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Get('report')
   @ApiOperation({
@@ -33,8 +41,16 @@ export class TaxReportController {
   @ApiQuery({ name: 'year', required: true, description: 'Year', example: 2026 })
   @ApiQuery({ name: 'month', required: true, description: 'Month (1-12)', example: 5 })
   @ApiOkResponse({ description: 'Monthly totals (sales, returns, net output tax, counts)' })
-  report(@Query('year') year: string, @Query('month') month: string) {
-    return this.ledger.monthlyReport(Number(year), Number(month));
+  async report(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('year') year: string,
+    @Query('month') month: string,
+  ) {
+    return this.ledger.monthlyReport(
+      Number(year),
+      Number(month),
+      await this.repScope.visibleRepIds(user),
+    );
   }
 
   @Get('ledger')
@@ -46,12 +62,13 @@ export class TaxReportController {
   @ApiQuery({ name: 'to', required: false, description: 'End date (YYYY-MM-DD)', example: '2026-05-31' })
   @ApiQuery({ name: 'entryType', required: false, enum: ['SALE', 'RETURN'], description: 'Filter by entry type' })
   @ApiOkResponse({ description: 'Tax ledger entries' })
-  list(
+  async list(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('entryType') entryType?: LedgerEntryType,
   ) {
-    return this.ledger.list(from, to, entryType);
+    return this.ledger.list(from, to, entryType, await this.repScope.visibleRepIds(user));
   }
 
   @Get('report/export')
@@ -65,10 +82,16 @@ export class TaxReportController {
   @ApiOkResponse({ description: 'XLSX file download (binary)' })
   async export(
     @Res() res: Response,
+    @CurrentUser() user: AuthenticatedUser,
     @Query('year') year: string,
     @Query('month') month: string,
   ) {
-    const r = await this.ledger.monthlyReport(Number(year), Number(month));
+    // Scoped like the on-screen report, or the download becomes the way round it.
+    const r = await this.ledger.monthlyReport(
+      Number(year),
+      Number(month),
+      await this.repScope.visibleRepIds(user),
+    );
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Tax Report');
     ws.addRow(['Period', `${r.periodFrom} → ${r.periodTo}`]);

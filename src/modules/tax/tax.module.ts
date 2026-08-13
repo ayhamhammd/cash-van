@@ -21,6 +21,7 @@ import { JoFotaraController } from './jofotara.controller';
 import { TaxReportController } from './tax-report.controller';
 
 import { SettingsModule } from '../settings/settings.module';
+import { UsersModule } from '../users/users.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { SettingsModule } from '../settings/settings.module';
       Customer,
     ]),
     SettingsModule,
+    UsersModule,
   ],
   controllers: [CreditNotesController, JoFotaraController, TaxReportController],
   providers: [

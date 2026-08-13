@@ -6,9 +6,16 @@ import {
   type ToolContext,
 } from './tools/agent-tools.service';
 import { AgentStoreService } from './store/agent-store.service';
+import { AiSessionService, type TurnRecord } from './store/ai-session.service';
 import { ReadonlyDbService } from './db/readonly-db.service';
 import { AGENT_TOOL_DEFS } from './tools/tool-definitions';
 import { buildSystemPrompt } from './agent.system-prompt';
+import {
+  DEFAULT_PERSONA,
+  isPersona,
+  toolsFor,
+  type Persona,
+} from './personas';
 import { AiProviderResolver } from './llm/ai-provider.resolver';
 import { SettingsService } from '../settings/settings.service';
 import { type LlmMessage, type LlmToolResult } from './llm/llm.types';
@@ -18,6 +25,9 @@ export interface ChatRequest {
   prompt: string;
   conversationId?: string;
   userId: string | null;
+  /** Which expert answers. Unknown values fall back rather than 400 — a client
+   *  sending a persona this build does not know should still get an answer. */
+  persona?: string;
 }
 
 @Injectable()
@@ -31,6 +41,7 @@ export class AgentService {
     private readonly providerResolver: AiProviderResolver,
     private readonly tools: AgentToolsService,
     private readonly store: AgentStoreService,
+    private readonly sessions: AiSessionService,
     private readonly db: ReadonlyDbService,
     private readonly settings: SettingsService,
   ) {
@@ -70,13 +81,30 @@ export class AgentService {
       .getAiConfig()
       .then((c) => c.language)
       .catch(() => 'auto');
-    const system = buildSystemPrompt(await this.getTableNames(), aiLanguage);
+    const persona: Persona = isPersona(req.persona)
+      ? req.persona
+      : DEFAULT_PERSONA;
+    const system = buildSystemPrompt(
+      await this.getTableNames(),
+      aiLanguage,
+      persona,
+    );
+    // The model is only OFFERED the tools its persona may use. Filtering here
+    // rather than refusing at dispatch means it never proposes an action it is
+    // not allowed to take, so the user never sees a tool call fail for a reason
+    // that is really a policy decision.
+    const tools = toolsFor(persona, AGENT_TOOL_DEFS);
     const reportIds: string[] = [];
     let stopReason = 'end_turn';
+    // The per-message index, written once at the end of the turn. Collected
+    // alongside the replay array rather than derived from it afterwards,
+    // because usage and tool errors do not survive into the provider blob.
+    const turns: TurnRecord[] = [{ role: 'user', content: req.prompt }];
+    let usedTokens = { input: 0, output: 0 };
 
     for (let i = 0; i < this.maxIterations; i++) {
       const turn = provider.streamTurn(
-        { system, tools: AGENT_TOOL_DEFS, messages },
+        { system, tools, messages },
         signal,
       );
       let next = await turn.next();
@@ -92,6 +120,19 @@ export class AgentService {
         toolCalls: final.toolCalls,
       });
       stopReason = final.stopReason;
+
+      turns.push({
+        role: 'assistant',
+        content: final.text || null,
+        inputTokens: final.usage?.inputTokens ?? null,
+        outputTokens: final.usage?.outputTokens ?? null,
+      });
+      if (final.usage) {
+        usedTokens = {
+          input: usedTokens.input + final.usage.inputTokens,
+          output: usedTokens.output + final.usage.outputTokens,
+        };
+      }
 
       if (final.toolCalls.length === 0) break;
 
@@ -111,15 +152,21 @@ export class AgentService {
           outcome = { result: { error: this.errorMessage(err) } };
         }
 
+        const summary = this.summarize(call.name, outcome.result);
         yield {
           type: 'tool_result_summary',
-          data: {
-            id: call.id,
-            name: call.name,
-            ok: !isError,
-            summary: this.summarize(call.name, outcome.result),
-          },
+          data: { id: call.id, name: call.name, ok: !isError, summary },
         };
+
+        turns.push({
+          role: 'tool',
+          toolName: call.name,
+          toolInput: call.input,
+          // The summary, never outcome.result: a SELECT can return tens of
+          // thousands of rows and this lands in a jsonb column.
+          toolSummary: { summary },
+          error: isError ? this.errorMessage(outcome.result) : null,
+        });
 
         if (outcome.report) {
           reportIds.push(outcome.report.reportId);
@@ -149,11 +196,37 @@ export class AgentService {
     }
 
     await this.persist(convo, messages, req.prompt);
+    await this.indexTurns(convo.id, turns, provider.model, persona);
 
     yield {
       type: 'done',
-      data: { conversationId: convo.id, reportIds, stopReason },
+      data: {
+        conversationId: convo.id,
+        reportIds,
+        stopReason,
+        usage: usedTokens.input || usedTokens.output ? usedTokens : undefined,
+      },
     };
+  }
+
+  /**
+   * Write the message index. Best-effort by design: it is derived data, and a
+   * failure here must not lose the answer the user already read on screen. The
+   * replay blob is saved separately and is what actually matters.
+   */
+  private async indexTurns(
+    conversationId: string,
+    turns: TurnRecord[],
+    model: string,
+    persona: string,
+  ): Promise<void> {
+    try {
+      await this.sessions.append(conversationId, turns, { model, persona });
+    } catch (err) {
+      this.logger.error(
+        `Failed to index conversation turns: ${this.errorMessage(err)}`,
+      );
+    }
   }
 
   private async persist(

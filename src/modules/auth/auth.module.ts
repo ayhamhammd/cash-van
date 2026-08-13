@@ -9,6 +9,7 @@ import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { UsersModule } from '../users/users.module';
 import { RepsModule } from '../reps/reps.module';
+import { DevicesModule } from '../devices/devices.module';
 import { User } from '../users/entities/user.entity';
 
 @Module({
@@ -16,6 +17,7 @@ import { User } from '../users/entities/user.entity';
     TypeOrmModule.forFeature([User]),
     UsersModule,
     RepsModule,
+    DevicesModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],

@@ -19,6 +19,7 @@ import { TransactionKind } from './entities/transaction-kind.entity';
 import { VanStock } from '../products/entities/van-stock.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { ItemUnit } from '../units/entities/item-unit.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { User } from '../users/entities/user.entity';
 import { Rep } from '../reps/entities/rep.entity';
@@ -30,6 +31,7 @@ import {
 import { ListVouchersQueryDto } from './dto/list-vouchers-query.dto';
 import { UserContextService } from '../../common/context/user-context.service';
 import { CustomerProximityService } from '../customers/customer-proximity.service';
+import { CustomersService } from '../customers/customers.service';
 import { OffersService } from '../offers/offers.service';
 import { OffersEngineService } from '../offers/offers-engine.service';
 import { SettingsService } from '../settings/settings.service';
@@ -87,6 +89,12 @@ const VAN_EFFECT: Record<string, 'in' | 'out' | 'reserve'> = {
  * separate IN voucher needed.
  */
 const TRANSFER_KIND = 'TRANSFER';
+
+/**
+ * Voucher kinds that mean a rep physically called on a customer. A transfer or
+ * an adjustment moves stock in a warehouse and is not a visit.
+ */
+const VISIT_KINDS = new Set(['SALE', 'RETURN', 'ORDER']);
 
 /** Voucher-number prefix per kind (SALE → INV …). Fallback: first 3 letters. */
 const VOUCHER_PREFIX: Record<string, string> = {
@@ -147,6 +155,27 @@ const STANDARD_TRANS_KINDS: ReadonlyArray<{
   { transKind: 'PAYMENT_OUT', transName: 'سند صرف', sign: 0 },
 ];
 
+/**
+ * The rep's position at save time, as a pair or not at all.
+ *
+ * A lat with no lng is not a location — storing one half would put a
+ * confident-looking marker on the equator or the meridian. Coordinate RANGES are
+ * already enforced by CreateVoucherDto; this only decides pair-or-nothing.
+ */
+export function saleLocationOf(dto: {
+  repLat?: number | null;
+  repLng?: number | null;
+}): { saleLat: number | null; saleLng: number | null } {
+  const lat = Number(dto.repLat);
+  const lng = Number(dto.repLng);
+  const ok =
+    dto.repLat != null &&
+    dto.repLng != null &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng);
+  return ok ? { saleLat: lat, saleLng: lng } : { saleLat: null, saleLng: null };
+}
+
 @Injectable()
 export class VouchersService implements OnModuleInit {
   constructor(
@@ -157,6 +186,7 @@ export class VouchersService implements OnModuleInit {
     private readonly chequesRepo: Repository<PaymentCheque>,
     private readonly userCtx: UserContextService,
     private readonly proximity: CustomerProximityService,
+    private readonly customersService: CustomersService,
     private readonly events: EventEmitter2,
     private readonly offers: OffersService,
     private readonly offersEngine: OffersEngineService,
@@ -187,7 +217,32 @@ export class VouchersService implements OnModuleInit {
     }
   }
 
+  /**
+   * A SALE or ORDER bound for the ERP must name a customer.
+   *
+   * The ERP's `invoices.customer_id` is NOT NULL and its sales-orders endpoint
+   * rejects a body without one, so a customerless document can NEVER be
+   * exported — it reserves stock, looks saved, and then dies in the outbox hours
+   * later with an error only an operator reading the queue would ever see. Seven
+   * invoices and one order were sitting exactly like that.
+   *
+   * Gated on ERP sync being ON: a site running VanFlow standalone has no such
+   * constraint, and imposing one would be an invented restriction.
+   */
+  private async requireCustomerForErp(dto: CreateVoucherDto): Promise<void> {
+    if (dto.transKind !== 'SALE' && dto.transKind !== 'ORDER') return;
+    if (dto.customerNumber?.trim()) return;
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled) return;
+    throw new BadRequestException(
+      dto.transKind === 'ORDER'
+        ? 'اختر العميل قبل حفظ الطلبية — لا يمكن إنشاء طلبية بدون عميل.'
+        : 'اختر العميل قبل حفظ الفاتورة — لا يمكن ترحيلها إلى ERP بدون عميل.',
+    );
+  }
+
   async create(dto: CreateVoucherDto): Promise<VoucherHeader> {
+    await this.requireCustomerForErp(dto);
     // F10 gate: salesmen need explicit permission for returns, discounts and
     // price overrides — otherwise the client must file an approval request
     // (the approving manager re-runs create() under their own role). Runs BEFORE
@@ -212,6 +267,7 @@ export class VouchersService implements OnModuleInit {
     // their stock moves. MUST run before createUnchecked (was previously dead
     // code after an early return, so offers never applied on posted sales).
     const offerResult = await this.applyOffers(dto);
+    const saleLoc = saleLocationOf(dto);
     const result = await this.createUnchecked(dto);
     await this.recordOfferRedemptions(result, offerResult);
     // AR: immediately reflect a credit voucher on the customer's outstanding debt so the
@@ -219,6 +275,10 @@ export class VouchersService implements OnModuleInit {
     // raises the debt; a credit RETURN (credit note) lowers it. The ERP mirror
     // (pullCustomerBalances) later reconciles total_debt to the authoritative ERP balance.
     await this.applyCreditVoucherToDebt(dto);
+    // Every sale is also a CALL on that customer, so the dashboard and the visit
+    // reports show it. Without this a full selling day reads as zero visits —
+    // customer_visits was only ever written by the app's explicit "log visit".
+    await this.recordSaleVisit(dto, saleLoc);
     // Mirror posted vouchers to the ERP (ErpSync listener filters by kind + enqueues
     // an outbox push; no-op when ERP off). Stock IN/OUT adjustments aren't mirrored.
     if (result.isPosted) {
@@ -591,17 +651,60 @@ export class VouchersService implements OnModuleInit {
         items = await em.getRepository(ItemCart).find({
           where: { itemNumber: In(itemNumbers) },
         });
-        const taxByItem = new Map(items.map((i) => [i.itemNumber, i.taxPercentage]));
+        // An item carries the rate in TWO columns: the legacy `tax_percentage`
+        // (whole percent) and the VanFlow `tax_rate` (fraction, default 0.16).
+        // ERP sync sets NEITHER, so a synced item keeps the entity defaults —
+        // tax_rate 0.16 and tax_percentage 0 — and reading only the legacy column
+        // charged every sale 0% tax. That is what made every report print
+        // subTotal = netTotal: there was no tax content to strip out.
+        // Prefer the legacy column when it is actually set, fall back to the
+        // fraction, and honour EXEMPT over both.
+        const rateOf = (i: ItemCart): string => {
+          if (i.taxType === 'EXEMPT') return '0';
+          const legacy = Number(i.taxPercentage) || 0;
+          if (legacy > 0) return String(legacy);
+          return String((Number(i.taxRate) || 0) * 100);
+        };
+        const taxByItem = new Map(items.map((i) => [i.itemNumber, rateOf(i)]));
         for (const line of dto.transactions) {
           const tax = taxByItem.get(line.itemNumber);
-          if (tax !== undefined && tax !== null) line.taxPercentage = String(tax);
+          if (tax !== undefined) line.taxPercentage = tax;
+        }
+      }
+
+      const settingsView = await this.settings.get().catch(() => null);
+      const taxMode: TaxMode =
+        settingsView?.taxCalcMethod === 'INCLUSIVE' ? 'INCLUSIVE' : 'EXCLUSIVE';
+
+      // ── Customer tax exemption ────────────────────────────────────────────
+      // Resolved ONCE here, from the customer record, then frozen onto the
+      // header. Every voucher for an exempt customer is an exempt voucher: the
+      // rep does not choose it and cannot forget it.
+      //
+      // A RETURN is deliberately NOT re-evaluated against the customer's current
+      // status — it inherits the snapshot of the sale it reverses, so refunding
+      // an exempt invoice stays exempt after the certificate lapses. Without
+      // that, a late return refunds tax that was never charged.
+      const exemption = await this.resolveExemption(em, dto);
+      if (exemption.isTaxExempt) {
+        for (const line of dto.transactions) {
+          const rate = (Number(line.taxPercentage) || 0) / 100;
+          // INCLUSIVE prices CONTAIN the tax, so zeroing the rate alone would
+          // leave the exempt customer paying the taxed price with a 0.000 tax
+          // line — they would gain nothing from the exemption. Strip the tax
+          // content out of the price instead, which is the ERP's
+          // REMOVE_INCLUDED_TAX behaviour (organizations.tax_exempt_inclusive_
+          // price_behavior) and its default. Under EXCLUSIVE the price never
+          // held tax, so the price is untouched and only the rate drops.
+          if (taxMode === 'INCLUSIVE' && rate > 0 && !exemption.inherited) {
+            const gross = Number(line.unitPrice) || 0;
+            line.unitPrice = (gross / (1 + rate)).toFixed(3);
+          }
+          line.taxPercentage = '0';
         }
       }
 
       this.validateLines(dto.transactions);
-      const settingsView = await this.settings.get().catch(() => null);
-      const taxMode: TaxMode =
-        settingsView?.taxCalcMethod === 'INCLUSIVE' ? 'INCLUSIVE' : 'EXCLUSIVE';
 
       // ── Tobacco tax resolution (SALE only, when the master toggle is ON) ──────
       // For a tobacco line, normal GST is BYPASSED (calc runs it at 0%) and the
@@ -651,6 +754,7 @@ export class VouchersService implements OnModuleInit {
       // Per-line results aligned 1:1 with dto.transactions.
       const computed = dto.transactions.map((line, i) => ({ line, res: calc.lines[i] }));
 
+      const saleLoc = saleLocationOf(dto);
       const header = em.getRepository(VoucherHeader).create({
         voucherNumber: dto.voucherNumber,
         transKind: dto.transKind,
@@ -659,6 +763,11 @@ export class VouchersService implements OnModuleInit {
         vendorNumber: dto.vendorNumber ?? null,
         referenceVoucherNumber,
         inDate: dto.inDate ? new Date(dto.inDate) : new Date(),
+        // Where the rep stood when this was saved. Pair-or-nothing; see
+        // saleLocationOf(). Named explicitly rather than spread, because a
+        // spread makes TypeScript pick create()'s array overload.
+        saleLat: saleLoc.saleLat,
+        saleLng: saleLoc.saleLng,
         total: filsToJod(calc.totalNetFils), // net (tax base)
         // totalTax always reports the full tobacco tax content, informationally.
         totalTax: filsToJod(calc.totalTaxFils + tobaccoTaxTotalFils), // GST + tobacco net
@@ -674,6 +783,14 @@ export class VouchersService implements OnModuleInit {
         appliedOfferIds: dto.appliedOfferIds ?? [],
         isPosted: dto.isPosted ?? false,
         isEdit: false,
+        // Frozen here and never recalculated — the document keeps the tax
+        // treatment it was issued under, whatever happens to the certificate.
+        isTaxExempt: exemption.isTaxExempt,
+        taxExemptionSource: exemption.source,
+        taxExemptionNumber: exemption.number,
+        taxExemptionReason: exemption.reason,
+        taxExemptionType: exemption.type,
+        taxExemptionAppliedAt: exemption.isTaxExempt ? new Date() : null,
       });
       await em.getRepository(VoucherHeader).save(header);
 
@@ -687,35 +804,84 @@ export class VouchersService implements OnModuleInit {
         return signCache.get(kind)!;
       };
 
-      // First pass: resolve each line's stock movement (qty in base pieces).
+      // First pass: resolve each line's unit, the pool it moves, and the
+      // movement itself (qty always in base pieces).
       const prepared = [];
       for (const { line, res } of computed) {
         const lineKind = line.transKind ?? dto.transKind;
-        const unitFactor =
-          line.unitBaseQty && line.unitBaseQty > 0 ? line.unitBaseQty : 1;
+        const itemUnit = await this.resolveItemUnit(em, line);
+        // A variant unit owns its own pool; a packaging unit converts into the
+        // item's base pool, which is what '' means.
+        const stockUnitCode = itemUnit?.isStockUnit ? itemUnit.unit?.code ?? '' : '';
+        // The factor is the RESOLVED item_units.qty, never a number the client
+        // chose — unitBaseQty survives only as a fallback for builds that send
+        // no resolvable unit at all.
+        const unitFactor = itemUnit
+          ? Math.max(1, itemUnit.qty)
+          : line.unitBaseQty && line.unitBaseQty > 0
+            ? line.unitBaseQty
+            : 1;
         const qtyOfUnit = Number(line.itemQty);
         const baseQty = qtyOfUnit * unitFactor;
         const sign = await resolveSign(lineKind);
         const move = this.resolveStockMovement(line, baseQty, sign, isTransferVoucher);
-        prepared.push({ line, res, lineKind, unitFactor, qtyOfUnit, baseQty, move });
+        prepared.push({
+          line,
+          res,
+          lineKind,
+          itemUnit,
+          stockUnitCode,
+          unitFactor,
+          qtyOfUnit,
+          baseQty,
+          move,
+        });
       }
 
-      // Don't allow a sale/out/transfer-out to drive a store's stock negative.
-      const need = new Map<string, number>();
-      for (const p of prepared) {
-        if (p.move.fromStoreNumber) {
-          const key = `${p.line.itemNumber}\u0000${p.move.fromStoreNumber}`;
-          need.set(key, (need.get(key) ?? 0) + p.baseQty);
+      // Don't allow a sale/out/transfer-out to drive a POOL negative. Two lines
+      // of the same item in the same unit still aggregate here; two lines in
+      // different units are different goods and are checked apart.
+      const need = new Map<
+        string,
+        {
+          itemNumber: string;
+          stockUnitCode: string;
+          unitLabel: string | null;
+          store: string;
+          qty: number;
         }
+      >();
+      for (const p of prepared) {
+        if (!p.move.fromStoreNumber) continue;
+        const key = `${p.line.itemNumber}\u0000${p.stockUnitCode}\u0000${p.move.fromStoreNumber}`;
+        const acc = need.get(key);
+        if (acc) {
+          acc.qty += p.baseQty;
+          continue;
+        }
+        need.set(key, {
+          itemNumber: p.line.itemNumber,
+          stockUnitCode: p.stockUnitCode,
+          unitLabel: p.itemUnit?.unit?.nameAr || p.itemUnit?.unit?.code || null,
+          store: p.move.fromStoreNumber,
+          qty: p.baseQty,
+        });
       }
-      for (const [key, qty] of need) {
-        const sep = key.indexOf('\u0000');
-        const itemNumber = key.slice(0, sep);
-        const store = key.slice(sep + 1);
-        const available = await this.stockBalance(em, itemNumber, store);
-        if (available < qty) {
+      for (const n of need.values()) {
+        const available = await this.stockBalance(
+          em,
+          n.itemNumber,
+          n.stockUnitCode,
+          n.store,
+        );
+        if (available < n.qty) {
+          // Name the pool when it is not the base one — otherwise "not enough
+          // stock" reads as a lie to a rep staring at a healthy item total.
+          const unit = n.stockUnitCode
+            ? ` (unit ${n.unitLabel ?? n.stockUnitCode})`
+            : '';
           throw new BadRequestException(
-            `Not enough stock of ${itemNumber} in store ${store}: have ${available}, need ${qty}`,
+            `Not enough stock of ${n.itemNumber}${unit} in store ${n.store}: have ${available}, need ${n.qty}`,
           );
         }
       }
@@ -743,6 +909,10 @@ export class VouchersService implements OnModuleInit {
           unitCode: p.line.unitCode ?? null,
           unitName: p.line.unitName ?? null,
           unitBaseQty: p.unitFactor,
+          // The pool this line moves, and the authoritative unit identity behind
+          // it. unitCode above stays a display snapshot and is never the key.
+          stockUnitCode: p.stockUnitCode,
+          itemUnitId: p.itemUnit?.id ?? null,
           signedQty: p.move.signedQty.toString(),
           total: filsToJod(p.res.netFils), // line net (tax base, post-discount)
           // Tobacco line total = discounted net + tobacco NET tax, but ONLY under
@@ -872,7 +1042,11 @@ export class VouchersService implements OnModuleInit {
             .findOne({ where: { itemNumber: line.itemNumber } });
           if (!product) continue;
           const vs = await em.getRepository(VanStock).findOne({
-            where: { repId: rep.id, productId: product.id },
+            where: {
+              repId: rep.id,
+              productId: product.id,
+              stockUnitCode: line.stockUnitCode ?? '',
+            },
           });
           if (!vs) continue;
           const qty = Math.round(Number(line.itemQty) || 0);
@@ -890,6 +1064,45 @@ export class VouchersService implements OnModuleInit {
         relations: { transactions: true, payments: true },
       });
     });
+  }
+
+  /**
+   * Log the customer call behind a voucher.
+   *
+   * Best-effort by design: a voucher is money and a visit is reporting, so a
+   * failure here must never roll back or fail the sale. It is logged and the
+   * next call re-records it.
+   *
+   * Only for kinds that mean a rep stood in front of a customer — a warehouse
+   * transfer or a stock adjustment is not a visit.
+   */
+  private async recordSaleVisit(
+    dto: CreateVoucherDto,
+    saleLoc: { saleLat: number | null; saleLng: number | null },
+  ): Promise<void> {
+    if (!dto.customerNumber) return;
+    if (!VISIT_KINDS.has(dto.transKind)) return;
+    try {
+      const rep = await this.resolveRep(this.dataSource.manager, dto.userCode);
+      if (!rep) return;
+      const customer = await this.dataSource
+        .getRepository(Customer)
+        .findOne({ where: { customerNumber: dto.customerNumber } });
+      if (!customer) return;
+      await this.customersService.recordVisit({
+        customerId: customer.id,
+        repId: rep.id,
+        visitedAt: dto.inDate ? new Date(dto.inDate) : new Date(),
+        // A RETURN still means the rep called; it just did not sell.
+        hadSale: dto.transKind === 'SALE',
+        lat: saleLoc.saleLat,
+        lng: saleLoc.saleLng,
+      });
+    } catch (e) {
+      this.logger.warn(
+        `visit not recorded for ${dto.customerNumber}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   /** Resolve the rep (van owner) behind a voucher's userCode. */
@@ -918,10 +1131,20 @@ export class VouchersService implements OnModuleInit {
     const qty = Math.round(Number(line.itemQty) || 0);
     if (qty <= 0) return;
 
+    // One van row per pool: a variant unit's stock is not the item's stock.
+    const stockUnitCode = line.stockUnitCode ?? '';
     const repo = em.getRepository(VanStock);
     const vs =
-      (await repo.findOne({ where: { repId, productId: product.id } })) ??
-      repo.create({ repId, productId: product.id, quantity: 0, reserved: 0 });
+      (await repo.findOne({
+        where: { repId, productId: product.id, stockUnitCode },
+      })) ??
+      repo.create({
+        repId,
+        productId: product.id,
+        stockUnitCode,
+        quantity: 0,
+        reserved: 0,
+      });
 
     if (effect === 'in') vs.quantity += qty;
     else if (effect === 'out') vs.quantity = Math.max(0, vs.quantity - qty);
@@ -957,6 +1180,7 @@ export class VouchersService implements OnModuleInit {
 
   async list(
     q: ListVouchersQueryDto = {},
+    visibleRepIds: string[] | null = null,
   ): Promise<
     Array<
       VoucherHeader & {
@@ -989,6 +1213,22 @@ export class VouchersService implements OnModuleInit {
       )
       .groupBy('h.id')
       .orderBy('h.in_date', 'DESC');
+
+    // Scope by WHO MADE the voucher, not who the customer belongs to: the
+    // question a supervisor's report answers is "what did my salesmen do",
+    // and a rep can sell to a customer assigned to someone else. The link is
+    // userCode → users.user_number → reps.user_id, since the header carries no
+    // rep id of its own.
+    if (visibleRepIds !== null) {
+      qb.leftJoin('users', 'vu', 'vu.user_number = h.user_code')
+        .leftJoin('reps', 'vrep', 'vrep.user_id = vu.id');
+      if (visibleRepIds.length === 0) {
+        // Scoped to nobody — return nothing rather than everything.
+        qb.andWhere('1 = 0');
+      } else {
+        qb.andWhere('vrep.id IN (:...visibleRepIds)', { visibleRepIds });
+      }
+    }
 
     if (q.transKind) {
       // Accept a single kind or a comma list (SALE,RETURN,ORDER) for the
@@ -1142,17 +1382,161 @@ export class VouchersService implements OnModuleInit {
     );
   }
 
-  /** Current posted stock balance (pieces) for an item in a store. */
+  /**
+   * Decide whether this voucher is tax-exempt, and on what authority.
+   *
+   * Two paths, and they are not the same question:
+   *
+   *   RETURN / credit  → inherit the referenced sale's frozen snapshot. The
+   *                      question is "how was the original taxed", not "is this
+   *                      customer exempt today". A certificate that has since
+   *                      expired must not turn a refund taxable, and one granted
+   *                      since must not make a taxed sale refund untaxed.
+   *   everything else  → the customer record, and only inside its validity
+   *                      window. An expired certificate is not an exemption, and
+   *                      not charging tax on it is the company's liability.
+   */
+  private async resolveExemption(
+    em: EntityManager,
+    dto: CreateVoucherDto,
+  ): Promise<{
+    isTaxExempt: boolean;
+    source: 'CUSTOMER' | 'MANUAL' | 'NONE';
+    number: string | null;
+    reason: string | null;
+    type: string | null;
+    /**
+     * True when the exemption came from a REFERENCED document rather than being
+     * applied fresh. It gates the INCLUSIVE price strip: the reference's line
+     * prices were already stripped when it was issued, and a return echoes them
+     * back, so stripping again would refund 5.202 against a 6.034 sale.
+     */
+    inherited: boolean;
+  }> {
+    const none = {
+      isTaxExempt: false,
+      source: 'NONE' as const,
+      number: null,
+      reason: null,
+      type: null,
+      inherited: false,
+    };
+
+    if (dto.referenceVoucherNumber) {
+      const src = await em.getRepository(VoucherHeader).findOne({
+        where: { voucherNumber: dto.referenceVoucherNumber },
+      });
+      if (src) {
+        return src.isTaxExempt
+          ? {
+              isTaxExempt: true,
+              source:
+                src.taxExemptionSource === 'NONE' ? 'CUSTOMER' : src.taxExemptionSource,
+              number: src.taxExemptionNumber ?? null,
+              reason: src.taxExemptionReason ?? null,
+              type: src.taxExemptionType ?? null,
+              inherited: true,
+            }
+          : none;
+      }
+      // Unknown reference → fall through to the customer rather than guess.
+    }
+
+    if (!dto.customerNumber) return none;
+    const cust = await em
+      .getRepository(Customer)
+      .findOne({ where: { customerNumber: dto.customerNumber } });
+    if (!cust?.isTaxExempt) return none;
+
+    const at = dto.inDate ? new Date(dto.inDate) : new Date();
+    const from = cust.taxExemptionValidFrom;
+    const to = cust.taxExemptionValidTo;
+    if ((from && at < from) || (to && at > to)) return none;
+
+    return {
+      isTaxExempt: true,
+      source: 'CUSTOMER',
+      number: cust.taxExemptionNumber ?? null,
+      reason: cust.taxExemptionReason ?? null,
+      type: cust.taxExemptionType ?? null,
+      inherited: false,
+    };
+  }
+
+  /**
+   * Current posted balance (base pieces) of ONE POOL of an item in a store.
+   * `stockUnitCode` is '' for the item's base pieces, or a variant unit's code.
+   */
   private async stockBalance(
     em: EntityManager,
     itemNumber: string,
+    stockUnitCode: string,
     store: string,
   ): Promise<number> {
     const rows: Array<{ qty: string }> = await em.query(
-      `SELECT COALESCE(qty, 0) AS qty FROM item_balance WHERE item_number = $1 AND stock_number = $2`,
-      [itemNumber, store],
+      `SELECT COALESCE(qty, 0) AS qty FROM item_balance
+        WHERE item_number = $1 AND stock_unit_code = $2 AND stock_number = $3`,
+      [itemNumber, stockUnitCode, store],
     );
     return rows.length ? Number(rows[0].qty) : 0;
+  }
+
+  /**
+   * The `item_units` row a line was entered in, or null for the base pool.
+   *
+   * `itemUnitId` is authoritative. `unitCode` is the legacy path and cannot be
+   * trusted as an identity: it is a free-text snapshot and installed APKs post
+   * the Arabic *display name* in it. So it is matched most-specific-first —
+   * barcode, then the unit's code, then its Arabic name. An item carrying two
+   * same-named units makes that last match meaningless, and a guess there would
+   * silently move the wrong colour's stock, so it is refused instead.
+   */
+  private async resolveItemUnit(
+    em: EntityManager,
+    line: VoucherLineDto,
+  ): Promise<ItemUnit | null> {
+    if (line.itemUnitId) {
+      const iu = await em.getRepository(ItemUnit).findOne({
+        where: { id: line.itemUnitId },
+        relations: { unit: true, item: true },
+      });
+      if (!iu) {
+        throw new NotFoundException(`Item unit ${line.itemUnitId} not found`);
+      }
+      if (iu.item?.itemNumber !== line.itemNumber) {
+        throw new BadRequestException(
+          `Item unit ${line.itemUnitId} belongs to item ${
+            iu.item?.itemNumber ?? 'unknown'
+          }, not ${line.itemNumber}`,
+        );
+      }
+      return iu;
+    }
+
+    const code = line.unitCode?.trim();
+    if (!code) return null;
+    const item = await em
+      .getRepository(ItemCart)
+      .findOne({ where: { itemNumber: line.itemNumber } });
+    if (!item) return null; // unknown item — the other checks surface it
+    const rows = await em.getRepository(ItemUnit).find({
+      where: { itemId: item.id },
+      relations: { unit: true },
+    });
+
+    const byBarcode = rows.find((r) => r.barcode === code);
+    if (byBarcode) return byBarcode;
+    const byCode = rows.find((r) => r.unit?.code === code);
+    if (byCode) return byCode;
+    const byName = rows.filter((r) => r.unit?.nameAr === code);
+    if (byName.length > 1) {
+      throw new BadRequestException(
+        `Unit "${code}" is ambiguous on item ${line.itemNumber} — send itemUnitId`,
+      );
+    }
+    // No match is not an error: the line is base pieces (or an old build's
+    // free-text label), which is exactly what null means.
+    return byName[0] ?? null;
   }
 
   private resolveStockMovement(

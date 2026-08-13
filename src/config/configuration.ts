@@ -49,7 +49,7 @@ export default () => ({
   // slow or distant ERP can be accommodated without a rebuild.
   erp: {
     /** Per-request timeout for every ERP HTTP call. */
-    httpTimeoutMs: parseInt(process.env.ERP_HTTP_TIMEOUT_MS ?? '20000', 10),
+    httpTimeoutMs: parseInt(process.env.ERP_HTTP_TIMEOUT_MS ?? '60000', 10),
   },
   // Self-hosted OpenWA gateway (github.com/rmyndharis/OpenWA) used to send
   // quote links on WhatsApp. Unset baseUrl = outreach falls back to
@@ -114,6 +114,21 @@ export default () => ({
     // Hard ceiling on rows pulled into a generated report file.
     sqlRowLimit: parseInt(process.env.AGENT_SQL_ROW_LIMIT ?? '5000', 10),
     sqlTimeoutMs: parseInt(process.env.AGENT_SQL_TIMEOUT_MS ?? '15000', 10),
+    // ── Python sandbox (SPEC-ai-analyst Phase 4) ─────────────────────────────
+    // OFF by default, and it must stay that way unless a site has both the
+    // memory headroom and an informed view of the docker-socket trade-off
+    // documented in docs/SPEC-ai-python-sandbox.md.
+    python: {
+      enabled: process.env.AI_PYTHON_ENABLED === 'true',
+      image: process.env.AI_PYTHON_IMAGE ?? 'vanflow-pysandbox:latest',
+      timeoutMs: parseInt(process.env.AI_PYTHON_TIMEOUT_MS ?? '30000', 10),
+      memory: process.env.AI_PYTHON_MEMORY ?? '512m',
+      cpus: process.env.AI_PYTHON_CPUS ?? '1',
+      // Rows handed to the script. Large enough for real analysis, small enough
+      // that a runaway query cannot fill the job directory.
+      maxRows: parseInt(process.env.AI_PYTHON_MAX_ROWS ?? '50000', 10),
+      workDir: process.env.AI_PYTHON_WORKDIR ?? '/tmp/vanflow-py',
+    },
   },
   // Dedicated read-only Postgres role the agent uses for model-generated SQL.
   // Host/port/database are inherited from `database.*`; only the login differs.

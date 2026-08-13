@@ -1,16 +1,30 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { VanStock } from './entities/van-stock.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { Unit } from '../units/entities/unit.entity';
+import { ItemUnit } from '../units/entities/item-unit.entity';
 import { VanStockLineDto } from './dto/van-stock.dto';
 
+/**
+ * One (product, stock pool) row of a van. A base-pool row keeps exactly the
+ * shape it always had — `stockUnitCode = ''`, no unit — so an old APK reading
+ * productId/quantity still sees the item's base pieces and nothing else.
+ */
 export interface VanStockRow {
   productId: string;
   sku: string;
   nameAr: string;
+  /** The pool: a variant unit's code, or '' for the item's base pieces. */
+  stockUnitCode: string;
+  /** Arabic label of the variant unit — null on a base-pool row. */
+  unitName: string | null;
+  /** The item_units row behind the pool — null on a base-pool row. */
+  itemUnitId: string | null;
   quantity: number;
   reserved: number;
   reorderQty: number;
@@ -27,6 +41,7 @@ export class VanStockService {
     private readonly reps: Repository<Rep>,
     @InjectRepository(ItemCart)
     private readonly products: Repository<ItemCart>,
+    private readonly events: EventEmitter2,
   ) {}
 
   /**
@@ -54,38 +69,54 @@ export class VanStockService {
     return rows[0]?.wh_number ?? null;
   }
 
-  /** Voucher-derived balance for the van's store, with open-order reservations. */
+  /**
+   * Voucher-derived balance for the van's store, with open-order reservations.
+   * One row per (product, pool): reservations are grouped by pool too, or an
+   * order for 5 red would show as 5 reserved against every colour of the item.
+   */
   private async forStore(store: string): Promise<VanStockRow[]> {
     const rows: Array<{
       product_id: string;
       sku: string;
       name_ar: string;
+      stock_unit_code: string;
+      unit_name: string | null;
+      item_unit_id: string | null;
       reorder_qty: number;
       quantity: number;
       reserved: number;
     }> = await this.stock.manager.query(
-      `SELECT ic.id           AS product_id,
-              ic.sku          AS sku,
-              ic.name_ar      AS name_ar,
-              ic.reorder_qty  AS reorder_qty,
-              b.qty::float8   AS quantity,
+      `SELECT ic.id             AS product_id,
+              ic.sku            AS sku,
+              ic.name_ar        AS name_ar,
+              b.stock_unit_code AS stock_unit_code,
+              u.name_ar         AS unit_name,
+              iu.id             AS item_unit_id,
+              ic.reorder_qty    AS reorder_qty,
+              b.qty::float8     AS quantity,
               COALESCE(o.reserved, 0)::float8 AS reserved
          FROM item_balance b
          JOIN item_cart ic
            ON ic.item_number = b.item_number AND ic.deleted_at IS NULL
+         LEFT JOIN units u
+           ON b.stock_unit_code <> '' AND u.code = b.stock_unit_code
+         LEFT JOIN item_units iu
+           ON iu.item_id = ic.id AND iu.unit_id = u.id
          LEFT JOIN (
-           SELECT vt.item_number, SUM(vt.item_qty::numeric) AS reserved
+           SELECT vt.item_number, vt.stock_unit_code,
+                  SUM(vt.item_qty::numeric) AS reserved
              FROM voucher_transactions vt
              JOIN voucher_headers vh ON vh.voucher_number = vt.voucher_number
             WHERE vh.trans_kind = 'ORDER'
               AND vh.is_posted = true
               AND vh.is_fulfilled = false
               AND COALESCE(vt.store_number, vt.from_store_number) = $1
-            GROUP BY vt.item_number
+            GROUP BY vt.item_number, vt.stock_unit_code
          ) o ON o.item_number = b.item_number
+            AND o.stock_unit_code = b.stock_unit_code
         WHERE b.stock_number = $1
           AND b.qty <> 0
-        ORDER BY ic.name_ar ASC`,
+        ORDER BY ic.name_ar ASC, b.stock_unit_code ASC`,
       [store],
     );
     const now = new Date();
@@ -97,25 +128,34 @@ export class VanStockService {
     const rows = await this.stock
       .createQueryBuilder('vs')
       .innerJoin(ItemCart, 'p', 'p.id = vs.product_id')
+      .leftJoin(Unit, 'u', `vs.stock_unit_code <> '' AND u.code = vs.stock_unit_code`)
+      .leftJoin(ItemUnit, 'iu', 'iu.item_id = p.id AND iu.unit_id = u.id')
       .select([
         'vs.product_id AS product_id',
+        'vs.stock_unit_code AS stock_unit_code',
         'vs.quantity AS quantity',
         'vs.reserved AS reserved',
         'vs.snapshot_at AS snapshot_at',
         'p.sku AS sku',
         'p.name_ar AS name_ar',
         'p.reorder_qty AS reorder_qty',
+        'u.name_ar AS unit_name',
+        'iu.id AS item_unit_id',
       ])
       .where('vs.rep_id = :repId', { repId })
       .orderBy('p.name_ar', 'ASC')
+      .addOrderBy('vs.stock_unit_code', 'ASC')
       .getRawMany<{
         product_id: string;
+        stock_unit_code: string;
         quantity: number;
         reserved: number;
         snapshot_at: Date;
         sku: string;
         name_ar: string;
         reorder_qty: number;
+        unit_name: string | null;
+        item_unit_id: string | null;
       }>();
     return rows.map((r) => this.toRow(r, r.snapshot_at));
   }
@@ -125,6 +165,9 @@ export class VanStockService {
       product_id: string;
       sku: string;
       name_ar: string;
+      stock_unit_code: string;
+      unit_name: string | null;
+      item_unit_id: string | null;
       reorder_qty: number;
       quantity: number;
       reserved: number;
@@ -142,6 +185,9 @@ export class VanStockService {
       productId: r.product_id,
       sku: r.sku,
       nameAr: r.name_ar,
+      stockUnitCode: r.stock_unit_code ?? '',
+      unitName: r.unit_name ?? null,
+      itemUnitId: r.item_unit_id ?? null,
       quantity,
       reserved,
       reorderQty,
@@ -172,8 +218,11 @@ export class VanStockService {
     await this.stock.manager.transaction(async (em) => {
       const repo = em.getRepository(VanStock);
       for (const item of items) {
+        // A load/return names a product and nothing else, so it moves the base
+        // pool. Pinned explicitly: once an item has variant rows, a lookup by
+        // (rep, product) alone would pick an arbitrary colour's row.
         const existing = await repo.findOne({
-          where: { repId, productId: item.productId },
+          where: { repId, productId: item.productId, stockUnitCode: '' },
         });
         const delta = sign * item.quantity;
         if (existing) {
@@ -186,6 +235,7 @@ export class VanStockService {
             repo.create({
               repId,
               productId: item.productId,
+              stockUnitCode: '',
               quantity: Math.max(0, delta),
               loadedAt: sign === 1 ? new Date() : null,
               snapshotAt: new Date(),
@@ -194,6 +244,9 @@ export class VanStockService {
         }
       }
     });
+    // The van's stock moved from OUTSIDE the app — a warehouse load or return
+    // booked in the office. The device has no way to know, so it is told.
+    this.events.emit('stock.changed', { repId, reason: 'van.stock.adjusted' });
     return { updated: items.length };
   }
 

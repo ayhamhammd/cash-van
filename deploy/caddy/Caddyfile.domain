@@ -1,0 +1,99 @@
+# VanFlow - hardened reverse proxy for a client server.
+#
+# THE MODEL: Caddy is the only thing the internet can reach. The three apps bind
+# to 127.0.0.1 on the host (see the docker run in the notes), so nothing can
+# bypass TLS - not from the internet, not from the office LAN.
+#
+# Forward ONLY 80 and 443 on the router. Remove 3000, 3001 and 3100.
+# Port 80 must stay open: Let's Encrypt uses it for the certificate challenge.
+
+{
+	email {$ACME_EMAIL}
+
+	# Do not advertise the version to every scanner that connects.
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+# Headers applied to every site below.
+(security) {
+	header {
+		# Force HTTPS for a year, including subdomains. Once a browser sees
+		# this it refuses to fall back to HTTP even if a link says otherwise.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# Stop the page being framed - defends the admin UIs against
+		# clickjacking, where an invisible frame sits under a decoy button.
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Caddy announces itself by default; a scanner reading this learns
+		# exactly which version to look up exploits for.
+		-Server
+	}
+}
+
+# Office network. EDIT THIS to match the client's LAN before deploying - it is
+# what keeps the accounting system off the public internet.
+(office_only) {
+	@public not remote_ip 192.168.100.0/24 127.0.0.1 ::1
+	respond @public "Not available from this network" 403
+}
+
+# --- ERP: accounting. LAN only. ---------------------------------------------
+# Reachable over HTTPS, but only from the office network. An ERP holds every
+# invoice, price and customer balance; it has no reason to answer a request
+# from the open internet, and a login page that does is a login page that gets
+# brute-forced.
+{$ERP_DOMAIN} {
+	import security
+	import office_only
+	reverse_proxy 127.0.0.1:3000
+	encode gzip
+	log {
+		output file /var/log/caddy/erp.log
+		format json
+	}
+}
+
+# --- Office dashboard: LAN only by default ----------------------------------
+# Remove `import office_only` if staff genuinely work off-site - but prefer a
+# VPN over opening an admin UI to the world.
+{$DASHBOARD_DOMAIN} {
+	import security
+	import office_only
+	reverse_proxy 127.0.0.1:3001
+	encode gzip
+	log {
+		output file /var/log/caddy/dashboard.log
+		format json
+	}
+}
+
+# --- Backend API: public, because the vans are in the field -----------------
+{$API_DOMAIN} {
+	import security
+
+	# The only endpoint worth brute-forcing. Everything else needs a token
+	# this has to issue first.
+	@login path /api/v1/auth/login
+
+	reverse_proxy 127.0.0.1:3100 {
+		# The app sees the van's real IP instead of Caddy's, so its own rate
+		# limiting and audit log record who actually called.
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output file /var/log/caddy/api.log
+		format json
+	}
+}
+
+# Anything hitting the server by IP or an unknown name gets nothing. Without
+# this, Caddy serves the first site defined to any Host header, which quietly
+# exposes the ERP to anyone who requests it by IP.
+:443 {
+	tls internal
+	respond 404
+}

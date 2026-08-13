@@ -2,6 +2,11 @@ import { Controller, Get, Param, Query } from '@nestjs/common';
 import { ApiOkResponse, ApiTags } from '@nestjs/swagger';
 
 import { ArService, type AgingBasis } from './ar.service';
+import { RepScopeService } from '../users/rep-scope.service';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 
 function parseBasis(v?: string): AgingBasis {
   return v === 'invoice' ? 'invoice' : 'due';
@@ -19,25 +24,32 @@ function parseIntOr(v: string | undefined, def: number): number {
 @ApiTags('accounts-receivable')
 @Controller({ path: 'ar', version: '1' })
 export class ArController {
-  constructor(private readonly ar: ArService) {}
+  constructor(
+    private readonly ar: ArService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   /** Org-wide aging roll-up (one row per customer with an open balance). */
   @Get('aging')
   @ApiOkResponse({ description: 'Per-customer aging rows + org summary' })
-  orgAging(
+  async orgAging(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('basis') basis?: string,
     @Query('asOf') asOf?: string,
     @Query('warehouseCode') warehouseCode?: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
-    return this.ar.orgAging({
-      basis: parseBasis(basis),
-      asOf,
-      warehouseCode,
-      page: parseIntOr(page, 1),
-      pageSize: Math.min(200, parseIntOr(pageSize, 50)),
-    });
+    return this.ar.orgAging(
+      {
+        basis: parseBasis(basis),
+        asOf,
+        warehouseCode,
+        page: parseIntOr(page, 1),
+        pageSize: Math.min(200, parseIntOr(pageSize, 50)),
+      },
+      await this.repScope.visibleRepIds(user),
+    );
   }
 
   /**
@@ -46,19 +58,26 @@ export class ArController {
    */
   @Get('receivables')
   @ApiOkResponse({ description: 'Unpaid credit vouchers per customer' })
-  receivables(
+  async receivables(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('customerNumber') customerNumber?: string,
   ) {
-    return this.ar.receivables({ from, to, customerNumber });
+    return this.ar.receivables(
+      { from, to, customerNumber },
+      await this.repScope.visibleRepIds(user),
+    );
   }
 
   /** Arrears + monthly-collection widget (month = YYYY-MM, default current). */
   @Get('arrears-summary')
   @ApiOkResponse({ description: 'Monthly credit-sold vs collected + arrears list' })
-  arrearsSummary(@Query('month') month?: string) {
-    return this.ar.arrearsSummary(month);
+  async arrearsSummary(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('month') month?: string,
+  ) {
+    return this.ar.arrearsSummary(month, await this.repScope.visibleRepIds(user));
   }
 
   /** Single-customer aging (due/invoice basis). */

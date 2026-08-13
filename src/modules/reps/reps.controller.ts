@@ -26,6 +26,7 @@ import { RepsService } from './reps.service';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
+import { ActivateRepDto } from './dto/activate-rep.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
@@ -33,13 +34,17 @@ import {
   CurrentUser,
   AuthenticatedUser,
 } from '../../common/decorators/current-user.decorator';
+import { RepScopeService } from '../users/rep-scope.service';
 
 @ApiTags('reps')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'reps', version: '1' })
 export class RepsController {
-  constructor(private readonly reps: RepsService) {}
+  constructor(
+    private readonly reps: RepsService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -47,8 +52,8 @@ export class RepsController {
     description: 'List sales reps with optional filters and pagination.',
   })
   @ApiOkResponse({ description: 'Paginated rep list' })
-  list(@Query() query: ListRepsQuery) {
-    return this.reps.list(query);
+  async list(@Query() query: ListRepsQuery, @CurrentUser() user: AuthenticatedUser) {
+    return this.reps.list(query, await this.repScope.visibleRepIds(user));
   }
 
   @Get('me')
@@ -76,7 +81,11 @@ export class RepsController {
   @ApiOperation({ summary: 'Get rep', description: 'Fetch a single rep by id.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiOkResponse({ description: 'The rep' })
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.repScope.assertCanSeeRep(user, id);
     return this.reps.findOne(id);
   }
 
@@ -87,7 +96,11 @@ export class RepsController {
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
   @ApiOkResponse({ description: 'KPI snapshot' })
-  kpis(@Param('id', ParseUUIDPipe) id: string) {
+  async kpis(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.repScope.assertCanSeeRep(user, id);
     return this.reps.kpis(id);
   }
 
@@ -118,6 +131,23 @@ export class RepsController {
   @ApiOkResponse({ description: 'Updated rep' })
   update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateRepDto) {
     return this.reps.update(id, dto);
+  }
+
+
+  @Post(':id/activate')
+  @ApiOperation({
+    summary: 'Activate a frozen salesman',
+    description:
+      'Unfreeze a salesman with the activation key issued for their code. Idempotent — activating an already-active salesman succeeds and changes nothing.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
+  @ApiOkResponse({ description: 'The activated salesman' })
+  activate(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ActivateRepDto,
+    @CurrentUser('sub') actorId: string,
+  ) {
+    return this.reps.activate(id, dto.key, actorId ?? null);
   }
 
   @Delete(':id')

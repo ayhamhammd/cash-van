@@ -57,4 +57,23 @@ export class Rep extends BaseEntity {
   /** Snapshot of the ERP account code · name for display and journal memos. */
   @Column({ name: 'erp_account_code', type: 'text', nullable: true })
   erpAccountCode?: string | null;
+
+  /**
+   * Seat licensing: a frozen salesman exists but cannot sign in until an
+   * activation key is entered for them.
+   *
+   * Defaults FALSE so every salesman that predates the feature — and every
+   * salesman at a client who never turns it on — is unaffected. Only newly
+   * provisioned reps are frozen, and only while
+   * `app_settings.salesmanActivationEnabled` is on.
+   */
+  @Column({ name: 'is_frozen', type: 'boolean', default: false })
+  isFrozen!: boolean;
+
+  @Column({ name: 'activated_at', type: 'timestamptz', nullable: true })
+  activatedAt?: Date | null;
+
+  /** Dashboard user who entered the key. */
+  @Column({ name: 'activated_by', type: 'uuid', nullable: true })
+  activatedBy?: string | null;
 }

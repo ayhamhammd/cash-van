@@ -13,7 +13,11 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
+import { RepScopeService } from '../users/rep-scope.service';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { TargetsService } from './targets.service';
@@ -24,7 +28,10 @@ import { UpsertTargetDto } from './dto/upsert-target.dto';
 @UseGuards(RolesGuard)
 @Controller({ path: 'targets', version: '1' })
 export class TargetsController {
-  constructor(private readonly targets: TargetsService) {}
+  constructor(
+    private readonly targets: TargetsService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Get('me')
   @ApiOperation({
@@ -71,11 +78,12 @@ export class TargetsController {
     description: 'Every active salesman with their target for the month plus actual sale amount/qty and progress.',
   })
   @ApiOkResponse({ description: 'Target rows' })
-  list(
+  async list(
     @Query('year', ParseIntPipe) year: number,
     @Query('month', ParseIntPipe) month: number,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.targets.list(year, month);
+    return this.targets.list(year, month, await this.repScope.visibleRepIds(user));
   }
 
   @Post()

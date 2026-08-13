@@ -1,8 +1,9 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
@@ -23,6 +24,7 @@ import { SettingsService } from '../settings/settings.service';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { ErpHttpClient } from './erp-http.client';
 import { ErpOutboxService } from './erp-outbox.service';
+import { ErpOutbox } from './entities/erp-outbox.entity';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
 import { ErpOutboxKind } from './entities/erp-outbox.entity';
@@ -150,6 +152,13 @@ interface ErpCustomer {
   priceListId?: string | null;
   priceListName?: string | null;
   allowManualPriceEdit?: boolean | null;
+  // Tax exemption, mirrored onto our customer and frozen onto their vouchers.
+  isTaxExempt?: boolean | null;
+  taxExemptionType?: string | null;      // FULL_EXEMPTION | VAT_EXEMPTION | SPECIAL_APPROVAL
+  taxExemptionNumber?: string | null;
+  taxExemptionReason?: string | null;
+  taxExemptionValidFrom?: string | null; // ISO
+  taxExemptionValidTo?: string | null;   // ISO
 }
 
 /** A per-customer aging row from the ERP `GET /api/v1/ar/aging`. */
@@ -207,6 +216,23 @@ export interface SyncEntityResult {
   error?: string;
 }
 
+/**
+ * Where one ERP SKU's stock lands in cash-van: an item, and a POOL inside it.
+ *
+ * The ERP keys stock by `(sku_id, warehouse_id)`; cash-van keys it by
+ * `(item_number, stock_unit_code, store_number)`. This is the translation
+ * between them (docs/SPEC-per-unit-stock.md §5.1).
+ */
+interface StockTarget {
+  itemNumber: string;
+  /** The `item_units` row the SKU is, or null when it IS the base item. */
+  itemUnitId: string | null;
+  /** '' = the item's base pool; anything else is a variant's own pool. */
+  stockUnitCode: string;
+  /** Pieces per unit of the resolved unit (1 for the base SKU and every variant). */
+  unitBaseQty: number;
+}
+
 @Injectable()
 export class ErpSyncService {
   private readonly logger = new Logger(ErpSyncService.name);
@@ -235,6 +261,8 @@ export class ErpSyncService {
     @InjectRepository(ErpSyncCursor) private readonly cursors: Repository<ErpSyncCursor>,
     private readonly vouchers: VouchersService,
     private readonly outbox: ErpOutboxService,
+    @InjectRepository(ErpOutbox) private readonly outboxRepo: Repository<ErpOutbox>,
+    private readonly events: EventEmitter2,
   ) {}
 
   /** Queue a posted cash-van voucher for push to the ERP, by kind. */
@@ -431,9 +459,21 @@ export class ErpSyncService {
       method: string;
       collectedAt: Date;
     }>;
+    /**
+     * Customers created in the van or the dashboard that have not reached the
+     * ERP — queued because it was unreachable or rejected them. Surfaced here so
+     * an unexported customer is visible instead of silently missing.
+     */
+    customers: Array<{
+      customerNumber: string;
+      name: string;
+      status: string;
+      attempts: number;
+      error: string | null;
+    }>;
   }> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
-    if (!cfg?.enabled) return { vouchers: [], collections: [] };
+    if (!cfg?.enabled) return { vouchers: [], collections: [], customers: [] };
 
     const kinds = Object.keys(OUTBOX_KIND_BY_TRANS);
     const vouchers = await this.headers
@@ -456,6 +496,27 @@ export class ErpSyncService {
       .take(500)
       .getMany();
 
+    // Customers that never reached the ERP. Unlike vouchers and collections —
+    // which are found by their ABSENCE from the outbox — a customer is queued at
+    // the moment the push fails, so the pending ones are the outbox rows that
+    // have not posted yet.
+    const pendingCustomers = await this.outboxRepo.find({
+      where: [
+        { kind: 'CUSTOMER', status: 'pending' },
+        { kind: 'CUSTOMER', status: 'failed' },
+        { kind: 'CUSTOMER', status: 'dead_letter' },
+      ],
+      order: { createdAt: 'DESC' },
+      take: 500,
+    });
+    const customerNameByNumber = new Map(
+      (
+        await this.customers.find({
+          where: { customerNumber: In(pendingCustomers.map((r) => r.ref)) },
+        })
+      ).map((c) => [c.customerNumber, c.nameAr || c.customerName || c.customerNumber]),
+    );
+
     return {
       vouchers: vouchers.map((v) => ({
         voucherNumber: v.voucherNumber,
@@ -471,6 +532,13 @@ export class ErpSyncService {
         amount: c.amount,
         method: c.method,
         collectedAt: c.collectedAt,
+      })),
+      customers: pendingCustomers.map((r) => ({
+        customerNumber: r.ref,
+        name: customerNameByNumber.get(r.ref) ?? r.ref,
+        status: r.status,
+        attempts: r.attempts,
+        error: r.error ?? null,
       })),
     };
   }
@@ -501,7 +569,11 @@ export class ErpSyncService {
   }
 
   /** Queue ALL pending vouchers + collections for export. */
-  async exportAllPending(): Promise<{ vouchers: number; collections: number }> {
+  async exportAllPending(): Promise<{
+    vouchers: number;
+    collections: number;
+    customers: number;
+  }> {
     const pending = await this.listPendingExports();
     for (const v of pending.vouchers) {
       const kind = OUTBOX_KIND_BY_TRANS[v.transKind];
@@ -510,7 +582,16 @@ export class ErpSyncService {
     for (const c of pending.collections) {
       await this.outbox.enqueue('PAYMENT', c.id);
     }
-    return { vouchers: pending.vouchers.length, collections: pending.collections.length };
+    // Customers are ALREADY queued — pushCustomer enqueues them the moment the
+    // ERP refuses or is unreachable. They need draining, not re-enqueuing. Run
+    // it here so the dashboard button exports them now instead of leaving the
+    // user to wait for the next scheduled drain.
+    await this.outbox.drain().catch(() => undefined);
+    return {
+      vouchers: pending.vouchers.length,
+      collections: pending.collections.length,
+      customers: pending.customers.length,
+    };
   }
 
   /** Mirror cash-van company name + tax mode into the ERP org settings. */
@@ -591,10 +672,19 @@ export class ErpSyncService {
         const erpId = (res.data as { data?: { id?: string } } | null)?.data?.id ?? code;
         await this.upsertIdMap('customer', erpId, code, code);
       } else {
-        this.logger.warn(`pushCustomer ${code} rejected: ${res.error}`);
+        // Rejected (validation, auth, 5xx) — queue it. The push used to stop
+        // here with a log line nobody reads, and the customer was never exported.
+        this.logger.warn(`pushCustomer ${code} rejected, queued: ${res.error}`);
+        await this.outbox.enqueue('CUSTOMER', code);
       }
     } catch (e) {
-      this.logger.warn(`pushCustomer ${code} failed: ${e instanceof Error ? e.message : e}`);
+      // The ERP is unreachable — the case this exists for. The customer is
+      // already saved locally; queue the export so it leaves as soon as the ERP
+      // is back, either on the next drain or from the dashboard's Export button.
+      this.logger.warn(
+        `pushCustomer ${code} failed, queued: ${e instanceof Error ? e.message : e}`,
+      );
+      await this.outbox.enqueue('CUSTOMER', code);
     }
   }
 
@@ -875,6 +965,20 @@ export class ErpSyncService {
         cust.erpPriceListId = c.priceListId ?? null;
         cust.erpPriceListName = c.priceListName ?? null;
         cust.allowManualPriceEdit = c.allowManualPriceEdit ?? true;
+        // Tax exemption. Written on every pull, not just on insert — the whole
+        // point is that granting or revoking it in the ERP reaches the van and
+        // the phone on the next sync. Assigned unconditionally (not `if (x)`)
+        // so REVOKING an exemption actually clears it here.
+        cust.isTaxExempt = Boolean(c.isTaxExempt);
+        cust.taxExemptionType = c.taxExemptionType ?? null;
+        cust.taxExemptionNumber = c.taxExemptionNumber ?? null;
+        cust.taxExemptionReason = c.taxExemptionReason ?? null;
+        cust.taxExemptionValidFrom = c.taxExemptionValidFrom
+          ? new Date(c.taxExemptionValidFrom)
+          : null;
+        cust.taxExemptionValidTo = c.taxExemptionValidTo
+          ? new Date(c.taxExemptionValidTo)
+          : null;
         await this.customers.save(cust);
         await this.upsertIdMap('customer', String(c.id), c.code ?? null, cust.customerNumber);
       }
@@ -891,6 +995,12 @@ export class ErpSyncService {
       this.logger.warn(
         `AR balance mirror skipped: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+    // An ERP pull can touch any rep's customers, and the batch does not track
+    // which. Signal with no repId so every van re-pulls, rather than guessing
+    // and leaving one holding stale credit limits or prices.
+    if (processed > 0) {
+      this.events.emit('customer.changed', { reason: 'erp.customers.pulled' });
     }
     return processed;
   }
@@ -1255,8 +1365,22 @@ export class ErpSyncService {
         if (ts && (!maxTs || ts > maxTs)) maxTs = ts;
         const seen = await this.idmap.findOne({ where: { entity: 'movement', erpId: mv.id } });
         if (seen) continue;
-        await this.mirrorMovement(mv, store);
-        n += 1;
+        try {
+          await this.mirrorMovement(mv, store);
+          n += 1;
+        } catch (err) {
+          // One unmirrorable movement must NOT stop the other 65. Before this,
+          // a single bad row aborted the store's batch, the cursor never
+          // advanced, and every later sync retried the same row and failed the
+          // same way — so no stock EVER reached cash-van. Log it, skip it, and
+          // let the rest through. The usual cause is a movement whose SKU has
+          // no matching item_cart row, which is a catalogue problem the sync
+          // cannot fix by retrying.
+          this.logger.warn(
+            `Skipped ERP movement ${mv.id} (${mv.skuCode ?? 'no sku'}) for store ` +
+              `${store}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
       if (data.length < 200) break;
       page += 1;
@@ -1268,6 +1392,56 @@ export class ErpSyncService {
       await this.cursors.save(c);
     }
     return n;
+  }
+
+  /**
+   * ERP SKU code → the cash-van POOL its stock belongs to.
+   *
+   * The variant's own unit comes first: `item_units.erp_sku_code` (written by
+   * upsertProductItem) is the only thing that can tell أحمر from أزرق. Both
+   * resolve to the same item through every other route, and dropping them into
+   * the same pool is precisely the bug this spec exists to fix.
+   *
+   * Then the direct hit — the SKU that became the item itself — and finally the
+   * id-map, which carries a row per unit-SKU pointing at the grouped item. That
+   * last one is the fallback for a SKU whose unit has not been re-synced yet: it
+   * lands in the base pool, which is exactly today's behaviour.
+   */
+  private async resolveStockTarget(skuCode: string | null): Promise<StockTarget | null> {
+    if (!skuCode) return null;
+    const iu = await this.itemUnits.findOne({
+      where: { erpSkuCode: skuCode },
+      relations: { unit: true, item: true },
+    });
+    if (iu?.item?.itemNumber) {
+      return {
+        itemNumber: iu.item.itemNumber,
+        itemUnitId: iu.id,
+        // A packaging unit converts into the item's base pool; only a variant
+        // owns one of its own.
+        stockUnitCode: iu.isStockUnit ? iu.unit?.code ?? '' : '',
+        unitBaseQty: Math.max(1, iu.qty),
+      };
+    }
+    const direct = await this.items.findOne({ where: { itemNumber: skuCode } });
+    if (direct) {
+      return {
+        itemNumber: direct.itemNumber,
+        itemUnitId: null,
+        stockUnitCode: '',
+        unitBaseQty: 1,
+      };
+    }
+    const mapped = await this.idmap.findOne({
+      where: { entity: 'item', erpCode: skuCode },
+    });
+    if (!mapped?.localId) return null;
+    return {
+      itemNumber: mapped.localId,
+      itemUnitId: null,
+      stockUnitCode: '',
+      unitBaseQty: 1,
+    };
   }
 
   /** ERP movement `type` (+ sign) → cash-van voucher kind, preserving the kind. */
@@ -1282,7 +1456,16 @@ export class ErpSyncService {
     return qty > 0 ? 'IN' : 'OUT';
   }
 
-  /** Create a real, stock-affecting cash-van voucher mirroring one ERP movement. */
+  /**
+   * Create a real, stock-affecting cash-van voucher mirroring one ERP movement.
+   *
+   * ALL THREE WRITES IN ONE TRANSACTION. They were separate, and the failure
+   * mode was nasty: the header saved, the line failed its item_cart foreign key,
+   * and the id-map that marks the movement as done never ran. That left an
+   * orphan voucher with no lines, so the next sync retried the same movement,
+   * collided on uq_voucher_headers_voucher_number, and wedged the batch
+   * permanently. A partial mirror must roll back to nothing.
+   */
   private async mirrorMovement(mv: ErpMovement, store: string): Promise<void> {
     const qty = Number(mv.quantityChanged) || 0;
     if (qty === 0) return; // cost-only / no stock effect
@@ -1290,7 +1473,23 @@ export class ErpSyncService {
     const abs = Math.abs(qty);
     const kind = this.classifyKind(mv.type, qty);
     const voucherNumber = `ERP-MV-${mv.id}`;
-    const item = await this.items.findOne({ where: { itemNumber: mv.skuCode } });
+
+    // A movement names a SKU; cash-van groups every SKU of a product onto ONE
+    // item with a pool per variant. So the SKU code is neither an item number
+    // nor, on its own, enough — resolve it to the pool it moves. Reading
+    // mv.skuCode as an item number worked only for whichever SKU happened to be
+    // the base, and every other unit's movement died on the item_cart foreign
+    // key; resolving only as far as the item made all six colours share one
+    // pool, which is just as unusable to a rep picking a colour.
+    const target = await this.resolveStockTarget(mv.skuCode);
+    if (!target) {
+      throw new Error(
+        `No cash-van item for ERP SKU "${mv.skuCode ?? '(none)'}" — ` +
+          'the item catalogue has not synced this product yet.',
+      );
+    }
+    const itemNumber = target.itemNumber;
+    const item = await this.items.findOne({ where: { itemNumber } });
 
     const header = this.headers.create({
       voucherNumber,
@@ -1306,21 +1505,29 @@ export class ErpSyncService {
       isPosted: true,
       isEdit: false,
     });
-    await this.headers.save(header);
-
     // from/to stores drive the item_balance view — set the van's side by sign.
     const txn = this.txns.create({
       voucherNumber,
-      itemNumber: mv.skuCode,
-      itemName: item?.name ?? mv.skuCode,
+      itemNumber,
+      itemName: item?.name ?? itemNumber,
       transKind: kind,
       storeNumber: store,
       fromStoreNumber: into ? null : store,
       toStoreNumber: into ? store : null,
       itemQty: String(abs),
       unitPrice: '0',
-      qtyOfUnit: String(abs),
-      unitBaseQty: 1,
+      // The ERP ledger is ALREADY in base pieces — a packaging line is
+      // multiplied into them at posting (purchasing/actions.ts, receivePO) — so
+      // item_qty stays `abs` and qty_of_unit is what those pieces are in the
+      // resolved unit, keeping the entity's invariant
+      // item_qty = qty_of_unit × unit_base_qty. For a variant the factor is 1
+      // and all three are the same number.
+      qtyOfUnit: String(abs / target.unitBaseQty),
+      unitBaseQty: target.unitBaseQty,
+      // The pool this movement lands in. Without it every colour's stock piled
+      // into the item's base pool and the six colours were indistinguishable.
+      stockUnitCode: target.stockUnitCode,
+      itemUnitId: target.itemUnitId,
       signedQty: String(into ? abs : -abs),
       taxPercentage: '0',
       discountPercentage: '0',
@@ -1328,8 +1535,18 @@ export class ErpSyncService {
       total: '0',
       netTotal: '0',
     });
-    await this.txns.save(txn);
-    await this.upsertIdMap('movement', mv.id, mv.skuCode, voucherNumber);
+    await this.dataSource.transaction(async (em) => {
+      await em.getRepository(VoucherHeader).save(header);
+      await em.getRepository(VoucherTransaction).save(txn);
+      await em.getRepository(ErpIdMap).save(
+        em.getRepository(ErpIdMap).create({
+          entity: 'movement',
+          erpId: mv.id,
+          erpCode: mv.skuCode ?? null,
+          localId: voucherNumber,
+        }),
+      );
+    });
   }
 
   private async runEntity(
@@ -1356,6 +1573,11 @@ export class ErpSyncService {
    */
   private async pullWarehouses(): Promise<number> {
     const { data } = await this.erp.list<ErpWarehouse>('warehouses', { page: 1, pageSize: 200 });
+    // Read once per pull, not per salesman: the answer cannot change mid-batch,
+    // and a settings failure must not lock anyone out, so it defaults to false.
+    const activationOn = await this.settings
+      .salesmanActivationEnabled()
+      .catch(() => false);
     let n = 0;
     for (const w of data) {
       if (!w.code) continue; // only warehouses with an external code are syncable
@@ -1376,7 +1598,14 @@ export class ErpSyncService {
         });
         if (!existing) {
           await this.dataSource.transaction((em) =>
-            provisionRep(em, { code: w.code!, nameAr: w.name ?? w.code! }),
+            // Licensing: a salesman arriving FROM the ERP is frozen on the same
+            // terms as one created in the dashboard, or the lock would be
+            // trivially bypassed by adding the salesman in the ERP instead.
+            provisionRep(em, {
+              code: w.code!,
+              nameAr: w.name ?? w.code!,
+              frozen: activationOn,
+            }),
           );
         }
       }
@@ -1495,12 +1724,21 @@ export class ErpSyncService {
       await this.upsertIdMap('item', String(s.id), s.sku, itemNumber);
     }
 
-    // Mirror the larger units (multiplier > 1) into item_units.
+    // Mirror EVERY non-base unit into item_units — larger packs (طرد, multiplier
+    // 24) and same-size units alike.
+    //
+    // Same-size units used to be dropped on the assumption that multiplier 1
+    // means "identical to the base, nothing to convert". That is true of the
+    // arithmetic and false of the business: a unit is also how the ERP models a
+    // VARIANT — a colour, a flavour, a scent — all of which are the same size
+    // and all of which a salesman has to be able to pick in the field. Skipping
+    // them meant six colours collapsed into one item and the rep sold an
+    // arbitrary one.
     for (const s of skus) {
       if (s === base) continue;
       const mult = Math.max(1, Math.round(Number(s.unitMultiplier) || 1));
       const unitName = (s.unitLabel || s.label || '').trim();
-      if (!unitName || mult <= 1) continue; // base / unnamed units have no extra row
+      if (!unitName) continue; // unnamed units have nothing to show or match on
       // A larger-unit SKU that previously came through as its own item_cart row
       // (before grouping) is now an item_unit — drop the stale item if present.
       if (s.sku !== itemNumber) {
@@ -1514,6 +1752,21 @@ export class ErpSyncService {
       iu.barcode = s.barcode || s.sku; // item_units.barcode is required + unique
       iu.qty = mult;
       iu.salePrice = (Number(s.sellingPrice) || 0).toFixed(2); // JOD major
+      // Both of these are written on UPDATE as well as INSERT, and that is what
+      // migrates an install that already ran: its colour units exist, so this
+      // loop finds them and an insert-only write would never touch them again.
+      // They carry no SKU and `is_stock_unit = false` (the migration's
+      // behaviour-preserving default), i.e. they still all share the item's base
+      // pool. Re-writing on every sync is what flips those 66 rows onto their
+      // own pools — no backfill script, no manual step, just the next sync.
+      iu.erpSkuCode = s.sku;
+      // A same-size sibling SKU is how the ERP spells a VARIANT — a colour, a
+      // flavour, a scent: a different good with its own stock. A pack (mult > 1)
+      // is a way to ENTER a quantity of the same goods and keeps drawing from
+      // the item's base pool, so it stays a packaging unit. Flipping a client's
+      // كرتونة ×12 to its own pool would zero it on upgrade and fail their next
+      // sale (spec §2.3).
+      iu.isStockUnit = mult === 1;
       await this.itemUnits.save(iu);
     }
   }

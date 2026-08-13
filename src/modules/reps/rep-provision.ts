@@ -22,6 +22,13 @@ export interface ProvisionRepInput {
   dailyQuotaFils?: number | null;
   erpAccountId?: string | null;
   erpAccountCode?: string | null;
+  /**
+   * Start this salesman frozen — they exist and can be seen, but cannot sign in
+   * until a key is entered. Set by the caller from the installation's
+   * `salesmanActivationEnabled` flag, so a client who never turns licensing on
+   * provisions exactly as before.
+   */
+  frozen?: boolean;
 }
 
 /**
@@ -83,6 +90,9 @@ export async function provisionRep(
     dailyQuotaFils: input.dailyQuotaFils ?? null,
     erpAccountId: input.erpAccountId ?? null,
     erpAccountCode: input.erpAccountCode ?? null,
+    // Defaults to unfrozen: a caller that knows nothing about licensing must
+    // never accidentally lock a salesman out.
+    isFrozen: input.frozen ?? false,
     vanId: store.id,
     userId,
   });

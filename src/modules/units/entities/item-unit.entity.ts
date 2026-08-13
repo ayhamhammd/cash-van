@@ -59,6 +59,20 @@ export class ItemUnit {
   })
   salePrice!: string;
 
+  /**
+   * True when this unit is a *variant* — a physically different good (أحمر) that
+   * owns its own stock pool. False (the default, and every pre-existing row) is
+   * a *packaging* unit (كرتونة ×12): a way to enter a quantity of the same
+   * goods, drawing from the item's base pool at `qty` pieces each.
+   */
+  @Column({ name: 'is_stock_unit', type: 'boolean', default: false })
+  isStockUnit!: boolean;
+
+  /** The ERP `product_skus.sku` this unit mirrors, so a sale can post against it. */
+  @Index('idx_item_units_erp_sku', { where: '"erp_sku_code" IS NOT NULL' })
+  @Column({ name: 'erp_sku_code', type: 'text', nullable: true })
+  erpSkuCode?: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

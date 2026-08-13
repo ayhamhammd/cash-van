@@ -9,6 +9,7 @@ import {
 
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
+import { LogoutDto } from './dto/logout.dto';
 import { Public } from '../../common/decorators/public.decorator';
 import { SkipAudit } from '../../common/decorators/skip-audit.decorator';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
@@ -53,11 +54,24 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Log out',
-    description: 'Clears the httpOnly access-token cookie. Safe to call without a valid session.',
+    description:
+      'Clears the httpOnly access-token cookie. Safe to call without a valid ' +
+      'session. A mobile client may pass `deviceId` to mark its session ' +
+      'closed — this deliberately does NOT release the device binding or ' +
+      'revoke the tracking token, so the handset keeps reporting its ' +
+      'position after the salesman signs out. Only the office releasing the ' +
+      'device stops that.',
   })
   @ApiOkResponse({ description: 'Cookie cleared' })
-  logout(@Res({ passthrough: true }) res: Response) {
+  async logout(
+    @Res({ passthrough: true }) res: Response,
+    @Body() dto: LogoutDto,
+  ) {
     res.clearCookie(ACCESS_TOKEN_COOKIE, { path: '/' });
+    // Public route, so there is no authenticated user to check against. That is
+    // acceptable here because the only effect is clearing `session_jti`, a
+    // bookkeeping flag the office reads; it grants nothing and revokes nothing.
+    if (dto?.deviceId) await this.authService.closeDeviceSession(dto.deviceId);
     return { ok: true };
   }
 

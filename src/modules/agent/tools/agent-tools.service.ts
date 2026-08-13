@@ -6,6 +6,10 @@ import { ReportRendererService } from '../reports/report-renderer.service';
 import { AgentStoreService } from '../store/agent-store.service';
 import { InvalidSqlError, SqlValidator } from '../sql/sql-validator';
 import {
+  PythonSandboxService,
+  SandboxDisabledError,
+} from './python-sandbox.service';
+import {
   REPORT_FORMATS,
   type QueryResult,
   type ReportFormat,
@@ -29,6 +33,11 @@ const SYSTEM_TABLES = new Set([
   'typeorm_metadata',
   'agent_conversations',
   'agent_reports',
+  // The assistant's own plumbing. Exposing it invites the model to reason about
+  // its own transcript, and ai_messages holds tool output it would then quote
+  // back as if it were business data.
+  'ai_messages',
+  'ai_checks',
 ]);
 
 @Injectable()
@@ -44,6 +53,7 @@ export class AgentToolsService {
     private readonly validator: SqlValidator,
     private readonly renderer: ReportRendererService,
     private readonly store: AgentStoreService,
+    private readonly python: PythonSandboxService,
   ) {
     this.previewRows = this.config.get<number>('agent.sqlPreviewRows', 50);
     this.rowLimit = this.config.get<number>('agent.sqlRowLimit', 5000);
@@ -62,6 +72,12 @@ export class AgentToolsService {
         return { result: await this.runSql(input) };
       case 'generate_report':
         return this.generateReport(input, ctx);
+      case 'run_checks':
+        return { result: await this.runChecks() };
+      case 'get_geo':
+        return { result: await this.getGeo(input) };
+      case 'run_python':
+        return this.runPython(input, ctx);
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -191,6 +207,226 @@ export class AgentToolsService {
         previewRows: res.rows.slice(0, 5),
       },
     };
+  }
+
+  // --- run_checks (auditor) ------------------------------------------------
+
+  /**
+   * Run the enabled rows of the reviewed check battery.
+   *
+   * The model does NOT write these queries. A model asked to "find problems"
+   * invents them; given a fixed battery it can only explain and rank what the
+   * SQL actually returned. Each check is stored in ai_checks so an admin can
+   * disable one without a deploy — and so a check that starts throwing can be
+   * switched off without taking the whole auditor down with it.
+   */
+  private async runChecks(): Promise<unknown> {
+    const defs = await this.db.runSelect(
+      `SELECT key, title_ar, title_en, sql, severity
+         FROM ai_checks
+        WHERE enabled = true
+        ORDER BY CASE severity
+                   WHEN 'critical' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, key`,
+      [],
+      100,
+    );
+
+    const findings: Array<Record<string, unknown>> = [];
+    for (const def of defs.rows) {
+      const key = String(def.key);
+      try {
+        // Validated like any other statement: these rows are admin-editable, so
+        // "it came from our own table" is not a reason to skip the check.
+        const { sql } = this.validator.validate(String(def.sql), this.rowLimit);
+        const res = await this.db.runSelect(sql, [], this.rowLimit);
+        findings.push({
+          key,
+          severity: def.severity,
+          title: { ar: def.title_ar, en: def.title_en },
+          count: res.rows.length,
+          sample: res.rows.slice(0, 5),
+        });
+      } catch (err) {
+        // One broken check must not hide the other seven. Report it as a
+        // failure so the auditor can say so rather than silently under-report.
+        findings.push({
+          key,
+          severity: def.severity,
+          title: { ar: def.title_ar, en: def.title_en },
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const clean = findings.every((f) => f.count === 0 && !f.error);
+    return {
+      ranAt: new Date().toISOString(),
+      checksRun: findings.length,
+      allClear: clean,
+      findings,
+    };
+  }
+
+  // --- get_geo (sales coach) -----------------------------------------------
+
+  /**
+   * Customers with their position, last visit and last sale, in one call.
+   *
+   * Exists because the alternative is the model writing a four-way join across
+   * customers, customer_visits, voucher_headers and reps on every question
+   * about the route — slower, and wrong in a new way each time.
+   */
+  private async getGeo(input: unknown): Promise<unknown> {
+    const repId = (input as { repId?: unknown })?.repId;
+    const params: unknown[] = [];
+    let repFilter = '';
+    if (typeof repId === 'string' && repId.length > 0) {
+      params.push(repId);
+      repFilter = `AND c.rep_id = $${params.length}::uuid`;
+    }
+
+    const res = await this.db.runSelect(
+      `SELECT c.customer_number,
+              COALESCE(c.name_ar, c.customer_name, c.name_en) AS customer_name,
+              c.lat::float8  AS lat,
+              c.lng::float8  AS lng,
+              c.total_debt::numeric   AS total_debt,
+              c.credit_limit::numeric AS credit_limit,
+              COALESCE(r.name_ar, r.name_en) AS rep_name,
+              v.last_visit,
+              s.last_sale,
+              s.sales_90d
+         FROM customers c
+         LEFT JOIN reps r ON r.id = c.rep_id
+         LEFT JOIN LATERAL (
+           SELECT max(cv.visited_at) AS last_visit
+             FROM customer_visits cv
+            WHERE cv.customer_id = c.id
+         ) v ON true
+         LEFT JOIN LATERAL (
+           SELECT max(h.in_date) AS last_sale,
+                  count(*) FILTER (
+                    WHERE h.in_date >= now() - interval '90 days'
+                  )::int AS sales_90d
+             FROM voucher_headers h
+            WHERE h.customer_number = c.customer_number
+              AND h.trans_kind = 'SALE'
+              AND h.is_posted = true
+              AND h.deleted_at IS NULL
+         ) s ON true
+        WHERE c.deleted_at IS NULL
+          AND c.is_active = true
+          ${repFilter}
+        ORDER BY s.last_sale ASC NULLS FIRST
+        LIMIT 300`,
+      params,
+      300,
+    );
+
+    return {
+      rowCount: res.rows.length,
+      note: 'Ordered by least-recently-sold-to first. lat/lng are null where the customer was never pinned.',
+      customers: res.rows,
+    };
+  }
+
+  // --- run_python (analyst, off by default) --------------------------------
+
+  /**
+   * Run model-authored Python over an optional query result.
+   *
+   * The SQL is validated and executed HERE, by the read-only role, and the rows
+   * are handed to the sandbox as a file. The sandbox never gets a connection
+   * string — which is why turning this on does not widen what the assistant can
+   * reach, only what it can compute.
+   */
+  private async runPython(
+    input: unknown,
+    ctx: ToolContext,
+  ): Promise<ToolOutcome> {
+    const code = (input as { code?: unknown })?.code;
+    if (typeof code !== 'string' || code.trim().length === 0) {
+      throw new Error('Missing required "code" argument.');
+    }
+
+    let data: QueryResult | null = null;
+    const rawSql = (input as { sql?: unknown })?.sql;
+    if (typeof rawSql === 'string' && rawSql.trim().length > 0) {
+      const { sql } = this.validator.validate(rawSql, this.rowLimit);
+      data = await this.db.runSelect(sql, [], this.rowLimit);
+    }
+
+    let run;
+    try {
+      run = await this.python.run(code, data);
+    } catch (err) {
+      if (err instanceof SandboxDisabledError) {
+        // Not an error the model should retry — tell it plainly so it falls
+        // back to SQL instead of trying the same tool three more times.
+        return { result: { enabled: false, message: err.message } };
+      }
+      throw err;
+    }
+
+    // Each output file becomes a downloadable artifact, reusing the same store
+    // the report tool writes to so the artifacts panel needs no special case.
+    const reports = [];
+    for (const file of run.files) {
+      const ref = await this.store.createReport(
+        {
+          conversationId: ctx.conversationId,
+          createdBy: ctx.userId,
+          title: file.name,
+          format: 'text',
+          filename: file.name,
+          contentType: this.contentTypeFor(file.name),
+          rowCount: 0,
+          sqlText: typeof rawSql === 'string' ? rawSql : null,
+          buffer: file.buffer,
+        },
+        file.name.split('.').pop() ?? 'bin',
+      );
+      reports.push(ref);
+    }
+
+    return {
+      result: {
+        ok: run.ok,
+        timedOut: run.timedOut,
+        exitCode: run.exitCode,
+        durationMs: run.durationMs,
+        rowsProvided: data?.rows.length ?? 0,
+        stdout: run.stdout,
+        stderr: run.stderr,
+        files: reports.map((r) => ({
+          filename: r.filename,
+          downloadUrl: r.downloadUrl,
+        })),
+      },
+      // The loop emits one report_ready per file; only the first is surfaced
+      // here because ToolOutcome carries a single ref. The rest are in `files`.
+      report: reports[0],
+    };
+  }
+
+  private contentTypeFor(name: string): string {
+    const ext = name.split('.').pop()?.toLowerCase() ?? '';
+    switch (ext) {
+      case 'png':
+        return 'image/png';
+      case 'svg':
+        return 'image/svg+xml';
+      case 'csv':
+        return 'text/csv; charset=utf-8';
+      case 'json':
+        return 'application/json; charset=utf-8';
+      case 'xlsx':
+        return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      case 'pdf':
+        return 'application/pdf';
+      default:
+        return 'application/octet-stream';
+    }
   }
 
   // --- helpers -------------------------------------------------------------

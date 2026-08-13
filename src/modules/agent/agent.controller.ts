@@ -1,10 +1,14 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
+  Query,
   Req,
   Res,
   StreamableFile,
@@ -25,8 +29,10 @@ import {
 } from '../../common/decorators/current-user.decorator';
 import { AgentService } from './agent.service';
 import { AgentStoreService } from './store/agent-store.service';
+import { AiSessionService } from './store/ai-session.service';
 import { AdminGuard } from './guards/admin.guard';
 import { ChatDto } from './dto/chat.dto';
+import { RenameSessionDto, SessionListQuery } from './dto/session.dto';
 import type { AgentEvent } from './agent.types';
 
 @ApiTags('ai-agent')
@@ -37,7 +43,59 @@ export class AgentController {
   constructor(
     private readonly agent: AgentService,
     private readonly store: AgentStoreService,
+    private readonly sessions: AiSessionService,
   ) {}
+
+  @Get('sessions')
+  @ApiOperation({
+    summary: 'List chat sessions, newest first (archived excluded)',
+  })
+  listSessions(@Query() q: SessionListQuery) {
+    return this.sessions.list(q.limit ?? 50, q.offset ?? 0);
+  }
+
+  @Get('sessions/:id')
+  @ApiOperation({
+    summary: 'One session with its message index and generated artifacts',
+    description:
+      'Returns the indexed transcript — one row per turn, including the SQL ' +
+      'each tool call ran — plus every report file the session produced.',
+  })
+  getSession(@Param('id', ParseUUIDPipe) id: string) {
+    return this.sessions.detail(id);
+  }
+
+  @Patch('sessions/:id')
+  @ApiOperation({ summary: 'Rename a session' })
+  @HttpCode(204)
+  async renameSession(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RenameSessionDto,
+  ): Promise<void> {
+    await this.sessions.rename(id, dto.title);
+  }
+
+  @Post('sessions/:id/archive')
+  @ApiOperation({
+    summary: 'Archive a session',
+    description: 'Hides it from the list; the transcript is kept.',
+  })
+  @HttpCode(204)
+  async archiveSession(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
+    await this.sessions.archive(id);
+  }
+
+  @Delete('sessions/:id')
+  @ApiOperation({
+    summary: 'Delete a session and its transcript permanently',
+    description:
+      'Report files already generated are NOT deleted — they may have been ' +
+      'shared by their download link.',
+  })
+  @HttpCode(204)
+  async deleteSession(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
+    await this.sessions.remove(id);
+  }
 
   @Post('chat')
   @ApiOperation({
@@ -78,6 +136,7 @@ export class AgentController {
           prompt: dto.prompt,
           conversationId: dto.conversationId,
           userId: user?.sub ?? null,
+          persona: dto.persona,
         },
         abort.signal,
       )) {

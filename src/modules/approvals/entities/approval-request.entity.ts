@@ -9,7 +9,10 @@ import {
 export type ApprovalType =
   | 'RETURN_VOUCHER'
   | 'VOUCHER_DISCOUNT'
-  | 'PRICE_OVERRIDE';
+  | 'PRICE_OVERRIDE'
+  // A salesman created a customer without canCreateCustomerDirect. The payload
+  // holds the whole customer plus its staged document photo; approving creates it.
+  | 'CUSTOMER_CREATE';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
 

@@ -39,7 +39,10 @@ export const envValidationSchema = Joi.object({
   // ERP sync timings (ms). The two interval values are read from process.env
   // directly at class-definition time, because @Interval() is evaluated before
   // DI exists — they are validated here so a bad value still fails at boot.
-  ERP_HTTP_TIMEOUT_MS: Joi.number().min(1000).default(20000),
+  // Raised from 20s: ERP posting on a loaded on-prem box regularly runs past
+  // 20s, and a cut-off there leaves a voucher exported-but-unconfirmed, which
+  // costs more to reconcile than simply waiting does.
+  ERP_HTTP_TIMEOUT_MS: Joi.number().min(1000).default(60000),
   ERP_OUTBOX_DRAIN_MS: Joi.number().min(5000).default(30000),
   ERP_PULL_INTERVAL_MS: Joi.number().min(30000).default(300000),
 
@@ -57,6 +60,11 @@ export const envValidationSchema = Joi.object({
   // Floors chosen to stay well inside what an unofficial session tolerates.
   WHATSAPP_MIN_INTERVAL_MS: Joi.number().min(5000).default(20000),
   WHATSAPP_DAILY_CAP: Joi.number().min(1).max(1000).default(150),
+
+  // Secret behind per-salesman activation keys. Optional: with no secret the
+  // activation endpoint refuses every key rather than accepting any, so an
+  // unconfigured server cannot silently hand out free seats.
+  SALESMAN_ACTIVATION_SECRET: Joi.string().allow('').default(''),
 
   // Rep-offline watchdog threshold (minutes of silence before alerting).
   REP_OFFLINE_THRESHOLD_MINUTES: Joi.number().min(2).default(10),

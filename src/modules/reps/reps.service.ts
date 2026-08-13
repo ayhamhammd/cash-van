@@ -12,6 +12,7 @@ import { ErpSyncService } from '../erp-sync/erp-sync.service';
 import { SettingsService } from '../settings/settings.service';
 import { UsersService } from '../users/users.service';
 import { provisionRep } from './rep-provision';
+import { verifyActivationKey } from './activation-key';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
@@ -22,6 +23,12 @@ export interface RepKpis {
   invoicesToday: number;
   customersAtRisk: number;
 }
+
+/**
+ * A uuid that matches no rep. TypeORM's IN (:...x) renders invalid SQL for an
+ * empty array, so an empty scope needs a sentinel that reliably matches nothing.
+ */
+const NO_REPS = '00000000-0000-0000-0000-000000000000';
 
 @Injectable()
 export class RepsService {
@@ -35,7 +42,14 @@ export class RepsService {
     private readonly users: UsersService,
   ) {}
 
-  async list(query: ListRepsQuery): Promise<{ items: Rep[]; total: number }> {
+  /**
+   * @param visibleRepIds null = unrestricted; an array (possibly empty) limits
+   *   the list to those reps. See docs/SPEC-rep-scoped-users.md.
+   */
+  async list(
+    query: ListRepsQuery,
+    visibleRepIds: string[] | null = null,
+  ): Promise<{ items: Rep[]; total: number }> {
     const qb = this.repo
       .createQueryBuilder('rep')
       .where('rep.deleted_at IS NULL')
@@ -43,6 +57,13 @@ export class RepsService {
       .take(query.limit ?? 50)
       .skip(query.offset ?? 0);
 
+    // Empty array must yield NOTHING, so this is a plain IN — not a
+    // `if (length)` guard, which would hand a scoped user the whole list.
+    if (visibleRepIds !== null) {
+      qb.andWhere('rep.id IN (:...visibleRepIds)', {
+        visibleRepIds: visibleRepIds.length ? visibleRepIds : [NO_REPS],
+      });
+    }
     if (query.regionId) {
       qb.andWhere('rep.region_id = :regionId', { regionId: query.regionId });
     }
@@ -62,6 +83,47 @@ export class RepsService {
 
     const [items, total] = await qb.getManyAndCount();
     return { items, total };
+  }
+
+  /** Whether this installation locks new salesmen behind an activation key. */
+  private async activationEnabled(): Promise<boolean> {
+    // Never let a settings read failure decide a lock: default to NOT freezing,
+    // so a transient error cannot silently lock a client out of their own reps.
+    return this.settings.salesmanActivationEnabled().catch(() => false);
+  }
+
+  /**
+   * Unfreeze a salesman with their activation key.
+   *
+   * Idempotent: activating an already-active salesman succeeds without changing
+   * anything, so a double-tap on a slow connection is not an error the user has
+   * to interpret.
+   */
+  async activate(id: string, key: string, actorId: string | null): Promise<Rep> {
+    const rep = await this.findOne(id);
+    if (!rep.isFrozen) return rep;
+
+    const secret = process.env.SALESMAN_ACTIVATION_SECRET ?? '';
+    if (!secret) {
+      // Refuse rather than accept anything: with no secret every key would
+      // "work", which is worse than being unable to activate at all.
+      throw new BadRequestException(
+        'Activation is not configured on this server (SALESMAN_ACTIVATION_SECRET is unset).',
+      );
+    }
+    if (!rep.code) {
+      throw new BadRequestException(
+        'This salesman has no code, so no key can be issued for them.',
+      );
+    }
+    if (!verifyActivationKey(rep.code, key ?? '', { secret })) {
+      throw new BadRequestException('Activation key is not valid for this salesman.');
+    }
+
+    rep.isFrozen = false;
+    rep.activatedAt = new Date();
+    rep.activatedBy = actorId;
+    return this.repo.save(rep);
   }
 
   async findOne(id: string): Promise<Rep> {
@@ -119,8 +181,14 @@ export class RepsService {
     if (dto.userId) await this.assertUserUnlinked(dto.userId);
     await this.assertCodeUnique(dto.code);
 
+    // Licensing: a salesman created from the dashboard is frozen on arrival when
+    // the installation has activation switched on, exactly like one arriving
+    // from the ERP. Both routes go through provisionRep for that reason.
+    const frozen = await this.activationEnabled();
+
     const rep = await this.dataSource.transaction((em) =>
       provisionRep(em, {
+        frozen,
         code: dto.code!,
         nameAr: dto.nameAr,
         nameEn: dto.nameEn,

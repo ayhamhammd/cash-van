@@ -6,6 +6,7 @@ import {
   IsEmail,
   IsIn,
   IsOptional,
+  IsUUID,
   IsString,
   Length,
   MaxLength,
@@ -80,7 +81,39 @@ export class CreateUserDto {
 
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canMakeVoucher?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditVoucher?: boolean;
+  @ApiPropertyOptional({
+    enum: ['all', 'assigned'],
+    description:
+      "'assigned' restricts this user to the salesmen in repIds — reports, approvals, tracking and settlement all filter to them. 'all' (default) sees everyone.",
+  })
+  @IsOptional() @IsIn(['all', 'assigned']) repScopeMode?: 'all' | 'assigned';
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Salesmen this user may see. Only meaningful with repScopeMode=assigned; an empty list means they see nothing.',
+  })
+  @IsOptional() @IsArray() @IsUUID('4', { each: true }) repIds?: string[];
+
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canAddCustomer?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Salesman may create a customer WITHOUT admin approval. Without it, canAddCustomer still lets them submit one for review.',
+  })
+  @IsOptional() @IsBoolean() canCreateCustomerDirect?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      "Show the discount value on each row of this salesman's printed receipt. Off by default — a per-line rate on a slip left at a counter is visible to the next customer.",
+  })
+  @IsOptional() @IsBoolean() canPrintLineDiscount?: boolean;
+
+  @ApiPropertyOptional({ description: 'May raise a van stock request.' })
+  @IsOptional() @IsBoolean() canRequestStock?: boolean;
+
+  @ApiPropertyOptional({ description: "May approve or reject someone else's stock request." })
+  @IsOptional() @IsBoolean() canApproveStockRequest?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditCustomerCredit?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canAddItems?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditExpiry?: boolean;

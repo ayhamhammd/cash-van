@@ -2,13 +2,14 @@ import type { LlmMessage } from './llm/llm.types';
 
 /** Report output formats the renderer supports. Anything else → the agent
  * tells the user (in text) that the format isn't supported yet. */
-export type ReportFormat = 'text' | 'markdown' | 'json' | 'xlsx';
+export type ReportFormat = 'text' | 'markdown' | 'json' | 'xlsx' | 'pdf';
 
 export const REPORT_FORMATS: ReportFormat[] = [
   'text',
   'markdown',
   'json',
   'xlsx',
+  'pdf',
 ];
 
 /** A persisted chat turn — the provider-neutral message shape. */
@@ -34,7 +35,13 @@ export type AgentEvent =
   | { type: 'report_ready'; data: ReportRef }
   | {
       type: 'done';
-      data: { conversationId: string; reportIds: string[]; stopReason: string };
+      data: {
+        conversationId: string;
+        reportIds: string[];
+        stopReason: string;
+        /** Absent when the provider did not report usage — show "—", not 0. */
+        usage?: { input: number; output: number };
+      };
     }
   | { type: 'error'; data: { message: string } };
 

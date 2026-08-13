@@ -11,6 +11,7 @@ import {
   IsNumberString,
   IsOptional,
   IsString,
+  IsUUID,
   Length,
   Max,
   Min,
@@ -42,6 +43,20 @@ export class VoucherLineDto {
   @ApiProperty({ example: '1.250' })
   @IsNumberString()
   unitPrice!: string;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'The item_units row this line was entered in — the AUTHORITATIVE variant ' +
+      'identity, and what decides which stock pool the line moves. Omit for base ' +
+      'pieces. `unitCode` is the legacy fallback: it is a free-text snapshot and ' +
+      'installed APKs post the Arabic display name in it, so it is resolved ' +
+      'server-side (barcode → unit code → Arabic name) only when this is absent. ' +
+      'This wins when both are sent.',
+  })
+  @IsOptional()
+  @IsUUID()
+  itemUnitId?: string;
 
   @ApiPropertyOptional({ description: 'Unit code used for this line (e.g. "PK6"). Omit for base pieces.' })
   @IsOptional()

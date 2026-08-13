@@ -4,6 +4,10 @@ coverage
 .env
 .env.local
 .env.*.local
+.env.production
+.env.app
+deploy/caddy/.env
+deploy/caddy/Caddyfile
 *.log
 .DS_Store
 .idea
@@ -13,6 +17,8 @@ coverage
 # source module (that omission is what broke the build previously).
 /storage/
 
-# Windows deployment bundle produced by scripts/build-windows-bundle.sh.
-# Contains a ~260MB docker image tarball — a build artifact, not source.
+# Windows bundles produced by scripts/build-windows-bundle.sh (first install) and
+# scripts/build-windows-update.sh (update only). Both hold a large docker image
+# tarball — build artifacts, not source.
 dist-windows/
+dist-windows-update/

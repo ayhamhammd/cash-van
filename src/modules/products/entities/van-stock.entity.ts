@@ -6,9 +6,13 @@ import {
   Unique,
 } from 'typeorm';
 
-/** Current loaded quantity of a product on a rep's van. Upsert per (rep, product). */
+/**
+ * Current loaded quantity of a product on a rep's van. Upsert per
+ * (rep, product, stock unit) — a variant unit owns its own pool, so one product
+ * can occupy several rows. `''` is the item's base pool.
+ */
 @Entity({ name: 'van_stock' })
-@Unique('uq_van_stock_rep_product', ['repId', 'productId'])
+@Unique('uq_van_stock_rep_product_unit', ['repId', 'productId', 'stockUnitCode'])
 export class VanStock {
   @PrimaryGeneratedColumn({ type: 'bigint' })
   id!: string;
@@ -20,6 +24,10 @@ export class VanStock {
   @Index('idx_van_stock_product')
   @Column({ name: 'product_id', type: 'uuid' })
   productId!: string;
+
+  /** Stock pool this row holds: a variant unit's code, or `''` for base pieces. */
+  @Column({ name: 'stock_unit_code', type: 'text', default: '' })
+  stockUnitCode!: string;
 
   @Column({ type: 'integer', default: 0 })
   quantity!: number;

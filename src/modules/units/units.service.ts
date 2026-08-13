@@ -78,15 +78,17 @@ export class UnitsService {
     if (!res.affected) throw new NotFoundException(`Unit ${id} not found`);
   }
 
-  /** PCE ↔ baseQty=1 is a singleton invariant. */
+  /**
+   * PCE is the global base and is always exactly 1 piece. Everything else is
+   * free — including baseQty = 1, which used to be rejected on the assumption
+   * that a non-PCE unit is always a bigger pack. A variant (أحمر) is a
+   * different good at one piece each, and that is how ERP sync already creates
+   * the colour units in production; forbidding it meant the dashboard could
+   * never author or correct one.
+   */
   private assertBaseRule(code: string, baseQty: number): void {
     if (code === BASE_UNIT_CODE && baseQty !== 1) {
       throw new BadRequestException(`Code ${BASE_UNIT_CODE} must have baseQty = 1`);
-    }
-    if (code !== BASE_UNIT_CODE && baseQty === 1) {
-      throw new BadRequestException(
-        `Only ${BASE_UNIT_CODE} can have baseQty = 1 (piece is the global base)`,
-      );
     }
   }
 
@@ -124,6 +126,8 @@ export class UnitsService {
       barcode: dto.barcode,
       salePrice: dto.salePrice,
       qty: dto.qty ?? unit.baseQty,
+      isStockUnit: dto.isStockUnit ?? false,
+      erpSkuCode: dto.erpSkuCode ?? null,
     });
     try {
       return await this.itemUnits.save(row);
@@ -154,6 +158,10 @@ export class UnitsService {
     if (dto.barcode !== undefined) row.barcode = dto.barcode;
     if (dto.salePrice !== undefined) row.salePrice = dto.salePrice;
     if (dto.qty !== undefined) row.qty = dto.qty;
+    // Flipping isStockUnit re-homes every FUTURE line of this unit; history
+    // cannot be re-attributed, so the new pool starts at zero (spec §10).
+    if (dto.isStockUnit !== undefined) row.isStockUnit = dto.isStockUnit;
+    if (dto.erpSkuCode !== undefined) row.erpSkuCode = dto.erpSkuCode || null;
     try {
       return await this.itemUnits.save(row);
     } catch (err) {

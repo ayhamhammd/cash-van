@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -45,8 +46,57 @@ export class WarehousesService {
     return this.warehousesRepo.findOne({ where: { whNumber } });
   }
 
-  list(): Promise<Warehouse[]> {
-    return this.warehousesRepo.find({ order: { whNumber: 'ASC' } });
+  /**
+   * Every store dropdown in the dashboard is fed from here, so this is where a
+   * scoped supervisor stops being offered other salesmen's vans.
+   *
+   * A VAN store is a salesman — it is created with them, named after them, and
+   * holds their stock — so it follows the same scope as the salesman. A DEPOT
+   * (`is_van = false`) is company infrastructure that belongs to nobody, and
+   * stays visible to everyone: stock still has to be transferred out of it and
+   * purchases still land in it. A van with no salesman assigned is nobody's,
+   * which under scope means it is not yours — the same rule the customer list
+   * applies to a customer with no rep.
+   */
+  list(visibleRepIds: string[] | null = null): Promise<Warehouse[]> {
+    const qb = this.warehousesRepo
+      .createQueryBuilder('w')
+      .orderBy('w.wh_number', 'ASC');
+
+    if (visibleRepIds !== null) {
+      qb.leftJoin('reps', 'wr', 'wr.van_id = w.id AND wr.deleted_at IS NULL');
+      if (visibleRepIds.length === 0) {
+        qb.andWhere('w.is_van = false');
+      } else {
+        qb.andWhere('(w.is_van = false OR wr.id IN (:...visibleRepIds))', {
+          visibleRepIds,
+        });
+      }
+    }
+
+    return qb.getMany();
+  }
+
+  /**
+   * Throw unless this store is the caller's to see. Same rule as [list]; a 403
+   * rather than a 404 so "not yours" does not read as "no such store".
+   */
+  async assertVisible(
+    id: string,
+    visibleRepIds: string[] | null,
+  ): Promise<void> {
+    if (visibleRepIds === null) return;
+    const wh = await this.findOneOrThrow(id);
+    if (!wh.isVan) return;
+    const owner = await this.warehousesRepo.manager
+      .createQueryBuilder()
+      .select('r.id', 'id')
+      .from('reps', 'r')
+      .where('r.van_id = :id AND r.deleted_at IS NULL', { id })
+      .getRawOne<{ id: string }>();
+    if (!owner || !visibleRepIds.includes(owner.id)) {
+      throw new ForbiddenException('This store is outside your assigned scope');
+    }
   }
 
   async remove(id: string): Promise<void> {

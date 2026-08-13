@@ -44,6 +44,18 @@ export interface VisitRow {
   onPlan: boolean; // visited outlet was on the planned route / journey plan that day
 }
 
+/** A sale plotted on the tracking map — one posted voucher that carried a fix. */
+export interface SalePointRow {
+  voucherNumber: string;
+  transKind: string;
+  total: string;
+  customerNumber: string | null;
+  customerName: string | null;
+  lat: number;
+  lng: number;
+  at: Date;
+}
+
 /** A per-day / per-month tracking summary bucket. */
 export interface TrackingBucket {
   date: string; // YYYY-MM-DD (bucket start)
@@ -196,6 +208,50 @@ export class LocationsService {
   }
 
   /**
+   * A rep's SALE points within a range — vouchers that carried a GPS fix when
+   * they were saved, for the tracking map's third marker layer.
+   *
+   * Joined through `users.user_number = voucher_headers.user_code`, the same
+   * link the targets report uses, because a voucher records the salesman's login
+   * code rather than a rep id.
+   *
+   * Ordered and filtered on `in_date` — the voucher's OWN timestamp — so an
+   * offline sale promoted hours later still lands on the day it was made.
+   */
+  async salePointsForRep(
+    repId: string,
+    fromIso?: string,
+    toIso?: string,
+  ): Promise<SalePointRow[]> {
+    await this.assertRepExists(repId);
+    const to = toIso ? new Date(toIso) : new Date();
+    const from = fromIso ? new Date(fromIso) : new Date(to.getTime() - 30 * 24 * 3600_000);
+    return (await this.events.query(
+      `
+      SELECT h.voucher_number  AS "voucherNumber",
+             h.trans_kind      AS "transKind",
+             h.total           AS "total",
+             h.customer_number AS "customerNumber",
+             COALESCE(c.name_ar, c.customer_name, c.name_en) AS "customerName",
+             h.sale_lat        AS "lat",
+             h.sale_lng        AS "lng",
+             h.in_date         AS "at"
+      FROM voucher_headers h
+      JOIN users u ON u.user_number = h.user_code
+      JOIN reps  r ON r.user_id = u.id
+      LEFT JOIN customers c ON c.customer_number = h.customer_number
+      WHERE r.id = $1
+        AND h.sale_lat IS NOT NULL
+        AND h.sale_lng IS NOT NULL
+        AND h.deleted_at IS NULL
+        AND h.in_date BETWEEN $2 AND $3
+      ORDER BY h.in_date ASC
+      `,
+      [repId, from, to],
+    )) as SalePointRow[];
+  }
+
+  /**
    * Per-day / per-month tracking summary: distance (haversine between consecutive
    * pings WITHIN the bucket), active span, points, customers visited + sales.
    * Distance is computed on the full ping set (not the downsampled trail).
@@ -257,7 +313,7 @@ export class LocationsService {
    *
    * Uses Postgres DISTINCT ON for efficiency on the partitioned table.
    */
-  async latestPerRep(): Promise<LatestRepLocation[]> {
+  async latestPerRep(visibleRepIds: string[] | null = null): Promise<LatestRepLocation[]> {
     // Get distinct latest event per rep within the last 24h (live map window).
     // Raw query because TypeORM's QueryBuilder reorders SELECT columns, which
     // breaks `DISTINCT ON (...)`'s requirement that it be the first expression.
@@ -268,9 +324,10 @@ export class LocationsService {
              rep_id, lat, lng, accuracy_m, recorded_at
       FROM rep_location_events
       WHERE recorded_at >= $1
+        AND ($2::uuid[] IS NULL OR rep_id = ANY($2::uuid[]))
       ORDER BY rep_id, recorded_at DESC
       `,
-      [horizon],
+      [horizon, visibleRepIds ?? null],
     )) as Array<{
       rep_id: string;
       lat: number;

@@ -31,6 +31,7 @@ import {
 } from '@nestjs/swagger';
 
 import { CustomersService } from './customers.service';
+import { RepScopeService } from '../users/rep-scope.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { CreateCustomerDto } from './dto/create-customer.dto';
@@ -50,7 +51,10 @@ import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 @UseGuards(RolesGuard)
 @Controller({ path: 'customers', version: '1' })
 export class CustomersController {
-  constructor(private readonly customers: CustomersService) {}
+  constructor(
+    private readonly customers: CustomersService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -60,7 +64,7 @@ export class CustomersController {
       'Field reps (salesmen) are automatically scoped to their own assigned customers.',
   })
   @ApiOkResponse({ description: 'Paginated customer list' })
-  list(@Query() query: ListCustomersQuery, @CurrentUser() user: AuthenticatedUser) {
+  async list(@Query() query: ListCustomersQuery, @CurrentUser() user: AuthenticatedUser) {
     // A field rep (repId present on the JWT) only ever sees the customers
     // assigned to them — force the rep scope regardless of any repId/unassigned
     // the client sent. Admins/managers (repId null) keep the full, filterable list.
@@ -68,7 +72,8 @@ export class CustomersController {
       query.repId = user.repId;
       query.unassigned = false;
     }
-    return this.customers.list(query);
+    // Supervisors (repId null, but scoped) see only their salesmen's customers.
+    return this.customers.list(query, await this.repScope.visibleRepIds(user));
   }
 
   @Get(':id')
@@ -100,9 +105,55 @@ export class CustomersController {
     description:
       'Create a customer. Allowed even when ERP mode is on — the new customer is mirrored to the ERP. Requires the canAddCustomer permission.',
   })
-  @ApiCreatedResponse({ description: 'Customer created' })
-  create(@Body() dto: CreateCustomerDto) {
-    return this.customers.create(dto);
+  @ApiCreatedResponse({
+    description:
+      'The customer, or { pendingApprovalId, status: "pending" } when a salesman lacks canCreateCustomerDirect.',
+  })
+  create(@Body() dto: CreateCustomerDto, @CurrentUser() user: AuthenticatedUser) {
+    // Goes through createAsUser, not create: only the caller's identity decides
+    // whether a document photo is required and whether this becomes a real
+    // customer or an approval request.
+    return this.customers.createAsUser(dto, user);
+  }
+
+  @Get('photo/:photoId/download')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: 'Download a staged customer photo',
+    description:
+      'Streams the bytes of a photo attached to a pending CUSTOMER_CREATE approval — the reviewer has to see the document to judge the request. Admin/manager only.',
+  })
+  @ApiParam({ name: 'photoId', format: 'uuid' })
+  async downloadStagedPhoto(
+    @Param('photoId', ParseUUIDPipe) photoId: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { photo, buffer } = await this.customers.getStagedPhotoFile(photoId);
+    res.set({
+      'Content-Type': photo.mimeType,
+      'Content-Disposition': `inline; filename="${photo.originalName}"`,
+    });
+    return new StreamableFile(buffer);
+  }
+
+  @Post('photo')
+  @RequirePermissions('canAddCustomer')
+  @UseInterceptors(FileInterceptor('file'))
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } },
+  })
+  @ApiOperation({
+    summary: 'Stage a customer document photo',
+    description:
+      'Upload the shop/ID photo BEFORE creating the customer (camera or gallery), then pass the returned id as photoId on POST /customers. Staged because a salesman creation may wait for admin approval, so no customer exists to attach it to yet. Images only, max 10 MB.',
+  })
+  @ApiCreatedResponse({ description: 'The staged photo (id + url)' })
+  stagePhoto(
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser('sub') userId: string,
+  ) {
+    return this.customers.stagePhoto(file, userId ?? null);
   }
 
   // NOTE: intentionally NOT @UseGuards(ErpReadOnlyGuard) — unlike other ERP-

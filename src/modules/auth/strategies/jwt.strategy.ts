@@ -32,6 +32,15 @@ export interface JwtPayload {
   permissions: Record<string, boolean>;
   /** Granular dashboard permission keys. */
   permKeys?: string[];
+  /**
+   * `tracking` marks the long-lived device token that outlives sign-out. It
+   * carries no permissions and `TrackingTokenGuard` confines it to telemetry
+   * routes; absent means an ordinary interactive session.
+   */
+  typ?: 'tracking';
+  /** Handset the tracking token belongs to. */
+  deviceId?: string;
+  jti?: string;
 }
 
 @Injectable()
@@ -67,6 +76,27 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       role,
       repId,
     });
+
+    // A tracking token is deliberately stripped of permissions: even if it
+    // reached a guarded route, there would be nothing for it to satisfy.
+    if (payload.typ === 'tracking') {
+      if (!payload.jti) {
+        throw new UnauthorizedException({
+          message: 'Tracking token is missing its id',
+          code: 'tracking_token_invalid',
+        });
+      }
+      return {
+        sub: payload.sub,
+        userNumber: payload.userNumber,
+        userType: payload.userType,
+        role,
+        repId,
+        permissions: {},
+        trackingJti: payload.jti,
+        deviceId: payload.deviceId,
+      };
+    }
 
     return {
       sub: payload.sub,

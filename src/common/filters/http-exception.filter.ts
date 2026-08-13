@@ -15,6 +15,13 @@ interface ErrorBody {
   statusCode: number;
   message: string | string[];
   error: string;
+  /**
+   * Machine-readable reason, when the thrower supplied one. Clients branch on
+   * this rather than on message text — a refusal the mobile app must explain
+   * differently ("this phone belongs to someone else" vs "wrong password")
+   * cannot be told apart from a localized sentence.
+   */
+  code?: string;
   path: string;
   timestamp: string;
 }
@@ -28,12 +35,13 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
 
-    const { status, message, error } = this.mapException(exception);
+    const { status, message, error, code } = this.mapException(exception);
 
     const body: ErrorBody = {
       statusCode: status,
       message,
       error,
+      ...(code ? { code } : {}),
       path: request.url,
       timestamp: new Date().toISOString(),
     };
@@ -54,6 +62,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     status: number;
     message: string | string[];
     error: string;
+    code?: string;
   } {
     if (exception instanceof HttpException) {
       const res = exception.getResponse();
@@ -66,6 +75,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
         status,
         message: (obj.message as string | string[]) ?? exception.message,
         error: (obj.error as string) ?? exception.name,
+        code: typeof obj.code === 'string' ? obj.code : undefined,
       };
     }
 

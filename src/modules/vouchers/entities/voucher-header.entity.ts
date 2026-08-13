@@ -32,6 +32,27 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'in_date', type: 'timestamptz', default: () => 'now()' })
   inDate!: Date;
 
+  /**
+   * Where the rep was when this voucher was SAVED — the same fix that drives the
+   * proximity geofence, kept so the sale can be drawn on the tracking map.
+   *
+   * Null is normal, not a defect: every voucher predating the feature, any sale
+   * made indoors or with location off, and every voucher raised from the
+   * dashboard has no rep position. Stored as a pair or not at all — half a
+   * coordinate is not a location.
+   *
+   * Taken on the DEVICE at save time, so an offline sale promoted hours later
+   * still carries the position it was made at.
+   */
+  @Column({ name: 'sale_lat', type: 'double precision', nullable: true })
+  saleLat?: number | null;
+
+  @Column({ name: 'sale_lng', type: 'double precision', nullable: true })
+  saleLng?: number | null;
+
+  @Column({ name: 'sale_accuracy_m', type: 'real', nullable: true })
+  saleAccuracyM?: number | null;
+
   @ManyToOne(() => TransactionKind, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'trans_kind', referencedColumnName: 'transKind' })
   transactionKind!: TransactionKind;
@@ -85,6 +106,32 @@ export class VoucherHeader extends BaseEntity {
   /** ORDER vouchers only: reservation released + shipped from the van. */
   @Column({ name: 'is_fulfilled', type: 'boolean', default: false })
   isFulfilled!: boolean;
+
+  // ── Tax exemption snapshot (frozen at creation; never recalculated) ────────
+  /** True when this document was issued tax-exempt. Drives the printed banner. */
+  @Column({ name: 'is_tax_exempt', type: 'boolean', default: false })
+  isTaxExempt!: boolean;
+
+  /**
+   * Where the exemption came from: CUSTOMER (the customer record said so),
+   * MANUAL (chosen on this document), or NONE. Kept because "why was no tax
+   * charged" is the first question an auditor asks, and the customer record may
+   * have changed since.
+   */
+  @Column({ name: 'tax_exemption_source', type: 'text', default: 'NONE' })
+  taxExemptionSource!: 'CUSTOMER' | 'MANUAL' | 'NONE';
+
+  @Column({ name: 'tax_exemption_number_snapshot', type: 'text', nullable: true })
+  taxExemptionNumber?: string | null;
+
+  @Column({ name: 'tax_exemption_reason_snapshot', type: 'text', nullable: true })
+  taxExemptionReason?: string | null;
+
+  @Column({ name: 'tax_exemption_type_snapshot', type: 'text', nullable: true })
+  taxExemptionType?: string | null;
+
+  @Column({ name: 'tax_exemption_applied_at', type: 'timestamptz', nullable: true })
+  taxExemptionAppliedAt?: Date | null;
 
   @OneToMany(() => VoucherTransaction, (t) => t.header, { cascade: true })
   transactions?: VoucherTransaction[];

@@ -26,13 +26,21 @@ import { ListCollectionsQuery } from './dto/query.dto';
 import { BatchDepositDto } from './dto/collection-actions.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { RepScopeService } from '../users/rep-scope.service';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 
 @ApiTags('collections')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'collections', version: '1' })
 export class CollectionsController {
-  constructor(private readonly collections: CollectionsService) {}
+  constructor(
+    private readonly collections: CollectionsService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -40,8 +48,11 @@ export class CollectionsController {
     description: 'List cash/cheque collections with optional filters.',
   })
   @ApiOkResponse({ description: 'Collection list' })
-  list(@Query() query: ListCollectionsQuery) {
-    return this.collections.list(query);
+  async list(
+    @Query() query: ListCollectionsQuery,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.collections.list(query, await this.repScope.visibleRepIds(user));
   }
 
   @Get('summary')
@@ -51,8 +62,11 @@ export class CollectionsController {
   })
   @ApiQuery({ name: 'date', required: false, description: 'Day to summarize (YYYY-MM-DD); defaults to today', example: '2026-05-23' })
   @ApiOkResponse({ description: 'Daily collection totals' })
-  summary(@Query('date') date?: string) {
-    return this.collections.summary(date);
+  async summary(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('date') date?: string,
+  ) {
+    return this.collections.summary(date, await this.repScope.visibleRepIds(user));
   }
 
   @Get('aging')
@@ -61,8 +75,8 @@ export class CollectionsController {
     description: 'Uncleared-cheque aging buckets (0-7 / 8-30 / 31-60 / 60+ days).',
   })
   @ApiOkResponse({ description: 'Aging buckets' })
-  aging() {
-    return this.collections.aging();
+  async aging(@CurrentUser() user: AuthenticatedUser) {
+    return this.collections.aging(await this.repScope.visibleRepIds(user));
   }
 
   @Post()
@@ -94,7 +108,7 @@ export class CollectionsController {
   @ApiParam({ name: 'id', format: 'uuid', description: 'Collection id' })
   @ApiOkResponse({ description: 'The collection' })
   findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.collections.findOne(id);
+    return this.collections.detail(id);
   }
 
   @Patch(':id')

@@ -141,6 +141,21 @@ export class SettingsService {
     return this.toView(row);
   }
 
+  /**
+   * Seat-licensing master switch, read straight from the row.
+   *
+   * Deliberately not routed through the settings VIEW: the view is a projection
+   * that changes shape as fields come and go, and a lock must not silently turn
+   * itself on or off because a projection was edited.
+   */
+  async salesmanActivationEnabled(): Promise<boolean> {
+    const row = await this.repo.findOne({
+      where: { id: 1 },
+      select: { id: true, salesmanActivationEnabled: true },
+    });
+    return row?.salesmanActivationEnabled === true;
+  }
+
   async update(dto: UpdateAppSettingsDto): Promise<AppSettingsView> {
     const row = await this.requireRow();
     // Main settlement accounts are ERP chart-of-accounts refs (validated ERP-side on post).

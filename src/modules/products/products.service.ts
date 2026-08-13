@@ -14,12 +14,20 @@ import { ListProductsQuery } from './dto/list-products.query';
 export interface ProductUnitView {
   name: string;
   code: string;
+  /**
+   * The item_units row behind this unit — '' for the base unit, which has none.
+   * The app posts it back as the line's itemUnitId; it is the only stable
+   * identity a colour has (barcodes are optional and names repeat).
+   */
+  itemUnitId: string;
   /** Pieces (base units) this unit represents — base = 1. */
   conversionQty: number;
   /** Unit sale price in fils (minor units), like the item price. */
   priceFils: number;
   barcode: string;
   isBase: boolean;
+  /** True when this unit is a variant that owns its own stock pool. */
+  isStockUnit: boolean;
 }
 
 @Injectable()
@@ -100,19 +108,23 @@ export class ProductsService {
       const base: ProductUnitView = {
         name: item.unit,
         code: item.unitOfMeasure,
+        itemUnitId: '',
         conversionQty: 1,
         priceFils: item.price,
         barcode: item.barcode,
         isBase: true,
+        isStockUnit: false,
       };
       const larger: ProductUnitView[] = (byItem.get(item.id) ?? [])
         .map((iu) => ({
           name: iu.unit?.nameAr || iu.unit?.code || item.unit,
           code: iu.unit?.code ?? item.unitOfMeasure,
+          itemUnitId: iu.id,
           conversionQty: iu.qty > 0 ? iu.qty : 1,
           priceFils: Math.round((Number(iu.salePrice) || 0) * 1000),
           barcode: iu.barcode,
           isBase: false,
+          isStockUnit: iu.isStockUnit,
         }))
         .sort((a, b) => a.conversionQty - b.conversionQty);
       // The entity is serialized to JSON as-is; an extra prop rides along.
@@ -145,6 +157,9 @@ export class ProductsService {
   async findOne(id: string): Promise<ItemCart> {
     const p = await this.products.findOne({ where: { id, deletedAt: IsNull() } });
     if (!p) throw new NotFoundException(`Product ${id} not found`);
+    // Same units the list sends. Omitting them here meant a client that fetched
+    // one product could not tell its variants apart at all.
+    await this.attachUnits([p]);
     return p;
   }
 

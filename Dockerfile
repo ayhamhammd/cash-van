@@ -28,6 +28,10 @@ ENV NODE_ENV=production
 COPY --from=build --chown=nodeusr:nodegrp /app/dist ./dist
 COPY --from=build --chown=nodeusr:nodegrp /app/node_modules ./node_modules
 COPY --from=build --chown=nodeusr:nodegrp /app/package.json ./
+# The Arabic font for PDF reports. Not compiled, so `dist` does not carry it —
+# without this line every Arabic PDF renders as empty boxes in production while
+# looking perfect in development.
+COPY --from=build --chown=nodeusr:nodegrp /app/assets ./assets
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
   CMD wget -qO- http://127.0.0.1:3000/api/v1/health || exit 1

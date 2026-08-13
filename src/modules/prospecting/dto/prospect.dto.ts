@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayNotEmpty,
   IsArray,
   IsIn,
@@ -16,7 +17,11 @@ import {
   MinLength,
 } from 'class-validator';
 
-import { PROSPECT_STATUSES } from '../prospecting.types';
+import {
+  PROSPECT_MAX_CATEGORIES,
+  PROSPECT_MAX_KEYWORDS,
+  PROSPECT_STATUSES,
+} from '../prospecting.types';
 
 export class CreateProspectSearchDto {
   @ApiProperty({ description: 'Search centre latitude.' })
@@ -36,14 +41,35 @@ export class CreateProspectSearchDto {
   @Max(20_000)
   radiusM!: number;
 
-  @ApiProperty({
-    description: 'Google Places types, e.g. supermarket, grocery_store.',
+  @ApiPropertyOptional({
+    description:
+      'Google Places types, e.g. supermarket, grocery_store. Optional when ' +
+      '`keyword` is given; at least one of the two is required.',
     example: ['supermarket', 'grocery_store'],
   })
+  @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
+  @ArrayMaxSize(PROSPECT_MAX_CATEGORIES)
   @IsString({ each: true })
-  categories!: string[];
+  categories?: string[];
+
+  @ApiPropertyOptional({
+    description:
+      "The caller's own terms, matched against the business name inside the " +
+      'same circle — for trades the category allow-list does not cover ' +
+      '("مكتبة", a brand, a chain). Each term costs one Text Search call. ' +
+      'Combines with `categories`; results are merged and de-duplicated by ' +
+      'place id.',
+    example: ['ماركت', 'مكتبة'],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(PROSPECT_MAX_KEYWORDS)
+  @IsString({ each: true })
+  @MinLength(2, { each: true })
+  @MaxLength(100, { each: true })
+  keywords?: string[];
 }
 
 export class UpdateProspectDto {

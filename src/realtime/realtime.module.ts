@@ -7,9 +7,10 @@ import { EventsGateway } from './events.gateway';
 import { EventBridgeService } from './event-bridge.service';
 import { HeartbeatWatchdogService } from './heartbeat-watchdog.service';
 import { RepStatus } from '../modules/reps/entities/rep-status.entity';
+import { UsersModule } from '../modules/users/users.module';
 
 @Module({
-  imports: [
+  imports: [UsersModule, 
     TypeOrmModule.forFeature([RepStatus]),
     JwtModule.registerAsync({
       imports: [ConfigModule],

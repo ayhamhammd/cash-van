@@ -4,6 +4,13 @@ import { BaseEntity } from '../../../common/entities/base.entity';
 export type UserType = 'ADMIN' | 'MANAGER' | 'SALES' | 'DRIVER';
 export type UserRole = 'admin' | 'manager' | 'supervisor' | 'viewer';
 
+/**
+ * Whether this user sees every salesman or only assigned ones.
+ * 'all' is the default so existing users keep today's access — scoping only
+ * applies when someone is deliberately switched. See docs/SPEC-rep-scoped-users.md.
+ */
+export type RepScopeMode = 'all' | 'assigned';
+
 @Entity({ name: 'users' })
 export class User extends BaseEntity {
   @Index('uq_users_user_number', { unique: true })
@@ -60,6 +67,25 @@ export class User extends BaseEntity {
   @Column({ name: 'can_add_customer', type: 'boolean', default: false })
   canAddCustomer!: boolean;
 
+  /**
+   * May this salesman create a customer that is REAL immediately?
+   * False (the default) routes their creation through admin approval instead.
+   * Meaningless without canAddCustomer, which decides whether they may create at all.
+   */
+  @Column({ name: 'rep_scope_mode', type: 'text', default: 'all' })
+  repScopeMode!: RepScopeMode;
+
+  /**
+   * May this salesman's printed receipt show the discount on each row?
+   * Off by default — a per-line discount on a slip left on a counter tells the
+   * next customer what rate the last one got.
+   */
+  @Column({ name: 'can_print_line_discount', type: 'boolean', default: false })
+  canPrintLineDiscount!: boolean;
+
+  @Column({ name: 'can_create_customer_direct', type: 'boolean', default: false })
+  canCreateCustomerDirect!: boolean;
+
   @Column({ name: 'can_edit_customer_credit', type: 'boolean', default: false })
   canEditCustomerCredit!: boolean;
 
@@ -68,6 +94,26 @@ export class User extends BaseEntity {
 
   @Column({ name: 'can_edit_expiry', type: 'boolean', default: false })
   canEditExpiry!: boolean;
+
+  /**
+   * May this salesman ask for stock to be loaded onto their van?
+   *
+   * Off by default, like every other capability here. A rep who cannot request
+   * simply has no such screen; the server refuses regardless, because the app
+   * on a phone is not a place to enforce anything.
+   */
+  @Column({ name: 'can_request_stock', type: 'boolean', default: false })
+  canRequestStock!: boolean;
+
+  /**
+   * May this user decide someone else's stock request?
+   *
+   * Separate from the admin/manager role on purpose: deciding what goes onto a
+   * van is a warehouse job, and the person who does it is not always the person
+   * who runs the office. Admins pass every gate regardless of this flag.
+   */
+  @Column({ name: 'can_approve_stock_request', type: 'boolean', default: false })
+  canApproveStockRequest!: boolean;
 
   /**
    * Granular dashboard permission keys (e.g. "vouchers.create", "items.edit").
