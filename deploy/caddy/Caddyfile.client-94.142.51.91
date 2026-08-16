@@ -1,0 +1,101 @@
+# HTTPS for the client server at 94.142.51.91, via sslip.io.
+#
+# Note the TLD: sslip.io, not .com. sslip.io is public DNS that resolves
+# <anything>.<ip>.sslip.io to that IP, so these are real public hostnames and
+# Caddy gets genuine Let's Encrypt certificates for them automatically.
+#
+#   https://94.142.51.91.sslip.io       → VanFlow dashboard + API (ONE origin)
+#   https://erp.94.142.51.91.sslip.io   → ERP
+#
+# THE ROUTING HERE IS DELIBERATELY UNCHANGED from what this server already
+# serves — VanFlow on the bare hostname, ERP on erp.*. This machine is live;
+# moving either one would break every saved bookmark and the handsets. Note
+# that the newer client (77.245.5.113) is the mirror image, ERP on the bare
+# hostname and VanFlow on app.* — do not copy hostnames between the two files.
+#
+# What this file ADDS to the config already running:
+#   - security headers; the live server currently sends none at all
+#   - /storage/* routed to the backend, so customer photo previews resolve
+#   - gzip, and per-site access logs
+#   - a :443 catch-all, so an unknown Host stops being served the first site
+#
+# REQUIREMENT: ports 80 AND 443 must be reachable from the internet. Let's
+# Encrypt connects back on port 80 to verify the server and will not issue a
+# certificate if it cannot.
+{
+	email admin@7softwarejo.com
+}
+
+(security) {
+	header {
+		# Once a browser sees this it refuses to fall back to HTTP for a year,
+		# even if a link says otherwise. Safe here: port 80 already redirects,
+		# so nothing on this host is served over plain HTTP anyway.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# Stop the page being framed — defends the admin UIs against
+		# clickjacking, where an invisible frame sits under a decoy button.
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Caddy names its version by default; a scanner reading that header
+		# learns exactly which exploits to try.
+		-Server
+	}
+}
+
+# ── VanFlow: dashboard + API on a single origin ──────────────────────────────
+# Serving both from one hostname is what keeps the rest simple: the auth cookie
+# is first-party on every call, so there is no CORS to configure and no
+# SameSite problem, and the cookie can be marked Secure.
+94.142.51.91.sslip.io {
+	import security
+
+	# Everything the backend owns. /storage/* is included because customer
+	# photo previews resolve against the app origin, not /api/v1 — without it
+	# those images 404 while the rest of the page works.
+	@backend path /api/* /socket.io/* /storage/*
+	handle @backend {
+		reverse_proxy app:3000 {
+			# Without this the app logs and rate-limits Caddy's own IP, so
+			# every van in the field looks like one very busy client.
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	handle {
+		reverse_proxy dashboard:3000
+	}
+
+	encode gzip
+	log {
+		output file /var/log/caddy/vanflow.log
+		format json
+	}
+}
+
+# ── ERP: accounting ──────────────────────────────────────────────────────────
+erp.94.142.51.91.sslip.io {
+	import security
+	reverse_proxy erp-app:3000
+	encode gzip
+	log {
+		output file /var/log/caddy/erp.log
+		format json
+	}
+}
+
+# ── Plain HTTP on the raw IP ─────────────────────────────────────────────────
+# Caddy already redirects http→https for the named hosts above. This covers the
+# bare-IP case only, which has no certificate and cannot serve HTTPS at all —
+# a browser pointed at https://94.142.51.91 fails the TLS handshake outright.
+:80 {
+	redir https://94.142.51.91.sslip.io{uri} permanent
+}
+
+# Any other hostname, or a direct hit on the IP over TLS, gets nothing.
+# Without this Caddy serves the FIRST site defined to an unknown Host header,
+# which quietly hands out whichever app happens to be listed first.
+:443 {
+	tls internal
+	respond 404
+}

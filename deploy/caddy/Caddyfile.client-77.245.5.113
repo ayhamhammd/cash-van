@@ -1,10 +1,15 @@
 # HTTPS for the client server at 77.245.5.113, via sslip.io.
 #
-# WHY THIS FILE EXISTS: the Caddyfile previously on this server was still
-# pinned to 94.142.51.91 — the OLD server's address. sslip.io hostnames ARE
-# the IP, so when the server moved, every hostname in that config stopped
-# matching and VanFlow lost HTTPS entirely. The dashboard was left reachable
-# only as http://77.245.5.113:3001, sending admin passwords in clear text.
+# WHY THIS FILE EXISTS: this is a NEW client server, stood up from the config
+# of the existing client at 94.142.51.91. sslip.io hostnames ARE the IP, so
+# every hostname in that config names the OTHER machine and matches nothing
+# here — which is why VanFlow has no HTTPS on this server at all. The
+# dashboard answers only on http://77.245.5.113:3001, sending admin passwords
+# in clear text, and the bare IP over TLS fails the handshake outright.
+#
+# Each client therefore needs its own copy of this file. Nothing else is
+# per-client: both Docker images below are host-agnostic and deploy unchanged
+# to either server.
 #
 #   https://77.245.5.113.sslip.io       → ERP          (unchanged)
 #   https://app.77.245.5.113.sslip.io   → VanFlow dashboard + API (ONE origin)
