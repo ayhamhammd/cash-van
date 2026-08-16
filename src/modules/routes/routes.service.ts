@@ -24,7 +24,10 @@ import { ListRoutesQuery } from './dto/list-routes.query';
 import { haversineMeters } from '../../common/geo/geo.util';
 
 const AVG_SPEED_KMH = 30; // assumed van speed for ETA / duration estimates
-const CARRY_FORWARD_LOOKBACK_DAYS = 30; // missed outlets older than this stop carrying
+// Missed outlets older than the lookback stop carrying. It is no longer a
+// constant: on a cycle longer than a month a fixed 30 days would drop misses
+// from the previous cycle before the outlet is next due. See
+// JourneyPlanService.carryForwardLookbackDays.
 
 export interface ComplianceRow {
   repId: string;
@@ -310,7 +313,7 @@ export class RoutesService {
           AND p.plan_date < $2
           AND p.plan_date >= ($2::date - $3::int)
         ORDER BY s.customer_id, p.plan_date DESC`,
-      [repId, asOf, CARRY_FORWARD_LOOKBACK_DAYS],
+      [repId, asOf, await this.journeyPlan.carryForwardLookbackDays(repId)],
     )) as Array<{ customerId: string; lastMissed: string | Date; status: string }>;
 
     return rows

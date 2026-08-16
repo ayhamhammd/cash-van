@@ -8,8 +8,13 @@ import {
 } from 'typeorm';
 
 /**
- * One recurring visit rule: rep serves this outlet on these weekdays.
- * weekdays use 0=Sunday .. 6=Saturday.
+ * One recurring visit rule: rep serves this outlet on these days of their
+ * route cycle.
+ *
+ * Day indices are relative to the rep's own cycle (`reps.route_cycle_days` and
+ * `route_cycle_anchor`), NOT to the calendar week. On the default 7-day cycle
+ * they coincide with 0=Sunday..6=Saturday; on a 14-day cycle they run 0..13 and
+ * a given weekday appears twice, which is exactly why they are not weekdays.
  */
 @Entity({ name: 'journey_plan_entries' })
 @Index('uq_journey_plan_rep_customer', ['repId', 'customerId'], { unique: true })
@@ -24,9 +29,9 @@ export class JourneyPlanEntry {
   @Column({ name: 'customer_id', type: 'uuid' })
   customerId!: string;
 
-  /** Days the outlet is visited. 0=Sunday .. 6=Saturday. */
-  @Column({ type: 'smallint', array: true })
-  weekdays!: number[];
+  /** Days of the rep's cycle the outlet is visited, each 0..cycleDays-1. */
+  @Column({ name: 'cycle_days', type: 'smallint', array: true })
+  cycleDays!: number[];
 
   /** Admin note shown to the salesman for this outlet's trip (read-only on mobile). */
   @Column({ type: 'text', nullable: true })

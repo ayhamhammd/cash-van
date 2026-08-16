@@ -70,6 +70,28 @@ export class Rep extends BaseEntity {
   @Column({ name: 'is_frozen', type: 'boolean', default: false })
   isFrozen!: boolean;
 
+  /**
+   * How many days the rep's route cycle runs before repeating. 7 is the classic
+   * week; 14 means an outlet scheduled on day 3 is visited once a fortnight.
+   */
+  @Column({ name: 'route_cycle_days', type: 'smallint', default: 7 })
+  routeCycleDays!: number;
+
+  /**
+   * The calendar date that counts as day 0 of the cycle. Required for any
+   * length other than 7: "day 3 of a fortnight" is meaningless without a
+   * starting point, where "Wednesday" reads straight off the calendar.
+   *
+   * Defaults to a Sunday, which makes a 7-day cycle behave exactly like the
+   * weekday scheme it replaced.
+   */
+  @Column({ name: 'route_cycle_anchor', type: 'date', default: () => `DATE '2024-01-07'` })
+  routeCycleAnchor!: string;
+
+  /** What the client calls this cycle. NULL ⇒ display falls back to "N days". */
+  @Column({ name: 'route_cycle_name', type: 'text', nullable: true })
+  routeCycleName?: string | null;
+
   @Column({ name: 'activated_at', type: 'timestamptz', nullable: true })
   activatedAt?: Date | null;
 

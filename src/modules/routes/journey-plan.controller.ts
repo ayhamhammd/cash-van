@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -6,7 +7,6 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  ParseIntPipe,
   ParseUUIDPipe,
   Post,
   Put,
@@ -26,6 +26,7 @@ import {
 import { JourneyPlanService } from './journey-plan.service';
 import {
   BulkSetJourneyPlanDto,
+  SetRouteCycleDto,
   UpsertJourneyPlanDto,
 } from './dto/journey-plan.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -52,18 +53,62 @@ export class JourneyPlanController {
 
   @Get('day')
   @ApiOperation({
-    summary: "Outlets for a rep on a weekday",
+    summary: 'Outlets for a rep on a day of their cycle',
     description:
-      'Active outlets the rep visits on the given weekday (0=Sun..6=Sat), ordered for the day map view. Admin/manager only.',
+      'Active outlets the rep visits on the given day of their route cycle ' +
+      '(0..cycleDays-1), ordered for the day map view. Admin/manager only.',
   })
   @ApiParam({ name: 'repId', format: 'uuid', description: 'Rep id' })
-  @ApiQuery({ name: 'weekday', description: '0=Sunday .. 6=Saturday', example: 0 })
-  @ApiOkResponse({ description: 'Ordered outlets for that weekday' })
+  @ApiQuery({ name: 'day', required: false, description: 'Day index, 0..cycleDays-1', example: 0 })
+  @ApiQuery({
+    name: 'weekday',
+    required: false,
+    deprecated: true,
+    description: 'Deprecated alias for `day`.',
+    example: 0,
+  })
+  @ApiOkResponse({ description: 'Ordered outlets for that day' })
   day(
     @Param('repId', ParseUUIDPipe) repId: string,
-    @Query('weekday', ParseIntPipe) weekday: number,
+    @Query('day') day?: string,
+    @Query('weekday') weekday?: string,
   ) {
-    return this.journeyPlan.day(repId, weekday);
+    const raw = day ?? weekday;
+    const parsed = Number(raw);
+    if (raw === undefined || !Number.isInteger(parsed)) {
+      throw new BadRequestException('day must be an integer');
+    }
+    return this.journeyPlan.day(repId, parsed);
+  }
+
+  @Get('cycle')
+  @ApiOperation({
+    summary: "Read a rep's route cycle",
+    description:
+      'Cycle length, anchor date, name, and which day of the cycle today falls ' +
+      'on — what the dashboard needs to draw the day columns. Admin/manager only.',
+  })
+  @ApiParam({ name: 'repId', format: 'uuid', description: 'Rep id' })
+  @ApiOkResponse({ description: 'Route cycle info' })
+  cycle(@Param('repId', ParseUUIDPipe) repId: string) {
+    return this.journeyPlan.cycle(repId);
+  }
+
+  @Put('cycle')
+  @ApiOperation({
+    summary: "Change a rep's route cycle",
+    description:
+      'Set the cycle length, start date or name. Shrinking the cycle is refused ' +
+      'when outlets are scheduled beyond the new last day — the response lists ' +
+      'them — unless `force` is sent. Admin/manager only.',
+  })
+  @ApiParam({ name: 'repId', format: 'uuid', description: 'Rep id' })
+  @ApiOkResponse({ description: 'The cycle after the change' })
+  setCycle(
+    @Param('repId', ParseUUIDPipe) repId: string,
+    @Body() dto: SetRouteCycleDto,
+  ) {
+    return this.journeyPlan.setCycle(repId, dto);
   }
 
   @Put(':customerId')

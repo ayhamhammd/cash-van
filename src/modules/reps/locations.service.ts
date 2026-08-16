@@ -187,7 +187,11 @@ export class LocationsService {
              cv.visit_note             AS "note",
              cv.lat, cv.lng,
              -- On-plan = the visited outlet was a route stop for that date, OR the
-             -- recurring journey plan covers the visit's weekday (0=Sun..6=Sat).
+             -- recurring journey plan covers the day of the rep's route cycle
+             -- that the visit falls on. The cycle is (date - anchor) mod length;
+             -- the modulo is applied twice because Postgres, like JS, returns a
+             -- negative remainder for a visit dated before the anchor, which
+             -- would never match the last day of the cycle.
              (EXISTS (
                 SELECT 1 FROM route_stops rs
                 JOIN route_plans rp ON rp.id = rs.plan_id
@@ -195,8 +199,12 @@ export class LocationsService {
                   AND rp.plan_date = cv.visited_at::date
               ) OR EXISTS (
                 SELECT 1 FROM journey_plan_entries jp
+                JOIN reps r ON r.id = jp.rep_id
                 WHERE jp.rep_id = $1 AND jp.customer_id = cv.customer_id AND jp.is_active = true
-                  AND EXTRACT(DOW FROM cv.visited_at)::smallint = ANY(jp.weekdays)
+                  AND (
+                        (((cv.visited_at::date - r.route_cycle_anchor) % r.route_cycle_days)
+                          + r.route_cycle_days) % r.route_cycle_days
+                      )::smallint = ANY(jp.cycle_days)
               )) AS "onPlan"
       FROM customer_visits cv
       LEFT JOIN customers c ON c.id = cv.customer_id
