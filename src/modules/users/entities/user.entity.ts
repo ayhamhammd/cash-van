@@ -119,9 +119,9 @@ export class User extends BaseEntity {
    * Reveals the "find customers" screen on the salesman app — GPS prospecting
    * around the rep's own position.
    *
-   * VISIBILITY ONLY. /prospecting/* carries no roles guard, so this hides the
-   * feature rather than fencing the API; treat it as a product switch, not a
-   * security boundary.
+   * Enforced, not merely cosmetic: POST /prospecting/searches accepts
+   * `canManageOffers` OR `canFindCustomers`, so a rep without either is refused
+   * (403) even if they call the API directly. It also hides the app screen.
    */
   @Column({ name: 'can_find_customers', type: 'boolean', default: false })
   canFindCustomers!: boolean;

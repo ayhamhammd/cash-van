@@ -7,6 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 
 import {
+  ANY_PERMISSIONS_KEY,
   PERMISSIONS_KEY,
   UserPermission,
 } from '../decorators/permissions.decorator';
@@ -21,7 +22,12 @@ export class PermissionsGuard implements CanActivate {
       PERMISSIONS_KEY,
       [context.getHandler(), context.getClass()],
     );
-    if (!required || required.length === 0) {
+    const requiredAny = this.reflector.getAllAndOverride<UserPermission[]>(
+      ANY_PERMISSIONS_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+    const hasAny = !!requiredAny && requiredAny.length > 0;
+    if ((!required || required.length === 0) && !hasAny) {
       return true;
     }
 
@@ -35,7 +41,12 @@ export class PermissionsGuard implements CanActivate {
     if (user.userType === 'ADMIN') {
       return true;
     }
-    const missing = required.filter((p) => !user.permissions?.[p]);
+    if (hasAny && !requiredAny.some((p) => user.permissions?.[p])) {
+      throw new ForbiddenException(
+        `Requires one of: ${requiredAny.join(', ')}`,
+      );
+    }
+    const missing = (required ?? []).filter((p) => !user.permissions?.[p]);
     if (missing.length > 0) {
       throw new ForbiddenException(
         `Missing permission(s): ${missing.join(', ')}`,

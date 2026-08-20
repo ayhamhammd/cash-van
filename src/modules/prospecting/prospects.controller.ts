@@ -16,7 +16,10 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
-import { RequirePermissions } from '../../common/decorators/permissions.decorator';
+import {
+  RequireAnyPermission,
+  RequirePermissions,
+} from '../../common/decorators/permissions.decorator';
 import {
   CurrentUser,
   type AuthenticatedUser,
@@ -106,7 +109,10 @@ export class ProspectsController {
   }
 
   @Post('searches')
-  @RequirePermissions('canManageOffers')
+  // Two jobs, one endpoint: the office runs this from the prospecting page,
+  // and a salesman runs the same search from their phone. Requiring both
+  // permissions would mean a rep also had to be able to manage offers.
+  @RequireAnyPermission('canManageOffers', 'canFindCustomers')
   @ApiOperation({
     summary: 'Run a lead-finder search',
     description:
