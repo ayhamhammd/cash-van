@@ -4,6 +4,9 @@ import { BaseEntity } from '../../../common/entities/base.entity';
 export type CustomerType = 'CASH' | 'CREDIT' | 'WHOLESALE' | 'RETAIL';
 export type CustomerCategory = 'retail' | 'wholesale' | 'horeca' | 'pharmacy' | string;
 
+/** How a customer record came into existence. */
+export type CustomerSource = 'MANUAL' | 'PROSPECTING' | 'IMPORT' | 'ERP';
+
 @Entity({ name: 'customers' })
 export class Customer extends BaseEntity {
   @Index('uq_customers_customer_number', { unique: true })
@@ -158,6 +161,22 @@ export class Customer extends BaseEntity {
   @Column({ name: 'tax_exemption_valid_from', type: 'timestamptz', nullable: true })
   taxExemptionValidFrom?: Date | null;
 
-  @Column({ name: 'tax_exemption_valid_to', type: 'timestamptz', nullable: true })
+/**
+   * Where this customer came from. 'PROSPECTING' means a rep or the office
+   * filed it from a Find Customers search rather than typing it in.
+   *
+   * A column rather than a reverse lookup through prospects.matched_customer_id:
+   * the new-customers report counts by source over a date window, and a join
+   * per row cannot be indexed for that.
+   */
+  @Index('idx_customers_source_created', ['source', 'createdAt'])
+  @Column({ type: 'text', default: 'MANUAL' })
+  source!: CustomerSource;
+
+  /** The lead it was created from, when source is 'PROSPECTING'. */
+  @Column({ name: 'source_prospect_id', type: 'uuid', nullable: true })
+  sourceProspectId?: string | null;
+
+    @Column({ name: 'tax_exemption_valid_to', type: 'timestamptz', nullable: true })
   taxExemptionValidTo?: Date | null;
 }

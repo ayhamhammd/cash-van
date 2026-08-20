@@ -101,6 +101,17 @@ export class CreateCustomerDto {
   @IsUUID()
   repId?: string;
 
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'The prospecting lead this customer was filed from. Setting it stamps ' +
+      "source='PROSPECTING' on the customer and marks the lead CONVERTED, so " +
+      'the new-customers report can tell a found shop from a typed-in one.',
+  })
+  @IsOptional()
+  @IsUUID()
+  sourceProspectId?: string;
+
   @ApiPropertyOptional({ description: 'Region UUID' })
   @IsOptional()
   @IsUUID()

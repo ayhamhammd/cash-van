@@ -116,6 +116,17 @@ export class User extends BaseEntity {
   canApproveStockRequest!: boolean;
 
   /**
+   * Reveals the "find customers" screen on the salesman app — GPS prospecting
+   * around the rep's own position.
+   *
+   * VISIBILITY ONLY. /prospecting/* carries no roles guard, so this hides the
+   * feature rather than fencing the API; treat it as a product switch, not a
+   * security boundary.
+   */
+  @Column({ name: 'can_find_customers', type: 'boolean', default: false })
+  canFindCustomers!: boolean;
+
+  /**
    * Granular dashboard permission keys (e.g. "vouchers.create", "items.edit").
    * The flexible, admin-managed permission set for dashboard users. Admin role
    * implicitly has everything regardless of this list.

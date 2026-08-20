@@ -181,6 +181,7 @@ export class AuthService {
       canPrintLineDiscount: user.canPrintLineDiscount,
       canRequestStock: user.canRequestStock,
       canApproveStockRequest: user.canApproveStockRequest,
+      canFindCustomers: user.canFindCustomers,
       canEditCustomerCredit: user.canEditCustomerCredit,
       canAddItems: user.canAddItems,
       canEditExpiry: user.canEditExpiry,

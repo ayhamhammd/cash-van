@@ -4,6 +4,7 @@ import {
   ApiCreatedResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
 
@@ -122,7 +123,26 @@ export class ReportsController {
     return this.reports.bestItems(q.offset ?? 0, q.limit ?? 25, q.days, await this.repScope.visibleRepIds(user));
   }
 
-  @Get('visits')
+@Get('new-customers')
+  @ApiOperation({
+    summary: 'New customers by source',
+    description:
+      'Customers created in a date window, grouped by how they came in — the ' +
+      "headline being how many arrived through Find Customers (source='PROSPECTING') " +
+      'rather than being typed in. Also broken down per salesman. Rep-scoped.',
+  })
+  @ApiQuery({ name: 'from', description: 'YYYY-MM-DD, inclusive', example: '2026-08-01' })
+  @ApiQuery({ name: 'to', description: 'YYYY-MM-DD, inclusive', example: '2026-08-31' })
+  @ApiOkResponse({ description: 'Totals by source, plus a per-rep breakdown' })
+  async newCustomers(
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.reports.newCustomers(from, to, await this.repScope.visibleRepIds(user));
+  }
+
+    @Get('visits')
   @ApiOperation({
     summary: 'Customer visits report',
     description: 'All customer visits (newest first) with customer + rep names. Paginated.',

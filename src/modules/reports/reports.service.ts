@@ -532,7 +532,64 @@ export class ReportsService {
   }
 
   /** Customer visits across all reps, newest first. */
-  async visits(
+/**
+   * New customers over a window, split by where they came from.
+   *
+   * The headline number the office wants is "how many did Find Customers get
+   * us" — which is why customers carries `source` as a column rather than the
+   * report joining back through prospects.matched_customer_id per row.
+   *
+   * Rep-scoped like every other report: a scoped user sees only their own
+   * salesmen's customers.
+   */
+  async newCustomers(
+    from: string,
+    to: string,
+    visibleRepIds: string[] | null = null,
+  ): Promise<{
+    totals: { source: string; count: number }[];
+    byRep: { repId: string | null; repName: string | null; source: string; count: number }[];
+  }> {
+    // `to` is inclusive: a user asking for 01→31 means the whole of the 31st,
+    // so compare against the day after rather than midnight on the 31st.
+    const scoped = visibleRepIds !== null;
+    const params: unknown[] = [from, to];
+    let repFilter = '';
+    if (scoped) {
+      params.push(visibleRepIds);
+      repFilter = ` AND c.rep_id = ANY($3::uuid[])`;
+    }
+
+    const totals = await this.ds.query(
+      `SELECT c.source AS source, count(*)::int AS count
+         FROM customers c
+        WHERE c.deleted_at IS NULL
+          AND c.created_at >= $1::date
+          AND c.created_at < ($2::date + 1)${repFilter}
+        GROUP BY c.source
+        ORDER BY count DESC`,
+      params,
+    );
+
+    const byRep = await this.ds.query(
+      `SELECT c.rep_id::text AS "repId",
+              COALESCE(r.name_ar, r.name_en) AS "repName",
+              c.source AS source,
+              count(*)::int AS count
+         FROM customers c
+         LEFT JOIN reps r ON r.id = c.rep_id AND r.deleted_at IS NULL
+        WHERE c.deleted_at IS NULL
+          AND c.created_at >= $1::date
+          AND c.created_at < ($2::date + 1)${repFilter}
+        GROUP BY c.rep_id, r.name_ar, r.name_en, c.source
+        ORDER BY count DESC`,
+      params,
+    );
+
+    return { totals, byRep };
+  }
+
+    async visits(
     offset = 0,
     limit = 25,
     visibleRepIds: string[] | null = null,

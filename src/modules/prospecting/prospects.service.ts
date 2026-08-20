@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, In, IsNull, Not, Repository } from 'typeorm';
 
@@ -325,6 +326,10 @@ export class ProspectsService {
         latitude: row.lat ?? null,
         longitude: row.lng ?? null,
         repId: dto.repId ?? null,
+        // Same provenance the handset path records, so a customer converted
+        // here and one filed from the app are indistinguishable in the report.
+        source: 'PROSPECTING',
+        sourceProspectId: row.id,
       }),
     );
 
@@ -332,6 +337,23 @@ export class ProspectsService {
     row.matchedCustomerId = customer.id;
     await this.prospects.save(row);
     return customer;
+  }
+
+  /**
+   * The salesman app filed a customer straight from a lead, so close the lead.
+   *
+   * Event-driven because customers cannot import this module — prospecting
+   * already depends on customers for convert(), and the reverse would be a
+   * cycle. Failure here must not undo a customer that is already saved, so it
+   * logs and moves on rather than throwing.
+   */
+  @OnEvent('prospect.converted')
+  async onProspectConverted(p: { prospectId: string; customerId: string }): Promise<void> {
+    const row = await this.prospects.findOne({ where: { id: p.prospectId } });
+    if (!row) return;
+    row.status = 'CONVERTED';
+    row.matchedCustomerId = p.customerId;
+    await this.prospects.save(row);
   }
 
   /** Pipeline counters for the KPI strip. */

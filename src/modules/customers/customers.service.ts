@@ -220,8 +220,19 @@ export class CustomersService {
       customerNumber,
       nameAr: dto.nameAr ?? dto.customerName,
       phoneHash: hashPhone(dto.phone),
+      // Provenance is derived, not client-supplied: a caller that names a lead
+      // IS a prospecting create, and one that does not cannot claim to be.
+      source: dto.sourceProspectId ? 'PROSPECTING' : 'MANUAL',
     });
     const saved = await this.customers.save(entity);
+    if (dto.sourceProspectId) {
+      // An event rather than a direct call: prospecting already depends on
+      // customers (convert() writes one), so calling back would be circular.
+      this.events.emit('prospect.converted', {
+        prospectId: dto.sourceProspectId,
+        customerId: saved.id,
+      });
+    }
     // Tell the owning van to pull it, so a customer added from the office is
     // sellable in the field without waiting for the next home-screen refresh.
     this.events.emit('customer.changed', {

@@ -114,6 +114,13 @@ export class CreateUserDto {
 
   @ApiPropertyOptional({ description: "May approve or reject someone else's stock request." })
   @IsOptional() @IsBoolean() canApproveStockRequest?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Reveals the Find Customers screen on the salesman app. Visibility only — ' +
+      'the prospecting API itself is open to any authenticated user.',
+  })
+  @IsOptional() @IsBoolean() canFindCustomers?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditCustomerCredit?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canAddItems?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditExpiry?: boolean;
