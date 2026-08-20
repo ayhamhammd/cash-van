@@ -31,7 +31,7 @@ export class UpsertJourneyPlanDto {
   @IsOptional()
   @IsArray()
   @ArrayMinSize(1)
-  @ArrayMaxSize(60)
+  @ArrayMaxSize(100)
   @ArrayUnique()
   @IsInt({ each: true })
   @Min(0, { each: true })
@@ -48,7 +48,7 @@ export class UpsertJourneyPlanDto {
   @IsOptional()
   @IsArray()
   @ArrayMinSize(1)
-  @ArrayMaxSize(60)
+  @ArrayMaxSize(100)
   @ArrayUnique()
   @IsInt({ each: true })
   @Min(0, { each: true })
@@ -105,13 +105,13 @@ export class SetRouteCycleDto {
       'Cycle length in days. 7 is the classic week; 14 means an outlet on day 3 ' +
       'is visited once a fortnight. Omit to leave unchanged.',
     minimum: 1,
-    maximum: 60,
+    maximum: 100,
     example: 14,
   })
   @IsOptional()
   @IsInt()
   @Min(1)
-  @Max(60)
+  @Max(100)
   cycleDays?: number;
 
   @ApiPropertyOptional({
