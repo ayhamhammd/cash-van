@@ -1,5 +1,12 @@
 # SPEC — "Find customers" on the salesman app
 
+> **Status (2026-08-21): shipped.** Backend, dashboard toggle, and the mobile
+> screen are all in. One change from this spec: `canFindCustomers` turned out to
+> be a *real* boundary, not visibility-only — the search endpoint now accepts
+> `canManageOffers` OR `canFindCustomers`, so a rep without either is refused
+> 403 (verified live). The dashboard **new-customers report screen** (§6.2) is
+> the one piece not yet built; the report API behind it is.
+
 The prospecting feature the dashboard already has, put in the rep's hand: open a screen from
 the home page, it reads GPS, searches **2 km** around them, lists the shops it finds, and
 lets the rep navigate to one or file it as a customer with the name, phone and location
