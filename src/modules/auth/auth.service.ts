@@ -182,6 +182,7 @@ export class AuthService {
       canRequestStock: user.canRequestStock,
       canApproveStockRequest: user.canApproveStockRequest,
       canFindCustomers: user.canFindCustomers,
+      routesOnly: user.routesOnly,
       canEditCustomerCredit: user.canEditCustomerCredit,
       canAddItems: user.canAddItems,
       canEditExpiry: user.canEditExpiry,

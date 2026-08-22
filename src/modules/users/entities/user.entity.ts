@@ -127,6 +127,16 @@ export class User extends BaseEntity {
   canFindCustomers!: boolean;
 
   /**
+   * Route-only salesman: reaches customers ONLY through the day's route, so the
+   * app hides the Customers list on the home screen. A workflow restriction, not
+   * a security boundary — a rep still opens a customer from a route stop, so
+   * there is nothing to fence server-side. Default false: nobody is restricted
+   * on upgrade.
+   */
+  @Column({ name: 'routes_only', type: 'boolean', default: false })
+  routesOnly!: boolean;
+
+  /**
    * Granular dashboard permission keys (e.g. "vouchers.create", "items.edit").
    * The flexible, admin-managed permission set for dashboard users. Admin role
    * implicitly has everything regardless of this list.

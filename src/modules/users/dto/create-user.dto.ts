@@ -121,6 +121,7 @@ export class CreateUserDto {
       'the prospecting API itself is open to any authenticated user.',
   })
   @IsOptional() @IsBoolean() canFindCustomers?: boolean;
+  @IsOptional() @IsBoolean() routesOnly?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditCustomerCredit?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canAddItems?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditExpiry?: boolean;
