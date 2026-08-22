@@ -159,6 +159,124 @@ export class RepsService {
    * single identity shared across rep ⇄ store (stock_number) ⇄ login ⇄ ERP
    * warehouse. Pass `userId` to link an existing user instead of creating one.
    */
+  /**
+   * A rep's materials, grouped by the warehouse that holds them.
+   *
+   * "The rep's materials" are the items their VAN store carries — the van is a
+   * warehouse (rep.van_id), and item_balance already tracks quantity per store
+   * from the posted, ERP-synced vouchers. For each of those items we then show
+   * every warehouse that holds it and how much, the rep's own van first.
+   *
+   * Read-only and rep-scoped: a viewer limited to certain reps cannot pull a
+   * rep outside their scope (returns an empty sheet, not a forbidden error).
+   */
+  async materialsByWarehouse(
+    repId: string,
+    visibleRepIds: string[] | null = null,
+  ): Promise<{
+    repId: string;
+    repName: string | null;
+    vanStore: string | null;
+    warehouses: Array<{
+      whNumber: string;
+      whName: string | null;
+      isVan: boolean;
+      isRepVan: boolean;
+      itemCount: number;
+      totalQty: number;
+      items: Array<{ itemNumber: string; itemName: string | null; qty: number }>;
+    }>;
+  }> {
+    const rep = await this.repo.findOne({ where: { id: repId } });
+    const repName = rep ? (rep.nameAr ?? rep.nameEn ?? null) : null;
+    const inScope = visibleRepIds === null || visibleRepIds.includes(repId);
+
+    const vanRows: Array<{ wh_number: string }> = await this.dataSource.query(
+      `SELECT w.wh_number FROM reps r
+         JOIN warehouses w ON w.id = r.van_id
+        WHERE r.id = $1 AND r.van_id IS NOT NULL LIMIT 1`,
+      [repId],
+    );
+    const vanStore = vanRows[0]?.wh_number ?? null;
+
+    const base = { repId, repName, vanStore, warehouses: [] as never[] };
+    // No scope, no van store, or no materials → an empty (but well-formed) sheet.
+    if (!inScope || !vanStore) return base;
+
+    // rep_items: the distinct materials the van carries (net qty across units ≠ 0).
+    // Then every warehouse's holding of those same items. is_van DESC + the van
+    // store surfacing first is done in JS so the rep's own van leads.
+    const rows: Array<{
+      whNumber: string;
+      whName: string | null;
+      isVan: boolean;
+      itemNumber: string;
+      itemName: string | null;
+      qty: string;
+    }> = await this.dataSource.query(
+      `WITH rep_items AS (
+         SELECT item_number
+           FROM item_balance
+          WHERE stock_number = $1
+          GROUP BY item_number
+         HAVING SUM(qty) <> 0
+       )
+       SELECT w.wh_number                      AS "whNumber",
+              w.wh_name                         AS "whName",
+              w.is_van                          AS "isVan",
+              b.item_number                     AS "itemNumber",
+              MAX(b.item_name)                  AS "itemName",
+              SUM(b.qty)::numeric(14,3)         AS qty
+         FROM item_balance b
+         JOIN warehouses w ON w.wh_number = b.stock_number
+        WHERE b.item_number IN (SELECT item_number FROM rep_items)
+        GROUP BY w.wh_number, w.wh_name, w.is_van, b.item_number
+       HAVING SUM(b.qty) <> 0
+        ORDER BY b.item_number`,
+      [vanStore],
+    );
+
+    // Fold rows into one group per warehouse.
+    const byWh = new Map<
+      string,
+      {
+        whNumber: string;
+        whName: string | null;
+        isVan: boolean;
+        isRepVan: boolean;
+        itemCount: number;
+        totalQty: number;
+        items: Array<{ itemNumber: string; itemName: string | null; qty: number }>;
+      }
+    >();
+    for (const r of rows) {
+      let g = byWh.get(r.whNumber);
+      if (!g) {
+        g = {
+          whNumber: r.whNumber,
+          whName: r.whName,
+          isVan: r.isVan,
+          isRepVan: r.whNumber === vanStore,
+          itemCount: 0,
+          totalQty: 0,
+          items: [],
+        };
+        byWh.set(r.whNumber, g);
+      }
+      const qty = Number(r.qty) || 0;
+      g.items.push({ itemNumber: r.itemNumber, itemName: r.itemName, qty });
+      g.itemCount += 1;
+      g.totalQty += qty;
+    }
+
+    // The rep's own van leads; other warehouses follow by number.
+    const warehouses = [...byWh.values()].sort((a, b) => {
+      if (a.isRepVan !== b.isRepVan) return a.isRepVan ? -1 : 1;
+      return a.whNumber.localeCompare(b.whNumber);
+    });
+    return { repId, repName, vanStore, warehouses };
+  }
+
   async create(dto: CreateRepDto): Promise<Rep> {
     if (!dto.code) {
       throw new BadRequestException(

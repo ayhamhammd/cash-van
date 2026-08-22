@@ -77,6 +77,19 @@ export class RepsController {
     return this.reps.kpisForUser(user.sub);
   }
 
+  @Get('me/materials-by-warehouse')
+  @ApiOperation({
+    summary: 'My materials, grouped by warehouse',
+    description:
+      "The signed-in rep's van materials and how much of each every warehouse " +
+      'holds, the rep\'s own van first. Read-only.',
+  })
+  @ApiOkResponse({ description: "The rep's materials grouped by warehouse" })
+  async myMaterials(@CurrentUser() user: AuthenticatedUser) {
+    const rep = await this.reps.findByUserIdOrThrow(user.sub);
+    return this.reps.materialsByWarehouse(rep.id);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get rep', description: 'Fetch a single rep by id.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
@@ -87,6 +100,22 @@ export class RepsController {
   ) {
     await this.repScope.assertCanSeeRep(user, id);
     return this.reps.findOne(id);
+  }
+
+  @Get(':id/materials-by-warehouse')
+  @ApiOperation({
+    summary: "A rep's materials, grouped by warehouse",
+    description:
+      "The rep's van materials and how much of each every warehouse holds. " +
+      'Read-only, rep-scoped.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
+  @ApiOkResponse({ description: "The rep's materials grouped by warehouse" })
+  async materialsByWarehouse(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.reps.materialsByWarehouse(id, await this.repScope.visibleRepIds(user));
   }
 
   @Get(':id/kpis')
