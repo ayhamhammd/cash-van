@@ -74,6 +74,20 @@ export class ErpSyncController {
     return this.sync.status();
   }
 
+  @Get('sync/drift')
+  @ApiOperation({
+    summary: 'Stock drift: ERP snapshot vs cash-van on-hand',
+    description:
+      "Read-only. Pulls the ERP's absolute /van/stock snapshot and compares it, " +
+      'per (store, item, pool), against cash-van\'s computed balance, listing every ' +
+      'divergence and by how much. Writes nothing. Admin only. See ' +
+      'docs/PLAN-erp-sync-reconciliation.md.',
+  })
+  @ApiOkResponse({ description: 'Drift report' })
+  drift() {
+    return this.sync.computeStockDrift();
+  }
+
   @Post('sync/movements/catch-up')
   @ApiOperation({
     summary: 'Skip stock-movement history (post API-key switch)',

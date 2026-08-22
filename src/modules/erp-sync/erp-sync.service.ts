@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
@@ -1407,6 +1413,179 @@ export class ErpSyncService {
    * last one is the fallback for a SKU whose unit has not been re-synced yet: it
    * lands in the base pool, which is exactly today's behaviour.
    */
+  /**
+   * READ-ONLY stock drift detector — the safe first step of the ERP sync rework
+   * (docs/PLAN-erp-sync-reconciliation.md §7).
+   *
+   * Pulls the ERP's absolute snapshot (GET /van/stock, the source of truth) and
+   * compares it, per (store, item, pool), against cash-van's computed on-hand
+   * (the item_balance view). Reports where the two disagree and by how much.
+   *
+   * It writes NOTHING. Its only jobs are to quantify the drift you can see in the
+   * field, and to exercise /van/stock at a realistic page cadence so we know the
+   * rate-limit behaviour BEFORE any reconciliation is built against it — the exact
+   * thing that sank the previous snapshot attempt (migration DropErpStockSnapshot).
+   *
+   * Unit basis: /van/stock.quantity and the movement feed's quantityChanged are
+   * BOTH base units, and the mirror stores base pieces into item_balance, so the
+   * comparison is direct — no unit conversion, which is where false drift hides.
+   * The resolver is the SAME one the mirror uses, so the mapping matches reality.
+   */
+  async computeStockDrift(): Promise<{
+    checkedAt: string;
+    erpRowsFetched: number;
+    poolsCompared: number;
+    driftedPools: number;
+    absTotalDrift: number;
+    /** ERP skus that map to no local item — a mapping gap, not a quantity gap. */
+    unresolvedSkus: number;
+    /** ERP warehouse names with no cash-van store of that name. */
+    unmatchedWarehouses: string[];
+    rows: Array<{
+      storeNumber: string;
+      storeName: string;
+      itemNumber: string;
+      itemName: string | null;
+      stockUnitCode: string;
+      erpQty: number;
+      localQty: number;
+      delta: number;
+    }>;
+  }> {
+    // 1. Map ERP warehouse NAME → cash-van store number. /van/stock returns a
+    //    name, not the code; cash-van pulled these warehouses from the ERP, so
+    //    the names line up. Unmatched names are surfaced, never silently dropped.
+    const stores = await this.whs.find();
+    const storeByName = new Map<string, { number: string; name: string }>();
+    for (const w of stores) {
+      if (w.whName) storeByName.set(w.whName.trim(), { number: w.whNumber, name: w.whName });
+    }
+
+    // 2. Pull the whole ERP snapshot, page by page.
+    type VanStockRow = {
+      skuCode: string;
+      warehouseName: string;
+      quantity: number;
+    };
+    const erpByPool = new Map<string, number>(); // key: store|item|unit → base qty
+    let erpRowsFetched = 0;
+    let unresolvedSkus = 0;
+    const unmatchedWarehouses = new Set<string>();
+    const pageSize = 200;
+    let page = 1;
+    for (;;) {
+      let data: VanStockRow[];
+      let total: number;
+      try {
+        ({ data, total } = await this.erp.list<VanStockRow>('van/stock', {
+          page,
+          pageSize,
+        }));
+      } catch (e) {
+        // Unreachable/misconfigured ERP, or /van/stock not exposed — a clear
+        // operator message beats a raw 500. This is read-only, so nothing is
+        // half-done to unwind.
+        throw new ServiceUnavailableException(
+          `Could not read the ERP stock snapshot (GET /van/stock): ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+      for (const r of data) {
+        erpRowsFetched += 1;
+        const store = r.warehouseName ? storeByName.get(r.warehouseName.trim()) : undefined;
+        if (!store) {
+          if (r.warehouseName) unmatchedWarehouses.add(r.warehouseName);
+          continue;
+        }
+        const target = await this.resolveStockTarget(r.skuCode);
+        if (!target) {
+          unresolvedSkus += 1;
+          continue;
+        }
+        const key = `${store.number}|${target.itemNumber}|${target.stockUnitCode}`;
+        erpByPool.set(key, (erpByPool.get(key) ?? 0) + (Number(r.quantity) || 0));
+      }
+      if (page * pageSize >= total || data.length === 0) break;
+      page += 1;
+      if (page > 500) break; // safety cap (100k rows)
+    }
+
+    // 3. cash-van's computed on-hand per pool, from the item_balance view.
+    const localRows: Array<{
+      stock_number: string;
+      item_number: string;
+      item_name: string | null;
+      stock_unit_code: string;
+      qty: string;
+    }> = await this.dataSource.query(
+      `SELECT stock_number, item_number, MAX(item_name) AS item_name,
+              stock_unit_code, SUM(qty)::numeric(14,3) AS qty
+         FROM item_balance
+        GROUP BY stock_number, item_number, stock_unit_code`,
+    );
+    const localByPool = new Map<string, { qty: number; itemName: string | null }>();
+    for (const r of localRows) {
+      localByPool.set(`${r.stock_number}|${r.item_number}|${r.stock_unit_code}`, {
+        qty: Number(r.qty) || 0,
+        itemName: r.item_name,
+      });
+    }
+    const storeName = new Map<string, string>();
+    for (const w of stores) storeName.set(w.whNumber, w.whName);
+
+    // 4. Compare every pool present on EITHER side. A pool the ERP has and
+    //    cash-van does not (localQty 0) is drift too, and vice-versa.
+    const keys = new Set<string>([...erpByPool.keys(), ...localByPool.keys()]);
+    const rows: Array<{
+      storeNumber: string;
+      storeName: string;
+      itemNumber: string;
+      itemName: string | null;
+      stockUnitCode: string;
+      erpQty: number;
+      localQty: number;
+      delta: number;
+    }> = [];
+    let absTotalDrift = 0;
+    for (const key of keys) {
+      const [storeNumber, itemNumber, stockUnitCode] = key.split('|');
+      // Only compare pools whose store we actually mapped to the ERP snapshot —
+      // a store the ERP key cannot see would otherwise read as "all local, no ERP".
+      if (!erpByPool.has(key) && !storeByName.has(storeName.get(storeNumber) ?? '')) {
+        continue;
+      }
+      const erpQty = erpByPool.get(key) ?? 0;
+      const local = localByPool.get(key);
+      const localQty = local?.qty ?? 0;
+      const delta = Math.round((erpQty - localQty) * 1000) / 1000;
+      if (delta === 0) continue;
+      absTotalDrift += Math.abs(delta);
+      rows.push({
+        storeNumber,
+        storeName: storeName.get(storeNumber) ?? storeNumber,
+        itemNumber,
+        itemName: local?.itemName ?? null,
+        stockUnitCode,
+        erpQty,
+        localQty,
+        delta,
+      });
+    }
+    rows.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+
+    return {
+      checkedAt: new Date().toISOString(),
+      erpRowsFetched,
+      poolsCompared: keys.size,
+      driftedPools: rows.length,
+      absTotalDrift: Math.round(absTotalDrift * 1000) / 1000,
+      unresolvedSkus,
+      unmatchedWarehouses: [...unmatchedWarehouses],
+      rows,
+    };
+  }
+
   private async resolveStockTarget(skuCode: string | null): Promise<StockTarget | null> {
     if (!skuCode) return null;
     const iu = await this.itemUnits.findOne({
