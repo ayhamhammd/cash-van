@@ -9,6 +9,7 @@ import { ProductCategory } from './entities/product-category.entity';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ListProductsQuery } from './dto/list-products.query';
+import { applyTokenSearch } from '../../common/search/token-search.util';
 
 /** One sellable unit of an item (base + each item_unit), sent to the app. */
 export interface ProductUnitView {
@@ -52,17 +53,12 @@ export class ProductsService {
 
     if (query.categoryId) qb.andWhere('p.category_id = :cid', { cid: query.categoryId });
     if (query.isActive !== undefined) qb.andWhere('p.is_active = :a', { a: query.isActive });
-    if (query.q) {
-      qb.andWhere(
-        new Brackets((b) => {
-          const s = `%${query.q}%`;
-          b.where('p.sku ILIKE :s', { s })
-            .orWhere('p.name_ar ILIKE :s', { s })
-            .orWhere('p.item_name ILIKE :s', { s })
-            .orWhere('p.barcode ILIKE :s', { s });
-        }),
-      );
-    }
+    applyTokenSearch(qb, query.q, [
+      'p.sku',
+      'p.name_ar',
+      'p.item_name',
+      'p.barcode',
+    ]);
     const [items, total] = await qb.getManyAndCount();
     await this.attachUnits(items);
     await this.attachCategoryNames(items);

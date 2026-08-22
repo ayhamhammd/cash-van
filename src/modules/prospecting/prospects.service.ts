@@ -7,7 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, In, IsNull, Not, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 
 import { Customer } from '../customers/entities/customer.entity';
 import { PaginatedResult } from '../../common/dto/pagination.dto';
@@ -25,6 +25,7 @@ import {
   SendQuoteDto,
   UpdateProspectDto,
 } from './dto/prospect.dto';
+import { applyTokenSearch } from '../../common/search/token-search.util';
 
 @Injectable()
 export class ProspectsService {
@@ -202,13 +203,7 @@ export class ProspectsService {
     if (q.status) qb.andWhere('p.status = :st', { st: q.status });
     if (q.newOnly === 'true') qb.andWhere('p.matchedCustomerId IS NULL');
     if (q.search) {
-      qb.andWhere(
-        new Brackets((w) =>
-          w
-            .where('p.name ILIKE :s', { s: `%${q.search}%` })
-            .orWhere('p.address ILIKE :s', { s: `%${q.search}%` }),
-        ),
-      );
+      applyTokenSearch(qb, q.search, ['p.name', 'p.address']);
     }
 
     const [items, total] = await qb.getManyAndCount();

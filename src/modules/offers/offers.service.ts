@@ -22,6 +22,7 @@ import type {
   OfferTriggerConfig,
   OfferType,
 } from './offers.types';
+import { applyTokenSearch } from '../../common/search/token-search.util';
 
 export type OfferStatus = 'active' | 'paused' | 'scheduled' | 'expired';
 export type OfferView = Offer & { status: OfferStatus };
@@ -95,9 +96,7 @@ export class OffersService {
 
     const qb = this.offersRepo.createQueryBuilder('o');
     if (query.type) qb.andWhere('o.type = :type', { type: query.type });
-    if (query.search) {
-      qb.andWhere('o.name ILIKE :q', { q: `%${query.search}%` });
-    }
+    applyTokenSearch(qb, query.search, ['o.name']);
     this.applyStatusFilter(qb, query.status, now);
 
     const [items, total] = await qb

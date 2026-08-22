@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Brackets, IsNull, Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { parse } from 'csv-parse/sync';
 
 import { Customer } from './entities/customer.entity';
@@ -28,6 +28,7 @@ import { hashPhone } from '../../common/utils/phone-hash.util';
 import { JobsService } from '../../common/jobs/jobs.service';
 import { StorageService } from '../../common/storage/storage.service';
 import { randomUUID } from 'crypto';
+import { applyTokenSearch } from '../../common/search/token-search.util';
 
 export interface CustomerInsights {
   customer: Customer;
@@ -351,16 +352,11 @@ export class CustomersService {
     if (query.regionId) qb.andWhere('c.region_id = :regionId', { regionId: query.regionId });
     if (query.isActive !== undefined) qb.andWhere('c.is_active = :a', { a: query.isActive });
 
-    if (query.q) {
-      qb.andWhere(
-        new Brackets((b) => {
-          const p = `%${query.q}%`;
-          b.where('c.name_ar ILIKE :p', { p })
-            .orWhere('c.name_en ILIKE :p', { p })
-            .orWhere('c.customer_number ILIKE :p', { p });
-        }),
-      );
-    }
+    applyTokenSearch(qb, query.q, [
+      'c.name_ar',
+      'c.name_en',
+      'c.customer_number',
+    ]);
 
     // Filters that require the AI profile — expressed as an EXISTS subquery so
     // getManyAndCount() doesn't try to map a joined entity (which breaks).

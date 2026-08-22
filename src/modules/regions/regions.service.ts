@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, IsNull, Not, Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 
 import { Region } from './entities/region.entity';
 import { CreateRegionDto } from './dto/create-region.dto';
@@ -16,6 +16,7 @@ import {
   isPointInPolygon,
   validateGeoJsonPolygon,
 } from '../../common/geo/geo.util';
+import { applyTokenSearch } from '../../common/search/token-search.util';
 
 @Injectable()
 export class RegionsService {
@@ -35,12 +36,7 @@ export class RegionsService {
       qb.andWhere('r.is_active = :a', { a: query.isActive });
     }
     if (query.q) {
-      qb.andWhere(
-        new Brackets((b) => {
-          const p = `%${query.q}%`;
-          b.where('r.name_ar ILIKE :p', { p }).orWhere('r.name_en ILIKE :p', { p });
-        }),
-      );
+      applyTokenSearch(qb, query.q, ['r.name_ar', 'r.name_en']);
     }
     const [items, total] = await qb.getManyAndCount();
     return { items, total };

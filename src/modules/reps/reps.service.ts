@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { Brackets, DataSource, ILike, IsNull, Not, Repository } from 'typeorm';
+import { DataSource, ILike, IsNull, Not, Repository } from 'typeorm';
 
 import { Rep } from './entities/rep.entity';
 import { ErpSyncService } from '../erp-sync/erp-sync.service';
@@ -16,6 +16,7 @@ import { verifyActivationKey } from './activation-key';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
+import { applyTokenSearch } from '../../common/search/token-search.util';
 
 export interface RepKpis {
   todayRevenueFils: number;
@@ -70,16 +71,7 @@ export class RepsService {
     if (query.isActive !== undefined) {
       qb.andWhere('rep.is_active = :isActive', { isActive: query.isActive });
     }
-    if (query.q) {
-      qb.andWhere(
-        new Brackets((b) => {
-          const pattern = `%${query.q}%`;
-          b.where('rep.name_ar ILIKE :p', { p: pattern })
-            .orWhere('rep.name_en ILIKE :p', { p: pattern })
-            .orWhere('rep.phone ILIKE :p', { p: pattern });
-        }),
-      );
-    }
+    applyTokenSearch(qb, query.q, ['rep.name_ar', 'rep.name_en', 'rep.phone']);
 
     const [items, total] = await qb.getManyAndCount();
     return { items, total };
