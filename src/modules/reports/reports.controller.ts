@@ -24,6 +24,7 @@ import {
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
+import { RepCommissionQueryDto } from './dto/rep-commission.query';
 import { RepScopeService } from '../users/rep-scope.service';
 
 @ApiTags('reports')
@@ -77,6 +78,27 @@ export class ReportsController {
   @ApiOkResponse({ description: 'Ranked reps' })
   async repLeaderboard(@Query() q: ReportsRangeQueryDto, @CurrentUser() user: AuthenticatedUser) {
     return this.reports.repLeaderboard(q.days ?? 30, q.limit ?? 10, await this.repScope.visibleRepIds(user));
+  }
+
+  @Get('rep-commission')
+  @ApiOperation({
+    summary: 'One salesman\'s commission for a date range',
+    description:
+      "Gross sales, returns, the net of the two, and the commission due at the " +
+      "rep's saved rate. Net-of-returns is the base — no commission on returned " +
+      "goods. Rep-scoped: an out-of-scope rep returns a zeroed sheet.",
+  })
+  @ApiOkResponse({ description: 'Commission breakdown for the rep + range' })
+  async repCommission(
+    @Query() q: RepCommissionQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.reports.repCommission(
+      q.repId,
+      q.from,
+      q.to,
+      await this.repScope.visibleRepIds(user),
+    );
   }
 
   @Get('rep-trips')

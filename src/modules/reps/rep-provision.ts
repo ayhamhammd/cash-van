@@ -20,6 +20,8 @@ export interface ProvisionRepInput {
   isActive?: boolean;
   hireDate?: string | null;
   dailyQuotaFils?: number | null;
+  /** Commission rate percentage (0–100), stored as a numeric string on the rep. */
+  commissionPct?: string | null;
   erpAccountId?: string | null;
   erpAccountCode?: string | null;
   /**
@@ -88,6 +90,7 @@ export async function provisionRep(
     isActive: input.isActive ?? true,
     hireDate: input.hireDate ?? null,
     dailyQuotaFils: input.dailyQuotaFils ?? null,
+    commissionPct: input.commissionPct ?? '0',
     erpAccountId: input.erpAccountId ?? null,
     erpAccountCode: input.erpAccountCode ?? null,
     // Defaults to unfrozen: a caller that knows nothing about licensing must

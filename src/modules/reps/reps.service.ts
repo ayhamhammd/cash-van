@@ -198,6 +198,7 @@ export class RepsService {
         isActive: dto.isActive,
         hireDate: dto.hireDate,
         dailyQuotaFils: dto.dailyQuotaFils,
+        commissionPct: dto.commissionPct?.toString(),
         erpAccountId: dto.erpAccountId,
         erpAccountCode: dto.erpAccountCode,
       }),

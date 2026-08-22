@@ -3,10 +3,12 @@ import {
   IsBoolean,
   IsDateString,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   IsUUID,
   MaxLength,
+  Max,
   Min,
   ValidateIf,
 } from 'class-validator';
@@ -83,6 +85,18 @@ export class CreateRepDto {
   @IsInt()
   @Min(0)
   dailyQuotaFils?: number;
+
+  @ApiPropertyOptional({
+    description: "Commission rate as a percentage (0–100) of the rep's net-of-returns sales.",
+    example: 2.5,
+    minimum: 0,
+    maximum: 100,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  commissionPct?: number;
 
   @ApiPropertyOptional({
     nullable: true,

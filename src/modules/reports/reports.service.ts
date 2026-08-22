@@ -852,6 +852,97 @@ export class ReportsService {
     );
   }
 
+  /**
+   * A single salesman's commission for a date range: gross sales, returns, the
+   * net of the two, and the commission due at the rep's saved rate.
+   *
+   * Net-of-returns is the base by design — a rep is not paid on goods that came
+   * back. Money is JOD major, matching salesNet elsewhere. Rep-scoped: a scoped
+   * viewer asking for a rep outside their scope gets no rows and a zeroed sheet
+   * rather than another rep's numbers.
+   */
+  async repCommission(
+    repId: string,
+    from: string,
+    to: string,
+    visibleRepIds: string[] | null = null,
+  ): Promise<{
+    repId: string;
+    repName: string | null;
+    repCode: string | null;
+    from: string;
+    to: string;
+    commissionPct: number;
+    salesNet: number;
+    returnsNet: number;
+    netOfReturns: number;
+    vouchers: number;
+    returnsCount: number;
+    commissionAmount: number;
+  }> {
+    // Scope guard: an out-of-scope rep is reported as an empty sheet, not denied
+    // and not another rep's figures.
+    const inScope = visibleRepIds === null || visibleRepIds.includes(repId);
+
+    const rep = await this.ds.query(
+      `SELECT r.id, COALESCE(r.name_ar, r.name_en) AS "repName",
+              r.code AS "repCode", r.commission_pct::float8 AS "commissionPct"
+         FROM reps r WHERE r.id = $1 AND r.deleted_at IS NULL`,
+      [repId],
+    );
+    const meta = rep[0] ?? { repName: null, repCode: null, commissionPct: 0 };
+    const commissionPct = Number(meta.commissionPct) || 0;
+
+    const empty = {
+      repId,
+      repName: meta.repName ?? null,
+      repCode: meta.repCode ?? null,
+      from,
+      to,
+      commissionPct,
+      salesNet: 0,
+      returnsNet: 0,
+      netOfReturns: 0,
+      vouchers: 0,
+      returnsCount: 0,
+      commissionAmount: 0,
+    };
+    if (!inScope) return empty;
+
+    // `to` inclusive → compare against the day after. Sales and returns split by
+    // trans_kind in one pass, joined rep→user_code the same way the leaderboard does.
+    const rows = await this.ds.query(
+      `SELECT
+         COALESCE(SUM(h.net_total::numeric) FILTER (WHERE h.trans_kind = 'SALE'), 0)::float8   AS "salesNet",
+         COALESCE(SUM(h.net_total::numeric) FILTER (WHERE h.trans_kind = 'RETURN'), 0)::float8 AS "returnsNet",
+         COUNT(*) FILTER (WHERE h.trans_kind = 'SALE')::int   AS "vouchers",
+         COUNT(*) FILTER (WHERE h.trans_kind = 'RETURN')::int AS "returnsCount"
+         FROM voucher_headers h
+         JOIN users u ON u.user_number = h.user_code
+         JOIN reps  r ON r.user_id = u.id AND r.deleted_at IS NULL
+        WHERE r.id = $1
+          AND h.is_posted = true AND h.deleted_at IS NULL
+          AND h.trans_kind IN ('SALE', 'RETURN')
+          AND h.in_date >= $2::date
+          AND h.in_date < ($3::date + 1)`,
+      [repId, from, to],
+    );
+    const r = rows[0] ?? {};
+    const salesNet = Number(r.salesNet) || 0;
+    const returnsNet = Number(r.returnsNet) || 0;
+    const netOfReturns = salesNet - returnsNet;
+    return {
+      ...empty,
+      salesNet,
+      returnsNet,
+      netOfReturns,
+      vouchers: Number(r.vouchers) || 0,
+      returnsCount: Number(r.returnsCount) || 0,
+      // Round to fils (3 dp) so the printed amount is exact money, not a float tail.
+      commissionAmount: Math.round(netOfReturns * commissionPct * 10) / 1000,
+    };
+  }
+
   /** Rep performance leaderboard (sales, vouchers, distinct customers, visits) over N days. */
   async repLeaderboard(
     days = 30,

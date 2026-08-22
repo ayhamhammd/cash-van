@@ -46,6 +46,14 @@ export class Rep extends BaseEntity {
   dailyQuotaFils?: number | null;
 
   /**
+   * Commission rate as a percentage (0–100), applied to the rep's net-of-returns
+   * sales in the commission report. Stored as a numeric; TypeORM hands numerics
+   * back as strings, so read it through Number() at the call site.
+   */
+  @Column({ name: 'commission_pct', type: 'numeric', precision: 5, scale: 2, default: 0 })
+  commissionPct!: string;
+
+  /**
    * The rep's ERP GL account (chart-of-accounts id) — the "cash with salesman" account
    * that settlements post against. FlowVan-side link; a rep re-sync must not clobber it.
    * NULL ⇒ not linked (settle records but skips the ERP journal).
