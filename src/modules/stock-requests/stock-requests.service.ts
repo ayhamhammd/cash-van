@@ -110,6 +110,34 @@ export class StockRequestsService {
 
     const vanQty = await this.vanQtyByPool(van.whNumber, itemNumbers);
 
+    // A van load cannot draw more than the main store actually has. Check the
+    // live main-store balance per pool and refuse the request if any line
+    // exceeds it — the rep sees availability BEFORE sending, and a request that
+    // could never be fulfilled never reaches the manager.
+    const main = await this.resolveMainStore();
+    const mainQty = main
+      ? await this.vanQtyByPool(main.whNumber, itemNumbers)
+      : new Map<string, number>();
+    const over: string[] = [];
+    for (const { line, qty } of merged.values()) {
+      const factor = line.unitBaseQty && line.unitBaseQty > 0 ? line.unitBaseQty : 1;
+      const pool = line.stockUnitCode ?? '';
+      const requestedBase = qty * factor;
+      const available = mainQty.get(`${line.itemNumber}|${pool}`) ?? 0;
+      if (main && requestedBase > available + 1e-6) {
+        const name = byNumber.get(line.itemNumber)?.nameAr ?? line.itemNumber;
+        over.push(`${name}: طلب ${requestedBase} / المتوفر ${available}`);
+      }
+    }
+    if (over.length) {
+      throw new BadRequestException({
+        message: `الكمية المطلوبة تتجاوز رصيد المستودع الرئيسي: ${over.join('؛ ')}`,
+        code: 'STOCK_REQUEST_EXCEEDS_MAIN_STORE',
+        store: main?.whNumber ?? null,
+        items: over,
+      });
+    }
+
     const rows: StockRequestItem[] = [];
     for (const { line, qty } of merged.values()) {
       const item = byNumber.get(line.itemNumber)!;
@@ -503,6 +531,50 @@ export class StockRequestsService {
    * sale-time stock check uses. A second, cleverer source here would eventually
    * disagree with the one that blocks sales.
    */
+  /**
+   * The "main store" a van load is sourced from: the company depot, never a van.
+   * With one non-van warehouse it is unambiguous; with several, the one numbered
+   * MAIN wins, else the first depot by number. Null only if no depot exists.
+   */
+  private async resolveMainStore(): Promise<Warehouse | null> {
+    const depots = await this.warehouses.find({ where: { isVan: false } });
+    if (depots.length === 0) return null;
+    return (
+      depots.find((w) => w.whNumber.toUpperCase() === 'MAIN') ??
+      depots.sort((a, b) => a.whNumber.localeCompare(b.whNumber))[0]
+    );
+  }
+
+  /**
+   * Current main-store stock per pool, for the request UIs to show availability
+   * and for create() to reject an over-request. Live from item_balance — the
+   * same ledger the sale-time and van checks use.
+   */
+  async mainStoreStock(): Promise<{
+    storeNumber: string | null;
+    storeName: string | null;
+    items: Array<{ itemNumber: string; stockUnitCode: string; qty: number }>;
+  }> {
+    const main = await this.resolveMainStore();
+    if (!main) return { storeNumber: null, storeName: null, items: [] };
+    const rows: Array<{ item_number: string; stock_unit_code: string | null; qty: string }> =
+      await this.dataSource.query(
+        `SELECT item_number, stock_unit_code, qty
+           FROM item_balance
+          WHERE stock_number = $1 AND qty <> 0`,
+        [main.whNumber],
+      );
+    return {
+      storeNumber: main.whNumber,
+      storeName: main.whName ?? null,
+      items: rows.map((r) => ({
+        itemNumber: r.item_number,
+        stockUnitCode: r.stock_unit_code ?? '',
+        qty: Number(r.qty) || 0,
+      })),
+    };
+  }
+
   private async vanQtyByPool(
     storeNumber: string,
     itemNumbers: string[],

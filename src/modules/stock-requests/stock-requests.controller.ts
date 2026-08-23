@@ -77,6 +77,19 @@ export class StockRequestsController {
     return this.service.listMine(userId);
   }
 
+  @Get('main-store-stock')
+  @ApiOperation({
+    summary: 'Main-store availability',
+    description:
+      "Current stock in the main depot per pool — what a van load can draw from. " +
+      'The app shows it beside each item when requesting, and create() rejects a ' +
+      'request for more than this.',
+  })
+  @ApiOkResponse({ description: '{ storeNumber, storeName, items[] }' })
+  mainStoreStock() {
+    return this.service.mainStoreStock();
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Request detail, with lines' })
   @ApiParam({ name: 'id', format: 'uuid' })
