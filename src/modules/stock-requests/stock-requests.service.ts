@@ -268,6 +268,15 @@ export class StockRequestsService {
       throw new BadRequestException(`Line(s) not on this request: ${unknown.join(', ')}`);
     }
 
+    // The SOURCE store's live stock, re-read at approval — it may have dropped
+    // since the request was raised, so a grant is capped against what the depot
+    // holds NOW, not what it held then. Base units, keyed by pool.
+    const sourceQty = await this.vanQtyByPool(
+      source.whNumber,
+      [...new Set(row.items.map((i) => i.itemNumber))],
+    );
+
+    const overSource: string[] = [];
     for (const item of row.items) {
       const asked = Number(item.baseQty);
       // A line the reviewer did not touch is granted in full — approving exactly
@@ -278,7 +287,19 @@ export class StockRequestsService {
           `Cannot approve more than requested for ${item.itemName} (asked ${asked}, granted ${give})`,
         );
       }
+      const available = sourceQty.get(`${item.itemNumber}|${item.stockUnitCode ?? ''}`) ?? 0;
+      if (give > available + 1e-6) {
+        overSource.push(`${item.itemName}: منح ${give} / المتوفر ${available}`);
+      }
       item.approvedBaseQty = give.toFixed(3);
+    }
+    if (overSource.length) {
+      throw new BadRequestException({
+        message: `الكمية الممنوحة تتجاوز رصيد المستودع ${source.whName ?? source.whNumber}: ${overSource.join('؛ ')}`,
+        code: 'STOCK_REQUEST_APPROVE_EXCEEDS_SOURCE',
+        store: source.whNumber,
+        items: overSource,
+      });
     }
 
     if (row.items.every((i) => Number(i.approvedBaseQty) === 0)) {
