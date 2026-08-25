@@ -49,6 +49,64 @@ const OUTBOX_KIND_BY_TRANS: Record<string, ErpOutboxKind | undefined> = {
   TRANSFER: 'STOCK_TRANSFER',
 };
 
+/** ERP `GET customers/by-code/{code}/balance` — figures in major units. */
+export interface ErpBalance {
+  customerId: string;
+  customerCode: string;
+  customerName: string;
+  balance: number;
+  creditLimit: number;
+}
+
+/** One posting line of an ERP customer statement (major units). */
+export interface ErpStatementLine {
+  date: string | null;
+  type: 'INVOICE' | 'PAYMENT';
+  reference: string;
+  description: string;
+  debit: number;
+  credit: number;
+  balance: number;
+}
+
+/** ERP `GET customers/by-code/{code}/statement` — ledger with running balance. */
+export interface ErpStatement {
+  customerId: string;
+  customerCode: string;
+  customerName: string;
+  creditLimit: number;
+  from: string | null;
+  to: string | null;
+  openingBalance: number;
+  closingBalance: number;
+  lines: ErpStatementLine[];
+}
+
+/** ERP `GET accounts/by-code/{code}/balance` — one GL account, major units. */
+export interface ErpAccountBalance {
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  accountType: string;
+  balance: number;
+  totalDebit: number;
+  totalCredit: number;
+}
+
+/**
+ * A live balance handed to a controller. `source` distinguishes a real ERP
+ * figure from a gap so the UI never shows a stale/guessed number as if it were
+ * the ERP's — `unavailable` carries a `reason` (unlinked | erp_off | fetch_failed).
+ */
+export interface ErpLiveBalance {
+  source: 'erp' | 'unavailable';
+  reason: string | null;
+  balance: number | null;
+  creditLimit?: number;
+  accountCode?: string;
+  accountName?: string;
+}
+
 /** A SKU row from the ERP `GET /api/v1/skus` (prices already in major units). */
 interface ErpSku {
   id: string;
@@ -362,6 +420,119 @@ export class ErpSyncService {
     if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return [];
     const { data } = await this.erp.list('chart-of-accounts');
     return data;
+  }
+
+  // ── Live reads from the ERP (money & credit, straight from source) ──────────
+  // The ERP is the book of record for balances; these fetch it live rather than
+  // recomputing from mirrored data. All return null when the ERP is off or the
+  // key/code isn't linked, so callers degrade to "unavailable" cleanly.
+
+  /** True when the ERP integration is enabled and fully configured. */
+  private async erpConfigReady(): Promise<boolean> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    return !!(cfg?.enabled && cfg.baseUrl && cfg.apiKey);
+  }
+
+  /** A customer's live balance from the ERP, keyed by ERP customer code. */
+  async getErpCustomerBalance(code: string): Promise<ErpBalance | null> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey || !code) return null;
+    return this.erp.getOne<ErpBalance>(
+      `customers/by-code/${encodeURIComponent(code)}/balance`,
+    );
+  }
+
+  /** A customer's live account statement from the ERP (invoices + receipts, running balance). */
+  async getErpCustomerStatement(
+    code: string,
+    range: { from?: string; to?: string } = {},
+  ): Promise<ErpStatement | null> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey || !code) return null;
+    const qs = new URLSearchParams();
+    if (range.from) qs.set('from', range.from);
+    if (range.to) qs.set('to', range.to);
+    const suffix = qs.toString() ? `?${qs}` : '';
+    return this.erp.getOne<ErpStatement>(
+      `customers/by-code/${encodeURIComponent(code)}/statement${suffix}`,
+    );
+  }
+
+  /** A GL account's live balance from the ERP, keyed by chart-of-accounts code. */
+  async getErpAccountBalance(code: string): Promise<ErpAccountBalance | null> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey || !code) return null;
+    return this.erp.getOne<ErpAccountBalance>(
+      `accounts/by-code/${encodeURIComponent(code)}/balance`,
+    );
+  }
+
+  // ── Id-resolving wrappers (what controllers call) ───────────────────────────
+  // Each returns a small envelope with `source: 'erp' | 'unavailable'` so the UI
+  // can label a live figure vs. a gap (ERP off, not linked, or fetch failed)
+  // without inferring it from a null.
+
+  /** Live ERP balance for a cash-van customer id (resolves the ERP code). */
+  async customerErpBalanceById(customerId: string): Promise<ErpLiveBalance> {
+    const customer = await this.customers.findOne({
+      where: { id: customerId },
+      select: { id: true, customerNumber: true },
+    });
+    if (!customer?.customerNumber) {
+      return { source: 'unavailable', reason: 'unlinked', balance: null };
+    }
+    if (!(await this.erpConfigReady())) {
+      return { source: 'unavailable', reason: 'erp_off', balance: null };
+    }
+    try {
+      const erp = await this.getErpCustomerBalance(customer.customerNumber);
+      if (!erp) return { source: 'unavailable', reason: 'not_found', balance: null };
+      return { source: 'erp', reason: null, balance: erp.balance, creditLimit: erp.creditLimit };
+    } catch {
+      return { source: 'unavailable', reason: 'fetch_failed', balance: null };
+    }
+  }
+
+  /** Live ERP statement for a cash-van customer id (resolves the ERP code). */
+  async customerErpStatementById(
+    customerId: string,
+    range: { from?: string; to?: string } = {},
+  ): Promise<ErpStatement | { source: 'unavailable'; reason: string }> {
+    const customer = await this.customers.findOne({
+      where: { id: customerId },
+      select: { id: true, customerNumber: true },
+    });
+    if (!customer?.customerNumber) return { source: 'unavailable', reason: 'unlinked' };
+    if (!(await this.erpConfigReady())) return { source: 'unavailable', reason: 'erp_off' };
+    try {
+      const erp = await this.getErpCustomerStatement(customer.customerNumber, range);
+      if (!erp) return { source: 'unavailable', reason: 'not_found' };
+      return erp;
+    } catch {
+      return { source: 'unavailable', reason: 'fetch_failed' };
+    }
+  }
+
+  /** Live ERP balance for a rep id — the rep's linked "cash with salesman" GL account. */
+  async repErpBalanceById(repId: string): Promise<ErpLiveBalance> {
+    const rep = await this.reps.findOne({
+      where: { id: repId },
+      select: { id: true, erpAccountCode: true },
+    });
+    if (!rep?.erpAccountCode) return { source: 'unavailable', reason: 'unlinked', balance: null };
+    if (!(await this.erpConfigReady())) {
+      return { source: 'unavailable', reason: 'erp_off', balance: null };
+    }
+    try {
+      const erp = await this.getErpAccountBalance(rep.erpAccountCode);
+      if (!erp) return { source: 'unavailable', reason: 'not_found', balance: null };
+      return {
+        source: 'erp', reason: null, balance: erp.balance,
+        accountCode: erp.accountCode, accountName: erp.accountName,
+      };
+    } catch {
+      return { source: 'unavailable', reason: 'fetch_failed', balance: null };
+    }
   }
 
   // ── Create-mirror (dashboard → ERP), event-driven to avoid module cycles ──

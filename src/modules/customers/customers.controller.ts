@@ -31,6 +31,7 @@ import {
 } from '@nestjs/swagger';
 
 import { CustomersService } from './customers.service';
+import { ErpSyncService } from '../erp-sync/erp-sync.service';
 import { RepScopeService } from '../users/rep-scope.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
@@ -53,6 +54,7 @@ import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
 export class CustomersController {
   constructor(
     private readonly customers: CustomersService,
+    private readonly erp: ErpSyncService,
     private readonly repScope: RepScopeService,
   ) {}
 
@@ -93,6 +95,38 @@ export class CustomersController {
   @ApiOkResponse({ description: 'Customer AI profile, recent visits and summaries' })
   insights(@Param('id', ParseUUIDPipe) id: string) {
     return this.customers.insights(id);
+  }
+
+  @Get(':id/erp-balance')
+  @ApiOperation({
+    summary: 'Customer balance from the ERP (live)',
+    description:
+      "The customer's balance and credit limit read live from the ERP (the book " +
+      'of record), not recomputed locally. Returns { source: "erp" | "unavailable" } ' +
+      'so the caller can label a live figure vs. a gap (ERP off / not linked).',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
+  @ApiOkResponse({ description: 'Live ERP balance envelope' })
+  erpBalance(@Param('id', ParseUUIDPipe) id: string) {
+    return this.erp.customerErpBalanceById(id);
+  }
+
+  @Get(':id/erp-statement')
+  @ApiOperation({
+    summary: 'Customer account statement from the ERP (live)',
+    description:
+      'The account statement exactly as the ERP renders it: invoices and receipts ' +
+      'in date order with a running balance and opening/closing figures. Optional ' +
+      'from/to (YYYY-MM-DD) bound the window.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
+  @ApiOkResponse({ description: 'Live ERP statement, or an unavailable envelope' })
+  erpStatement(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.erp.customerErpStatementById(id, { from, to });
   }
 
   // Allowed even when ERP mode is on — like Update below, a new customer saves

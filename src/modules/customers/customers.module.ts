@@ -17,9 +17,10 @@ import { CustomerProximityService } from './customer-proximity.service';
 import { CustomersController } from './customers.controller';
 import { JobsService } from '../../common/jobs/jobs.service';
 import { UsersModule } from '../users/users.module';
+import { ErpSyncModule } from '../erp-sync/erp-sync.module';
 
 @Module({
-  imports: [UsersModule, forwardRef(() => ApprovalsModule), 
+  imports: [UsersModule, forwardRef(() => ApprovalsModule), forwardRef(() => ErpSyncModule),
     TypeOrmModule.forFeature([
       PendingCustomerPhoto,
       Customer,

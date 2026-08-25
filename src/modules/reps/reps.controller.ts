@@ -23,6 +23,7 @@ import {
 } from '@nestjs/swagger';
 
 import { RepsService } from './reps.service';
+import { ErpSyncService } from '../erp-sync/erp-sync.service';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
@@ -43,6 +44,7 @@ import { RepScopeService } from '../users/rep-scope.service';
 export class RepsController {
   constructor(
     private readonly reps: RepsService,
+    private readonly erp: ErpSyncService,
     private readonly repScope: RepScopeService,
   ) {}
 
@@ -90,6 +92,21 @@ export class RepsController {
     return this.reps.materialsByWarehouse(rep.id);
   }
 
+  @Get('me/erp-balance')
+  @ApiOperation({
+    summary: 'My balance from the ERP (live)',
+    description:
+      "The signed-in salesman's linked ERP GL account balance (the \"cash with " +
+      'salesman" account), read live from the ERP. Pair it with the cash-van cash ' +
+      'summary to show both the ERP figure and the on-hand custody figure. Returns ' +
+      '{ source: "erp" | "unavailable" }.',
+  })
+  @ApiOkResponse({ description: 'Live ERP balance envelope for the current rep' })
+  async myErpBalance(@CurrentUser() user: AuthenticatedUser) {
+    const rep = await this.reps.findByUserIdOrThrow(user.sub);
+    return this.erp.repErpBalanceById(rep.id);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get rep', description: 'Fetch a single rep by id.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
@@ -116,6 +133,23 @@ export class RepsController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.reps.materialsByWarehouse(id, await this.repScope.visibleRepIds(user));
+  }
+
+  @Get(':id/erp-balance')
+  @ApiOperation({
+    summary: "A rep's balance from the ERP (live)",
+    description:
+      "The rep's linked ERP GL account balance (\"cash with salesman\"), read live " +
+      'from the ERP. Rep-scoped. Returns { source: "erp" | "unavailable" }.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
+  @ApiOkResponse({ description: 'Live ERP balance envelope for the rep' })
+  async erpBalance(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.repScope.assertCanSeeRep(user, id);
+    return this.erp.repErpBalanceById(id);
   }
 
   @Get(':id/kpis')
