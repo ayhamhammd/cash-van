@@ -26,6 +26,7 @@ import {
 import { ItemCartService } from './item-cart.service';
 import { ExpiryItemsService } from './expiry-items.service';
 import { ItemBalanceService } from './item-balance.service';
+import { ErpSyncService } from '../erp-sync/erp-sync.service';
 
 import { CreateItemDto } from './dto/create-item.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
@@ -44,6 +45,7 @@ export class ItemsController {
     private readonly itemCart: ItemCartService,
     private readonly expiryItems: ExpiryItemsService,
     private readonly itemBalance: ItemBalanceService,
+    private readonly erp: ErpSyncService,
   ) {}
 
   // -------- Items / catalog ---------
@@ -74,6 +76,30 @@ export class ItemsController {
   @ApiOkResponse({ description: 'The matching catalog item' })
   findByBarcode(@Param('barcode') barcode: string) {
     return this.itemCart.findByBarcode(barcode);
+  }
+
+  // Registered before :id — a one-segment static route must win over the uuid param.
+  @Get('erp-stock')
+  @ApiOperation({
+    summary: 'Live on-hand quantities from the ERP',
+    description:
+      "On-hand quantity read straight from the ERP's absolute snapshot (the book " +
+      'of record), NOT cash-van\'s summed-delta item_balance view. Same pool shape ' +
+      '(store · item · stock unit). Pass itemNumber (repeatable) to target specific ' +
+      'items cheaply, and/or stockNumber to narrow to one store. Returns ' +
+      '{ source: "erp" | "unavailable", asOf, rows }.',
+  })
+  @ApiQuery({ name: 'itemNumber', required: false, description: 'Item number(s) to target; repeatable', example: 'IT-1001' })
+  @ApiQuery({ name: 'stockNumber', required: false, description: 'Narrow to one store/stock number', example: 'ST-01' })
+  @ApiOkResponse({ description: 'Live ERP stock envelope' })
+  erpStock(
+    @Query('itemNumber') itemNumber?: string | string[],
+    @Query('stockNumber') stockNumber?: string,
+  ) {
+    const itemNumbers = itemNumber == null
+      ? []
+      : Array.isArray(itemNumber) ? itemNumber : [itemNumber];
+    return this.erp.liveErpStock({ itemNumbers, stockNumber });
   }
 
   @Get(':id')

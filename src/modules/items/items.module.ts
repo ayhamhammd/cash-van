@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ItemCart } from './entities/item-cart.entity';
@@ -15,6 +15,7 @@ import { TobaccoTaxProfilesService } from './tobacco-tax-profiles.service';
 import { ItemsController } from './items.controller';
 import { TobaccoTaxProfilesController } from './tobacco-tax-profiles.controller';
 import { WarehousesModule } from '../warehouses/warehouses.module';
+import { ErpSyncModule } from '../erp-sync/erp-sync.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { WarehousesModule } from '../warehouses/warehouses.module';
       TobaccoTaxProfile,
     ]),
     WarehousesModule,
+    forwardRef(() => ErpSyncModule),
   ],
   controllers: [ItemsController, TobaccoTaxProfilesController],
   providers: [ItemCartService, ExpiryItemsService, ItemBalanceService, TobaccoTaxProfilesService],

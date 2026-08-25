@@ -1757,6 +1757,110 @@ export class ErpSyncService {
     };
   }
 
+  /**
+   * Live on-hand quantities read straight from the ERP's absolute snapshot
+   * (GET /van/stock — the book of record), NOT from cash-van's summed-delta
+   * item_balance view. Same pool shape as item_balance so the UI can swap the
+   * source: one row per (store, item, stock unit) with the ERP's quantity.
+   *
+   * Targeted mode (itemNumbers given) resolves those items' ERP sku codes and
+   * pulls only their rows — one cheap call per sku, no full-catalogue scan.
+   * Broad mode (no itemNumbers) paginates the whole snapshot. `stockNumber`
+   * narrows to one store. Returns a { source, reason, asOf } envelope so callers
+   * can label a live figure vs. a gap without inferring it from an empty list.
+   */
+  async liveErpStock(opts: {
+    itemNumbers?: string[];
+    stockNumber?: string;
+  }): Promise<{
+    source: 'erp' | 'unavailable';
+    reason: string | null;
+    asOf: string | null;
+    rows: Array<{
+      stockNumber: string;
+      storeName: string;
+      itemNumber: string;
+      stockUnitCode: string;
+      quantity: number;
+    }>;
+  }> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) {
+      return { source: 'unavailable', reason: 'erp_off', asOf: null, rows: [] };
+    }
+
+    // ERP warehouse NAME → cash-van store. /van/stock returns the name, not the
+    // code; cash-van pulled these warehouses from the ERP, so the names line up.
+    const stores = await this.whs.find();
+    const storeByName = new Map<string, { number: string; name: string }>();
+    for (const w of stores) {
+      if (w.whName) storeByName.set(w.whName.trim(), { number: w.whNumber, name: w.whName });
+    }
+
+    type VanStockRow = { skuCode: string; warehouseName: string; quantity: number };
+    const erpRows: VanStockRow[] = [];
+    try {
+      const items = opts.itemNumbers?.filter(Boolean) ?? [];
+      if (items.length) {
+        // Targeted: resolve the items' ERP sku codes, pull just those.
+        const units = await this.itemUnits.find({
+          where: { item: { itemNumber: In(items) } },
+          relations: { item: true },
+        });
+        const codes = [...new Set(units.map((u) => u.erpSkuCode).filter(Boolean))] as string[];
+        for (const code of codes) {
+          const { data } = await this.erp.list<VanStockRow>('van/stock', {
+            skuCode: code,
+            page: 1,
+            pageSize: 200,
+          });
+          erpRows.push(...data);
+        }
+      } else {
+        // Broad: the whole snapshot, page by page.
+        const pageSize = 200;
+        let page = 1;
+        for (;;) {
+          const { data, total } = await this.erp.list<VanStockRow>('van/stock', { page, pageSize });
+          erpRows.push(...data);
+          if (page * pageSize >= total || data.length === 0) break;
+          page += 1;
+          if (page > 500) break;
+        }
+      }
+    } catch {
+      return { source: 'unavailable', reason: 'fetch_failed', asOf: null, rows: [] };
+    }
+
+    // Aggregate ERP rows into cash-van pools (store | item | stock unit).
+    const byPool = new Map<string, { store: { number: string; name: string }; itemNumber: string; stockUnitCode: string; qty: number }>();
+    for (const r of erpRows) {
+      const store = r.warehouseName ? storeByName.get(r.warehouseName.trim()) : undefined;
+      if (!store) continue;
+      if (opts.stockNumber && store.number !== opts.stockNumber) continue;
+      const target = await this.resolveStockTarget(r.skuCode);
+      if (!target) continue;
+      const key = `${store.number}|${target.itemNumber}|${target.stockUnitCode}`;
+      const cur = byPool.get(key);
+      if (cur) cur.qty += Number(r.quantity) || 0;
+      else byPool.set(key, {
+        store,
+        itemNumber: target.itemNumber,
+        stockUnitCode: target.stockUnitCode,
+        qty: Number(r.quantity) || 0,
+      });
+    }
+
+    const rows = [...byPool.values()].map((p) => ({
+      stockNumber: p.store.number,
+      storeName: p.store.name,
+      itemNumber: p.itemNumber,
+      stockUnitCode: p.stockUnitCode,
+      quantity: Math.round(p.qty * 1000) / 1000,
+    }));
+    return { source: 'erp', reason: null, asOf: new Date().toISOString(), rows };
+  }
+
   private async resolveStockTarget(skuCode: string | null): Promise<StockTarget | null> {
     if (!skuCode) return null;
     const iu = await this.itemUnits.findOne({
