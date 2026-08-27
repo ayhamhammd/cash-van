@@ -87,6 +87,22 @@ export class EventBridgeService {
     this.gateway.emitToAllReps(SYNC_REQUIRED_EVENT, signal);
   }
 
+  /**
+   * A voucher posted — a sale, a transfer, a van load or a return. Any of these
+   * moves stock on some van, so tell every van to refresh its own stock in real
+   * time. The payload names only the kind, not the rep, so this fans out to all
+   * vans; each pulls a small ledger and the ones it didn't touch simply no-op.
+   * This is what makes a van's qty reflect a transfer/sale without waiting for a
+   * poll — the same signal the ERP-driven and manual paths already use.
+   */
+  @OnEvent('erp.voucher.posted')
+  onVoucherPosted(p: { transKind?: string } = {}): void {
+    this.gateway.emitToAllReps(
+      SYNC_REQUIRED_EVENT,
+      syncSignal('stock', `voucher.posted:${p.transKind ?? 'unknown'}`),
+    );
+  }
+
   /** Escape hatch for callers that already know the resource. */
   signalRep(repId: string, resource: SyncResource, reason: string): void {
     this.gateway.emitToRep(repId, SYNC_REQUIRED_EVENT, syncSignal(resource, reason));

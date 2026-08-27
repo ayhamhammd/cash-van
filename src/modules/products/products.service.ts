@@ -43,13 +43,23 @@ export class ProductsService {
     private readonly events: EventEmitter2,
   ) {}
 
-  async list(query: ListProductsQuery): Promise<{ items: ItemCart[]; total: number }> {
+  async list(
+    query: ListProductsQuery,
+    allowedItemNumbers?: string[],
+  ): Promise<{ items: ItemCart[]; total: number }> {
     const qb = this.products
       .createQueryBuilder('p')
       .where('p.deleted_at IS NULL')
       .orderBy('p.name_ar', 'ASC')
       .take(query.limit ?? 50)
       .skip(query.offset ?? 0);
+
+    // Restrict to the salesman's van-store allowlist when one is supplied. An empty
+    // list is NOT passed (see the controller) — empty means "no restriction", so a
+    // manager/admin and an unlinked van both see the full catalogue.
+    if (allowedItemNumbers && allowedItemNumbers.length) {
+      qb.andWhere('p.item_number IN (:...allow)', { allow: allowedItemNumbers });
+    }
 
     if (query.categoryId) qb.andWhere('p.category_id = :cid', { cid: query.categoryId });
     if (query.isActive !== undefined) qb.andWhere('p.is_active = :a', { a: query.isActive });

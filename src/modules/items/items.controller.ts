@@ -190,11 +190,26 @@ export class ItemsController {
     example: 'أحمر',
   })
   @ApiOkResponse({ description: 'Item balance rows' })
-  balances(
+  async balances(
     @Query('itemNumber') itemNumber?: string,
     @Query('stockNumber') stockNumber?: string,
     @Query('stockUnitCode') stockUnitCode?: string,
   ) {
-    return this.itemBalance.list({ itemNumber, stockNumber, stockUnitCode });
+    const rows = await this.itemBalance.list({ itemNumber, stockNumber, stockUnitCode });
+
+    // Overlay the ERP's authoritative on-hand (the book of record) so an ERP
+    // in/out/transfer reflects here immediately, instead of waiting for the
+    // summed-delta item_balance view. Falls back to the local qty per row when
+    // the ERP is unavailable, or for any pool the ERP does not report — so the
+    // list never breaks on an ERP outage and an unmapped item is never zeroed.
+    const live = await this.erp.liveErpQtyIndex({
+      itemNumbers: itemNumber ? [itemNumber] : [],
+      stockNumber,
+    });
+    if (!live.live) return rows;
+    return rows.map((r) => {
+      const q = live.qty.get(`${r.stockNumber ?? ''}|${r.itemNumber}|${r.stockUnitCode}`);
+      return q === undefined ? r : { ...r, qty: q.toFixed(3) };
+    });
   }
 }

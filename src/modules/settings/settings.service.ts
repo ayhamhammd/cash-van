@@ -35,6 +35,8 @@ export interface AppSettingsView {
   taxCalcMethod: TaxCalcMethod;
   timezone: string;
   locale: string;
+  /** Warehouse wh_number of the main store van orders draw from; null = ERP default depot. */
+  mainStoreNumber: string | null;
   aiChatQuota: number;
   aiInferQuota: number;
   tobaccoTaxEnabled: boolean;
@@ -365,6 +367,7 @@ export class SettingsService {
       taxCalcMethod: row.taxCalcMethod,
       timezone: row.timezone,
       locale: row.locale,
+      mainStoreNumber: row.mainStoreNumber ?? null,
       aiChatQuota: row.aiChatQuota,
       aiInferQuota: row.aiInferQuota,
       tobaccoTaxEnabled: row.tobaccoTaxEnabled,

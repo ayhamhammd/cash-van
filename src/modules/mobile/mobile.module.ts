@@ -15,6 +15,7 @@ import { VanStock } from '../products/entities/van-stock.entity';
 import { MobileController } from './mobile.controller';
 import { MobileService } from './mobile.service';
 import { MobileContextGuard } from './mobile-context.guard';
+import { ErpSyncModule } from '../erp-sync/erp-sync.module';
 
 @Module({
   imports: [
@@ -30,6 +31,8 @@ import { MobileContextGuard } from './mobile-context.guard';
       ProductCategory,
       VanStock,
     ]),
+    // For live ERP on-hand overlay on the cross-store itemBalance lookup.
+    ErpSyncModule,
   ],
   controllers: [MobileController],
   providers: [MobileService, MobileContextGuard],

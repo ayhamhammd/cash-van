@@ -329,6 +329,76 @@ export class ErpSyncService {
     private readonly events: EventEmitter2,
   ) {}
 
+  /**
+   * The item numbers a van store is ALLOWED to hold, per the ERP's per-warehouse
+   * allowlist (`sku_warehouses`, exposed at `/api/v1/inventory/allowed-items`).
+   * Used to filter a salesman's stock-request picker down to items connected to
+   * his own store.
+   *
+   * Returns an EMPTY set when the ERP is disabled or the van is not mapped to an
+   * ERP warehouse — the caller decides what empty means (typically "no allowlist
+   * configured → do not restrict", so a mis-config never hides every item). The
+   * allowlist is intentionally independent of on-hand quantity: a van may request
+   * an item precisely because it holds none yet.
+   */
+  async allowedItemNumbersForWarehouse(whNumber: string): Promise<Set<string>> {
+    if (!whNumber) return new Set();
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled) return new Set();
+
+    const whMap = await this.idmap.findOne({
+      where: { entity: 'warehouse', localId: whNumber },
+    });
+    if (!whMap?.erpId) return new Set();
+
+    // Page through the allowlist (the endpoint caps pageSize at 100).
+    const skus: Array<{ skuId: string; skuCode: string }> = [];
+    const pageSize = 100;
+    for (let page = 1; page <= 200; page++) {
+      const res = await this.erp.list<{ skuId: string; skuCode: string }>(
+        'inventory/allowed-items',
+        { warehouseId: whMap.erpId, page, pageSize },
+      );
+      skus.push(...res.data);
+      if (res.data.length < pageSize) break;
+    }
+    if (skus.length === 0) return new Set();
+
+    // Map ERP sku uuid → cash-van itemNumber through the id map (authoritative);
+    // fall back to the ERP sku code, which matches by the sync convention.
+    const erpSkuIds = skus.map((s) => s.skuId).filter(Boolean);
+    const maps = erpSkuIds.length
+      ? await this.idmap.find({ where: { entity: 'item', erpId: In(erpSkuIds) } })
+      : [];
+    const byErpId = new Map(maps.map((m) => [m.erpId, m.localId]));
+
+    const out = new Set<string>();
+    for (const s of skus) {
+      const itemNumber = byErpId.get(s.skuId) ?? s.skuCode;
+      if (itemNumber) out.add(itemNumber);
+    }
+    return out;
+  }
+
+  /**
+   * The item numbers a SALESMAN may see and handle — across sale, stock request,
+   * return, order and item reports — being his VAN store's ERP allowlist
+   * (sku_warehouses), mirroring how items are linked to a store on the ERP.
+   *
+   * Returns an EMPTY set when the caller is not a salesman, has no van assigned, or
+   * the van is not linked / the ERP is off. Callers MUST treat empty as "no
+   * restriction — show everything", so a manager/admin (no van) sees the full
+   * catalogue and a mis-configured van never has its whole catalogue hidden.
+   */
+  async allowedItemNumbersForUser(userSub: string): Promise<Set<string>> {
+    if (!userSub) return new Set();
+    const rep = await this.reps.findOne({ where: { userId: userSub } });
+    if (!rep?.vanId) return new Set();
+    const van = await this.whs.findOne({ where: { id: rep.vanId } });
+    if (!van?.whNumber) return new Set();
+    return this.allowedItemNumbersForWarehouse(van.whNumber);
+  }
+
   /** Queue a posted cash-van voucher for push to the ERP, by kind. */
   @OnEvent('erp.voucher.posted')
   async onVoucherPosted(p: { voucherNumber: string; transKind: string }): Promise<void> {
@@ -1510,6 +1580,16 @@ export class ErpSyncService {
         await this.runEntity(`movements:${store}`, () => this.pullMovementsForStore(store)),
       );
     }
+    // If any ERP movement landed (an ERP transfer/adjustment to a van, pulled via
+    // the webhook fast-path), tell the vans to refresh their stock in real time.
+    // The mirror inserts vouchers directly, so it does NOT emit erp.voucher.posted
+    // — this is the signal for the ERP-driven path. No rep is named (an ERP change
+    // can touch any van), so it fans out to all; each pulls a small ledger and the
+    // unaffected no-op. Emitted ONCE per sync, so a bulk catch-up does not spam.
+    const applied = results.reduce((n, r) => n + (r.count || 0), 0);
+    if (applied > 0) {
+      this.events.emit('stock.changed', { reason: 'erp.movements.pulled' });
+    }
     return results;
   }
 
@@ -1769,6 +1849,48 @@ export class ErpSyncService {
    * narrows to one store. Returns a { source, reason, asOf } envelope so callers
    * can label a live figure vs. a gap without inferring it from an empty list.
    */
+  /**
+   * Live ERP on-hand as a lookup for OVERLAYING onto locally-computed balance
+   * rows, so an ERP in/out/transfer reflects on the dashboard immediately rather
+   * than waiting for the summed-delta `item_balance` view to catch up. Key is
+   * `${stockNumber}|${itemNumber}|${stockUnitCode}` — the same pool shape the
+   * views use.
+   *
+   * `live` is false when the ERP is off or unreachable, in which case callers keep
+   * their local qty (a dashboard must never break on an ERP outage). A key that is
+   * PRESENT carries the ERP's authoritative number. A key that is ABSENT while
+   * `live` is true is intentionally left to the caller: the ERP feed omits zero
+   * pools, and an unmapped item must not be misread as zero — so the safe default
+   * at every call site is "keep the local value on a miss".
+   */
+  async liveErpQtyIndex(opts: {
+    itemNumbers?: string[];
+    stockNumber?: string;
+  }): Promise<{ live: boolean; asOf: string | null; qty: Map<string, number> }> {
+    const res = await this.liveErpStock(opts);
+    const qty = new Map<string, number>();
+    for (const r of res.rows) {
+      qty.set(`${r.stockNumber}|${r.itemNumber}|${r.stockUnitCode}`, r.quantity);
+    }
+    return { live: res.source === 'erp', asOf: res.asOf, qty };
+  }
+
+  /**
+   * Store numbers that are salesmen's vans (`rep.van_id → warehouse`). A van's
+   * on-hand must stay on the LOCAL ledger, which drops the instant the salesman
+   * sells; overlaying live ERP there would lag his own un-synced sales and risk
+   * overselling. Warehouse/main-store on-hand has no such issue — the ERP owns it.
+   */
+  async vanStoreNumbers(): Promise<Set<string>> {
+    const rows: Array<{ n: string }> = await this.dataSource.query(
+      `SELECT DISTINCT w.wh_number AS n
+         FROM warehouses w
+         JOIN reps r ON r.van_id = w.id
+        WHERE r.van_id IS NOT NULL AND w.wh_number IS NOT NULL`,
+    );
+    return new Set(rows.map((r) => r.n));
+  }
+
   async liveErpStock(opts: {
     itemNumbers?: string[];
     stockNumber?: string;
@@ -1807,7 +1929,20 @@ export class ErpSyncService {
           where: { item: { itemNumber: In(items) } },
           relations: { item: true },
         });
-        const codes = [...new Set(units.map((u) => u.erpSkuCode).filter(Boolean))] as string[];
+        const mappedCodes = units.map((u) => u.erpSkuCode).filter(Boolean) as string[];
+        // Items with NO mapped erp_sku_code fall back to their own number as the
+        // candidate sku code — the ERP sku code is usually the barcode/number, and
+        // item_units.erp_sku_code is not always populated. Without this, a targeted
+        // lookup for an unmapped item returned nothing and read as "0 available"
+        // (the "المتوفر 0" bug on the approval page and availability views).
+        const itemsWithMapping = new Set(
+          units
+            .filter((u) => u.erpSkuCode)
+            .map((u) => u.item?.itemNumber)
+            .filter(Boolean) as string[],
+        );
+        const fallbackCodes = items.filter((n) => !itemsWithMapping.has(n));
+        const codes = [...new Set([...mappedCodes, ...fallbackCodes])] as string[];
         for (const code of codes) {
           const { data } = await this.erp.list<VanStockRow>('van/stock', {
             skuCode: code,

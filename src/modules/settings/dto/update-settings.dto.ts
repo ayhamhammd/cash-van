@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, MaxLength, Min, ValidateIf } from 'class-validator';
 import type { TaxCalcMethod } from '../entities/app-settings.entity';
 
 const TAX_CALC_METHODS: TaxCalcMethod[] = ['INCLUSIVE', 'EXCLUSIVE'];
@@ -16,6 +16,19 @@ export class UpdateAppSettingsDto {
   @IsString()
   @MaxLength(1024)
   logoUrl?: string;
+
+  @ApiPropertyOptional({
+    example: '1',
+    nullable: true,
+    description:
+      "Warehouse wh_number of the MAIN STORE that van orders are fulfilled from " +
+      '(orders draw from here, not the van). null clears it → falls back to the ERP default depot.',
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  @MaxLength(64)
+  mainStoreNumber?: string | null;
 
   @ApiPropertyOptional({ example: 'شركة ABC للتجارة' })
   @IsOptional()

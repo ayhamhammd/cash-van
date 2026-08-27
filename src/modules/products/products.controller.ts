@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Inject,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -13,6 +14,7 @@ import {
   Req,
   Res,
   UseGuards,
+  forwardRef,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import {
@@ -36,6 +38,11 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
+import { ErpSyncService } from '../erp-sync/erp-sync.service';
 
 /** Rewrites an item's image to the cash-van proxy URL the app/browser can reach. */
 function proxyImageUrl(req: Request, itemNumber: string): string {
@@ -51,6 +58,8 @@ export class ProductsController {
   constructor(
     private readonly products: ProductsService,
     private readonly pricing: PricingService,
+    @Inject(forwardRef(() => ErpSyncService))
+    private readonly erpSync: ErpSyncService,
   ) {}
 
   @Get()
@@ -59,8 +68,18 @@ export class ProductsController {
     description: 'List catalog products with optional filters (category, tax type, search).',
   })
   @ApiOkResponse({ description: 'Product list' })
-  async list(@Query() query: ListProductsQuery, @Req() req: Request) {
-    const result = await this.products.list(query);
+  async list(
+    @Query() query: ListProductsQuery,
+    @Req() req: Request,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // A salesman only sees items linked to his van store (the ERP allowlist);
+    // managers/admins (no van) and unlinked vans get the full catalogue (empty set).
+    const allowed = await this.erpSync.allowedItemNumbersForUser(user.sub);
+    const result = await this.products.list(
+      query,
+      allowed.size ? [...allowed] : undefined,
+    );
     // Serve images through THIS host (the app/browser already reaches it), not the
     // ERP host baked into the stored URL (often 127.0.0.1 → unreachable from a device).
     for (const it of result.items as Array<{ itemNumber: string; imageUrl?: string | null }>) {

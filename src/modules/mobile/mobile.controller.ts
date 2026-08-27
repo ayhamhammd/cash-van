@@ -117,4 +117,24 @@ export class MobileController {
       ctx.salesmanCode,
     );
   }
+
+  @Get('order-stock')
+  @ApiOperation({
+    summary: 'Order stock (main store)',
+    description:
+      'Item quantities for the ORDER flow. An order is a request for a voucher ' +
+      "drawn from the MAIN STORE (a central depot), NOT the salesman's van — so " +
+      'quantities come from the main store, live from the ERP. Any salesman may ' +
+      'order, including a credit salesman with no van. Omit itemNumber for all items.',
+  })
+  @ApiQuery({ name: 'companyNumber', required: false })
+  @ApiQuery({ name: 'salesmanCode', required: false })
+  @ApiQuery({ name: 'itemNumber', required: false, description: 'Narrow to one item; omit for all' })
+  @ApiOkResponse({ type: [ItemBalanceRowDto] })
+  getOrderStock(
+    @Query('itemNumber') itemNumber: string | undefined,
+    @MobileCtx() ctx: MobileContext,
+  ) {
+    return this.mobile.getOrderStock(itemNumber, ctx.companyNumber, ctx.salesmanCode);
+  }
 }

@@ -11,6 +11,7 @@ import { ItemUnit } from '../units/entities/item-unit.entity';
 import { ItemBalanceView } from '../items/entities/item-balance.view';
 import { ProductCategory } from '../products/entities/product-category.entity';
 import { VanStock } from '../products/entities/van-stock.entity';
+import { ErpSyncService } from '../erp-sync/erp-sync.service';
 import { filsToJod } from '../../common/utils/currency.util';
 import {
   CompanyMetaDto,
@@ -33,6 +34,7 @@ export class MobileService {
     @InjectRepository(ProductCategory)
     private readonly categories: Repository<ProductCategory>,
     @InjectRepository(VanStock) private readonly vanStock: Repository<VanStock>,
+    private readonly erpSync: ErpSyncService,
   ) {}
 
   async getSalesman(
@@ -245,6 +247,22 @@ export class MobileService {
     if (storeNo) qb.andWhere('b.stock_number = :s', { s: storeNo });
     const rows = await qb.orderBy('b.stock_number', 'ASC').getMany();
 
+    // Overlay the ERP's authoritative on-hand for WAREHOUSE stores (the book of
+    // record), so an ERP in/out/transfer reflects immediately. VAN stores are
+    // deliberately left on the local ledger — it drops the instant the salesman
+    // sells, whereas the ERP lags his un-synced sales (overselling risk). Any
+    // pool the ERP does not report, and any ERP outage, keeps the local qty.
+    const [live, vanStores] = await Promise.all([
+      this.erpSync.liveErpQtyIndex({ itemNumbers: [itemNumber], stockNumber: storeNo }),
+      this.erpSync.vanStoreNumbers(),
+    ]);
+    const qtyOf = (r: ItemBalanceView): number => {
+      const store = r.stockNumber ?? '';
+      if (!live.live || vanStores.has(store)) return Number(r.qty);
+      const erp = live.qty.get(`${store}|${r.itemNumber}|${r.stockUnitCode ?? ''}`);
+      return erp === undefined ? Number(r.qty) : erp;
+    };
+
     return rows.map((r) => ({
       companyNumber,
       salesmanCode,
@@ -252,8 +270,82 @@ export class MobileService {
       // One row per pool now — a variant's stock is its own, so it is reported
       // as its own row rather than folded into the item's total.
       stockUnitCode: r.stockUnitCode ?? '',
-      itemQty: String(Math.trunc(Number(r.qty))),
+      itemQty: String(Math.trunc(qtyOf(r))),
       storeNumber: r.stockNumber as string,
+    }));
+  }
+
+  /**
+   * The MAIN STORE that van ORDERS are fulfilled from.
+   *
+   * An order is a request for a central-depot voucher, NOT a draw on the van, so
+   * its quantities come from here — never the salesman's van. Resolution order:
+   * the admin-configured `main_store_number` setting, else the ERP default depot
+   * (approximated as the lowest-numbered non-van warehouse). Returns null only
+   * when no depot exists at all.
+   */
+  async resolveMainStore(): Promise<{ number: string; name: string | null } | null> {
+    const cfg = await this.settings.findOne({ where: { id: 1 } });
+    if (cfg?.mainStoreNumber) {
+      const wh = await this.warehouses.findOne({ where: { whNumber: cfg.mainStoreNumber } });
+      return { number: cfg.mainStoreNumber, name: wh?.whName ?? null };
+    }
+    const depots = await this.warehouses.find({ where: { isVan: false } });
+    if (!depots.length) return null;
+    const first = [...depots].sort((a, b) =>
+      a.whNumber.localeCompare(b.whNumber, undefined, { numeric: true }),
+    )[0];
+    return { number: first.whNumber, name: first.whName ?? null };
+  }
+
+  /**
+   * Item quantities for the ORDER flow — read from the MAIN STORE, not the van.
+   *
+   * Because an order draws from a central depot, the quantity comes live from the
+   * ERP's authoritative on-hand for the main store (a depot, so no van overselling
+   * caveat), falling back to the local posted-voucher ledger only when the ERP is
+   * unavailable. Any salesman may order — including a credit salesman who has no
+   * van at all. Mirrors getItemBalance's row shape so the app can reuse the picker.
+   * Optionally narrowed to one item.
+   */
+  async getOrderStock(
+    itemNumber: string | undefined,
+    companyNumber: string,
+    salesmanCode: string,
+  ): Promise<ItemBalanceRowDto[]> {
+    const main = await this.resolveMainStore();
+    if (!main) return [];
+
+    const live = await this.erpSync.liveErpStock({
+      itemNumbers: itemNumber ? [itemNumber] : [],
+      stockNumber: main.number,
+    });
+    if (live.source === 'erp') {
+      return live.rows
+        .filter((r) => r.stockNumber === main.number)
+        .map((r) => ({
+          companyNumber,
+          salesmanCode,
+          itemNumber: r.itemNumber,
+          stockUnitCode: r.stockUnitCode ?? '',
+          itemQty: String(Math.trunc(r.quantity)),
+          storeNumber: main.number,
+        }));
+    }
+
+    // ERP unavailable → fall back to the local ledger for the main store.
+    const qb = this.balances
+      .createQueryBuilder('b')
+      .where('b.stock_number = :s', { s: main.number });
+    if (itemNumber) qb.andWhere('b.item_number = :itemNumber', { itemNumber });
+    const rows = await qb.orderBy('b.item_number', 'ASC').getMany();
+    return rows.map((r) => ({
+      companyNumber,
+      salesmanCode,
+      itemNumber: r.itemNumber,
+      stockUnitCode: r.stockUnitCode ?? '',
+      itemQty: String(Math.trunc(Number(r.qty))),
+      storeNumber: main.number,
     }));
   }
 }

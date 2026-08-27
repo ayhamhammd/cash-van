@@ -28,6 +28,7 @@ import { RepScopeService } from '../users/rep-scope.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
+import { ErpSyncService } from '../erp-sync/erp-sync.service';
 import { CreateVoucherDto } from '../vouchers/dto/create-voucher.dto';
 import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
@@ -60,6 +61,8 @@ export class StockRequestsService {
     // Deferred: erp-sync imports this module's entity, so the graph closes.
     @Inject(forwardRef(() => ErpOutboxService))
     private readonly erpOutbox: ErpOutboxService,
+    @Inject(forwardRef(() => ErpSyncService))
+    private readonly erpSync: ErpSyncService,
     private readonly repScope: RepScopeService,
     private readonly notifications: NotificationsService,
     private readonly events: EventEmitter2,
@@ -110,30 +113,30 @@ export class StockRequestsService {
 
     const vanQty = await this.vanQtyByPool(van.whNumber, itemNumbers);
 
-    // A van load cannot draw more than the main store actually has. Check the
-    // live main-store balance per pool and refuse the request if any line
-    // exceeds it — the rep sees availability BEFORE sending, and a request that
-    // could never be fulfilled never reaches the manager.
-    const main = await this.resolveMainStore();
-    const mainQty = main
-      ? await this.vanQtyByPool(main.whNumber, itemNumbers)
-      : new Map<string, number>();
+    // A van load cannot draw more than the company depots actually hold. Vans are
+    // sourced from ANY non-van depot (the manager picks the exact one at approval,
+    // the main store only as the default), so availability here is the item's live
+    // stock SUMMED ACROSS ALL DEPOTS — the same total the dashboard shows. Checking
+    // one nominal "main store" wrongly rejected a request when the goods sat in
+    // another depot. Skipped entirely if there are no depots (nothing to check).
+    const depots = await this.depotStoreNumbers();
+    const depotQty = await this.depotAvailabilityByPool(itemNumbers, depots);
     const over: string[] = [];
     for (const { line, qty } of merged.values()) {
       const factor = line.unitBaseQty && line.unitBaseQty > 0 ? line.unitBaseQty : 1;
       const pool = line.stockUnitCode ?? '';
       const requestedBase = qty * factor;
-      const available = mainQty.get(`${line.itemNumber}|${pool}`) ?? 0;
-      if (main && requestedBase > available + 1e-6) {
+      const available = depotQty.get(`${line.itemNumber}|${pool}`) ?? 0;
+      if (depots.length > 0 && requestedBase > available + 1e-6) {
         const name = byNumber.get(line.itemNumber)?.nameAr ?? line.itemNumber;
         over.push(`${name}: طلب ${requestedBase} / المتوفر ${available}`);
       }
     }
     if (over.length) {
       throw new BadRequestException({
-        message: `الكمية المطلوبة تتجاوز رصيد المستودع الرئيسي: ${over.join('؛ ')}`,
-        code: 'STOCK_REQUEST_EXCEEDS_MAIN_STORE',
-        store: main?.whNumber ?? null,
+        message: `الكمية المطلوبة تتجاوز المتوفر في المستودعات: ${over.join('؛ ')}`,
+        code: 'STOCK_REQUEST_EXCEEDS_AVAILABLE',
+        store: null,
         items: over,
       });
     }
@@ -271,7 +274,7 @@ export class StockRequestsService {
     // The SOURCE store's live stock, re-read at approval — it may have dropped
     // since the request was raised, so a grant is capped against what the depot
     // holds NOW, not what it held then. Base units, keyed by pool.
-    const sourceQty = await this.vanQtyByPool(
+    const sourceQty = await this.warehouseQtyByPool(
       source.whNumber,
       [...new Set(row.items.map((i) => i.itemNumber))],
     );
@@ -552,47 +555,58 @@ export class StockRequestsService {
    * sale-time stock check uses. A second, cleverer source here would eventually
    * disagree with the one that blocks sales.
    */
-  /**
-   * The "main store" a van load is sourced from: the company depot, never a van.
-   * With one non-van warehouse it is unambiguous; with several, the one numbered
-   * MAIN wins, else the first depot by number. Null only if no depot exists.
-   */
-  private async resolveMainStore(): Promise<Warehouse | null> {
-    const depots = await this.warehouses.find({ where: { isVan: false } });
-    if (depots.length === 0) return null;
-    return (
-      depots.find((w) => w.whNumber.toUpperCase() === 'MAIN') ??
-      depots.sort((a, b) => a.whNumber.localeCompare(b.whNumber))[0]
-    );
-  }
 
   /**
-   * Current main-store stock per pool, for the request UIs to show availability
-   * and for create() to reject an over-request. Live from item_balance — the
-   * same ledger the sale-time and van checks use.
+   * Requestable availability per pool for the request UIs to show and for create()
+   * to reject an over-request. SUMMED ACROSS ALL non-van depots — a van is sourced
+   * from any depot (main store is only the default), so this is the total the item
+   * has to give, matching what the dashboard shows. Prefers the ERP's authoritative
+   * on-hand; falls back to the local ledger. `storeNumber` is null because this is
+   * an aggregate, not one store; the default source depot is chosen at approval.
    */
   async mainStoreStock(): Promise<{
     storeNumber: string | null;
     storeName: string | null;
     items: Array<{ itemNumber: string; stockUnitCode: string; qty: number }>;
   }> {
-    const main = await this.resolveMainStore();
-    if (!main) return { storeNumber: null, storeName: null, items: [] };
-    const rows: Array<{ item_number: string; stock_unit_code: string | null; qty: string }> =
-      await this.dataSource.query(
-        `SELECT item_number, stock_unit_code, qty
-           FROM item_balance
-          WHERE stock_number = $1 AND qty <> 0`,
-        [main.whNumber],
-      );
+    const depots = await this.depotStoreNumbers();
+    if (depots.length === 0) return { storeNumber: null, storeName: null, items: [] };
+    const depotSet = new Set(depots);
+    const agg = new Map<string, { itemNumber: string; stockUnitCode: string; qty: number }>();
+
+    // Prefer the ERP's absolute snapshot across all depots (the book of record).
+    const live = await this.erpSync.liveErpStock({}).catch(() => null);
+    if (live && live.source === 'erp') {
+      for (const r of live.rows) {
+        if (!depotSet.has(r.stockNumber)) continue;
+        const key = `${r.itemNumber}|${r.stockUnitCode}`;
+        const cur = agg.get(key);
+        if (cur) cur.qty += r.quantity;
+        else agg.set(key, { itemNumber: r.itemNumber, stockUnitCode: r.stockUnitCode, qty: r.quantity });
+      }
+    } else {
+      // Fallback: the local ledger, summed across depots.
+      const rows: Array<{ item_number: string; stock_unit_code: string | null; qty: string }> =
+        await this.dataSource.query(
+          `SELECT item_number, stock_unit_code, SUM(qty) AS qty
+             FROM item_balance
+            WHERE stock_number = ANY($1::text[])
+            GROUP BY item_number, stock_unit_code`,
+          [depots],
+        );
+      for (const r of rows) {
+        agg.set(`${r.item_number}|${r.stock_unit_code ?? ''}`, {
+          itemNumber: r.item_number,
+          stockUnitCode: r.stock_unit_code ?? '',
+          qty: Number(r.qty) || 0,
+        });
+      }
+    }
+
     return {
-      storeNumber: main.whNumber,
-      storeName: main.whName ?? null,
-      items: rows.map((r) => ({
-        itemNumber: r.item_number,
-        stockUnitCode: r.stock_unit_code ?? '',
-        qty: Number(r.qty) || 0,
-      })),
+      storeNumber: null,
+      storeName: 'كل المستودعات',
+      items: [...agg.values()].filter((i) => i.qty !== 0),
     };
   }
 
@@ -611,6 +625,92 @@ export class StockRequestsService {
     return new Map(
       rows.map((r) => [`${r.item_number}|${r.stock_unit_code ?? ''}`, Number(r.qty) || 0]),
     );
+  }
+
+  /**
+   * On-hand per pool for a WAREHOUSE store (the main store, or an approval's
+   * source depot), keyed `${itemNumber}|${stockUnitCode}` in base units — the same
+   * shape as vanQtyByPool. Prefers the ERP's authoritative on-hand (the book of
+   * record) so a request/approval is validated against real stock, not the local
+   * summed-delta ledger, which can drift. Falls back to the local ledger when the
+   * ERP is unavailable, and NEVER reads live for a van store (its own sales lag the
+   * ERP — that would be the overselling trap), so this is safe for any store.
+   */
+  private async warehouseQtyByPool(
+    storeNumber: string,
+    itemNumbers: string[],
+  ): Promise<Map<string, number>> {
+    if (!itemNumbers.length) return new Map();
+    const vans = await this.erpSync.vanStoreNumbers().catch(() => new Set<string>());
+    if (!vans.has(storeNumber)) {
+      // Broad snapshot filtered to this store + items — the targeted mode depends
+      // on item_units.erp_sku_code, which is not always mapped and then reads as
+      // "0 available", wrongly blocking an approval for stock that exists.
+      const itemSet = new Set(itemNumbers);
+      const live = await this.erpSync.liveErpStock({}).catch(() => null);
+      if (live && live.source === 'erp') {
+        const m = new Map<string, number>();
+        for (const r of live.rows) {
+          if (r.stockNumber !== storeNumber || !itemSet.has(r.itemNumber)) continue;
+          m.set(`${r.itemNumber}|${r.stockUnitCode}`, r.quantity);
+        }
+        return m;
+      }
+    }
+    // Van store, or ERP unavailable → the local ledger.
+    return this.vanQtyByPool(storeNumber, itemNumbers);
+  }
+
+  /** Every non-van depot's store number — the stores a van load may be sourced from. */
+  private async depotStoreNumbers(): Promise<string[]> {
+    const depots = await this.warehouses.find({ where: { isVan: false } });
+    return depots.map((d) => d.whNumber).filter((n): n is string => !!n);
+  }
+
+  /**
+   * Requestable availability per pool, SUMMED across ALL non-van depots — not just
+   * the default "main store". A van may be sourced from ANY depot at approval, so a
+   * request must not be blocked because the nominal main store is empty when the
+   * goods sit in another depot (which is exactly what the dashboard shows). Prefers
+   * live ERP (the book of record); falls back to the local ledger summed per pool.
+   */
+  private async depotAvailabilityByPool(
+    itemNumbers: string[],
+    depots: string[],
+  ): Promise<Map<string, number>> {
+    if (!itemNumbers.length || depots.length === 0) return new Map();
+    const depotSet = new Set(depots);
+    const itemSet = new Set(itemNumbers);
+    const out = new Map<string, number>();
+
+    // Use the BROAD ERP snapshot (all stores), filtered to the requested items and
+    // depots. The targeted mode resolves each item's ERP sku code from item_units,
+    // which is not always mapped — a missing mapping there returned an empty result
+    // and wrongly read as "0 available", rejecting a request for stock that exists.
+    // The broad snapshot maps by the ERP's own sku code, the same way the dashboard
+    // and mainStoreStock do, so it agrees with what the UI shows.
+    const live = await this.erpSync.liveErpStock({}).catch(() => null);
+    if (live && live.source === 'erp') {
+      for (const r of live.rows) {
+        if (!depotSet.has(r.stockNumber) || !itemSet.has(r.itemNumber)) continue;
+        const key = `${r.itemNumber}|${r.stockUnitCode}`;
+        out.set(key, (out.get(key) ?? 0) + r.quantity);
+      }
+      return out;
+    }
+
+    const rows: Array<{ item_number: string; stock_unit_code: string | null; qty: string }> =
+      await this.dataSource.query(
+        `SELECT item_number, stock_unit_code, SUM(qty) AS qty
+           FROM item_balance
+          WHERE stock_number = ANY($1::text[]) AND item_number = ANY($2::text[])
+          GROUP BY item_number, stock_unit_code`,
+        [depots, itemNumbers],
+      );
+    for (const r of rows) {
+      out.set(`${r.item_number}|${r.stock_unit_code ?? ''}`, Number(r.qty) || 0);
+    }
+    return out;
   }
 
   /**

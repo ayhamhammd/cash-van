@@ -193,6 +193,15 @@ export class AppSettings {
   @Column({ name: 'erp_cheque_collection_account_code', type: 'text', nullable: true })
   erpChequeCollectionAccountCode?: string | null;
 
+  /**
+   * The MAIN STORE a van ORDER is fulfilled from. An order is a request for a
+   * voucher drawn from a central depot, NOT the van — so order-item quantities in
+   * the app come from here, not the salesman's van. Holds a warehouse `wh_number`.
+   * Admin-selectable; when unset, resolution falls back to the ERP default depot.
+   */
+  @Column({ name: 'main_store_number', type: 'text', nullable: true })
+  mainStoreNumber?: string | null;
+
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 
