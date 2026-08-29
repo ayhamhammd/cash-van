@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsIn,
@@ -26,6 +28,18 @@ export class CreateCustomerDto {
   @IsOptional()
   @IsUUID()
   photoId?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    format: 'uuid',
+    description:
+      'Additional staged photo ids (each from POST /customers/photo) beyond the primary photoId — a salesman may attach more than one image of the shop. Each becomes a customer attachment on create (or on approval).',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsUUID('all', { each: true })
+  extraPhotoIds?: string[];
 
   @ApiPropertyOptional({ description: 'Auto-generated (CUST-000001) when omitted.' })
   @IsOptional()

@@ -160,6 +160,7 @@ export class CustomersService {
     if (actor?.canCreateCustomerDirect) {
       const customer = await this.create(dto);
       await this.claimPhoto(photo, customer.id, user.sub);
+      await this.claimExtraPhotos(dto.extraPhotoIds, customer.id, user.sub);
       return customer;
     }
 
@@ -207,6 +208,25 @@ export class CustomersService {
     photo.claimedAt = new Date();
     await this.pendingPhotos.save(photo);
     return row;
+  }
+
+  /**
+   * Claim EXTRA staged photos onto a now-real customer, best-effort: a missing
+   * or already-claimed id is skipped rather than failing the create. The primary
+   * photoId is the one that must be valid; these are the salesman's additional
+   * shop images, and losing one to a race is not worth rejecting the customer.
+   */
+  async claimExtraPhotos(
+    ids: string[] | undefined,
+    customerId: string,
+    uploadedBy: string | null,
+  ): Promise<void> {
+    for (const id of ids ?? []) {
+      if (!id) continue;
+      const photo = await this.pendingPhotos.findOne({ where: { id } });
+      if (!photo || photo.claimedAt) continue;
+      await this.claimPhoto(photo, customerId, uploadedBy);
+    }
   }
 
   async create(dto: CreateCustomerDto): Promise<Customer> {

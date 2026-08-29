@@ -239,6 +239,13 @@ export class ApprovalsService {
             await this.customers.claimPhoto(photo, customer.id, row.requesterUser);
           }
         }
+        // The salesman's additional shop images, staged alongside the primary,
+        // become attachments too now that the customer exists.
+        await this.customers.claimExtraPhotos(
+          dto.extraPhotoIds,
+          customer.id,
+          row.requesterUser,
+        );
         resultVoucher = customer.customerNumber;
       } else {
         const created = await this.vouchers.create(
