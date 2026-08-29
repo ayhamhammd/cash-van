@@ -71,7 +71,7 @@ export const envValidationSchema = Joi.object({
 
   // Location-lock geofence radius in metres (restricted reps must be within
   // this distance of the customer's saved location to sell / act).
-  CUSTOMER_PROXIMITY_RADIUS_M: Joi.number().min(5).default(20),
+  CUSTOMER_PROXIMITY_RADIUS_M: Joi.number().min(5).default(30),
 
   // 32-byte hex (64 chars) when provided. Required only for REAL JoFotara
   // e-invoicing (production with JOFOTARA_MOCK=false). In mock mode it's optional
