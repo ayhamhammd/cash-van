@@ -867,7 +867,29 @@ export class VouchersService implements OnModuleInit {
           qty: p.baseQty,
         });
       }
+      // The item_balance view is derived ONLY from posted van vouchers, so it is
+      // the truth for a VAN store (whose stock we mint and burn ourselves) but is
+      // structurally ~0 for a depot/main-store whose stock was loaded in the ERP
+      // and never flowed through a van voucher. A stock-request transfer draws
+      // FROM such a depot, and its availability was already validated at approval
+      // against live ERP on-hand. Re-checking a depot source against this view
+      // rejected every legitimate transfer ("store 1: have 0"). Enforce the local
+      // guard only for van source stores; trust the approval-time ERP check for a
+      // depot source. (vouchers can't read ERP directly — erp-sync imports this
+      // module, so the reverse dependency would be circular.)
+      const vanStores = new Set<string>(
+        (
+          await em.query(
+            `SELECT w.wh_number AS n
+               FROM warehouses w
+              WHERE w.wh_number IS NOT NULL
+                AND (w.is_van = TRUE
+                     OR EXISTS (SELECT 1 FROM reps r WHERE r.van_id = w.id))`,
+          )
+        ).map((r: { n: string }) => r.n),
+      );
       for (const n of need.values()) {
+        if (!vanStores.has(n.store)) continue;
         const available = await this.stockBalance(
           em,
           n.itemNumber,

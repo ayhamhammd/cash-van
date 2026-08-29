@@ -165,6 +165,13 @@ export class AuthService {
     if (!user) return current;
     return {
       ...current,
+      // `id` + `name` so /auth/me returns a COMPLETE profile (the same shape as
+      // the login response). A fresh browser tab — e.g. a print page opened with
+      // target="_blank"/noopener, which gets an empty sessionStorage — rehydrates
+      // the session from this endpoint via the cookie; without id/name the client
+      // profile is incomplete and the auth guard bounces it to /login.
+      id: user.id,
+      name: user.name,
       role: user.role ?? 'viewer',
       userType: user.userType,
       permissions: this.extractPermissions(user),
