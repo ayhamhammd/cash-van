@@ -80,6 +80,12 @@ export class CreateUserDto {
   permissions?: string[];
 
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canMakeVoucher?: boolean;
+  @ApiPropertyOptional({ description: 'May create a SALE voucher.' })
+  @IsOptional() @IsBoolean() canCreateSale?: boolean;
+  @ApiPropertyOptional({ description: 'May create a RETURN voucher.' })
+  @IsOptional() @IsBoolean() canCreateReturn?: boolean;
+  @ApiPropertyOptional({ description: 'May record a collection.' })
+  @IsOptional() @IsBoolean() canMakeCollection?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditVoucher?: boolean;
   @ApiPropertyOptional({
     enum: ['all', 'assigned'],

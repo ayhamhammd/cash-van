@@ -26,6 +26,7 @@ import { ListCollectionsQuery } from './dto/query.dto';
 import { BatchDepositDto } from './dto/collection-actions.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { RequirePermissions } from '../../common/decorators/permissions.decorator';
 import { RepScopeService } from '../users/rep-scope.service';
 import {
   CurrentUser,
@@ -80,9 +81,11 @@ export class CollectionsController {
   }
 
   @Post()
+  @RequirePermissions('canMakeCollection')
   @ApiOperation({
     summary: 'Record collection',
-    description: 'Record a cash or cheque collection against a customer/invoice.',
+    description:
+      'Record a cash or cheque collection against a customer/invoice. Requires canMakeCollection.',
   })
   @ApiCreatedResponse({ description: 'Collection recorded' })
   create(@Body() dto: CreateCollectionDto) {

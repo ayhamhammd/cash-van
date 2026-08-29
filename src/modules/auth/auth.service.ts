@@ -182,6 +182,9 @@ export class AuthService {
   private extractPermissions(user: User): Record<string, boolean> {
     return {
       canMakeVoucher: user.canMakeVoucher,
+      canCreateSale: user.canCreateSale,
+      canCreateReturn: user.canCreateReturn,
+      canMakeCollection: user.canMakeCollection,
       canEditVoucher: user.canEditVoucher,
       canAddCustomer: user.canAddCustomer,
       canCreateCustomerDirect: user.canCreateCustomerDirect,

@@ -74,6 +74,9 @@ export async function provisionRep(
         mustChangePassword: true,
         isActive: true,
         canMakeVoucher: true,
+        canCreateSale: true,
+        canCreateReturn: true,
+        canMakeCollection: true,
         canAddCustomer: true,
       });
       await userRepo.save(user);

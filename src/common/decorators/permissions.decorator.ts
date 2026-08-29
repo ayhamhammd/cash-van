@@ -2,6 +2,9 @@ import { SetMetadata } from '@nestjs/common';
 
 export type UserPermission =
   | 'canMakeVoucher'
+  | 'canCreateSale'
+  | 'canCreateReturn'
+  | 'canMakeCollection'
   | 'canEditVoucher'
   | 'canAddCustomer'
   | 'canEditCustomerCredit'

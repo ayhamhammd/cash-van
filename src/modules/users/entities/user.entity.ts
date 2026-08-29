@@ -61,6 +61,23 @@ export class User extends BaseEntity {
   @Column({ name: 'can_make_voucher', type: 'boolean', default: false })
   canMakeVoucher!: boolean;
 
+  /**
+   * The three field actions split out of can_make_voucher so an admin can switch
+   * each independently. SALE creation needs can_create_sale, RETURN creation needs
+   * can_create_return, and recording a collection needs can_make_collection. The
+   * salesman app hides the matching button on the customer screen when the flag is
+   * off, and the API refuses regardless. ORDER (and any other kind) still rides
+   * can_make_voucher. Migration backfills all three from can_make_voucher.
+   */
+  @Column({ name: 'can_create_sale', type: 'boolean', default: false })
+  canCreateSale!: boolean;
+
+  @Column({ name: 'can_create_return', type: 'boolean', default: false })
+  canCreateReturn!: boolean;
+
+  @Column({ name: 'can_make_collection', type: 'boolean', default: false })
+  canMakeCollection!: boolean;
+
   @Column({ name: 'can_edit_voucher', type: 'boolean', default: false })
   canEditVoucher!: boolean;
 

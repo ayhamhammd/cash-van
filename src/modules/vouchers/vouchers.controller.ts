@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   HttpCode,
   HttpStatus,
@@ -77,13 +78,33 @@ export class VouchersController {
   }
 
   @Post()
-  @RequirePermissions('canMakeVoucher')
   @ApiOperation({
     summary: 'Create voucher',
-    description: 'Create a voucher (header + lines + payments) atomically. Requires canMakeVoucher.',
+    description:
+      'Create a voucher (header + lines + payments) atomically. SALE requires ' +
+      'canCreateSale, RETURN requires canCreateReturn; every other kind (ORDER, ' +
+      'TRANSFER, …) requires canMakeVoucher.',
   })
   @ApiCreatedResponse({ description: 'Voucher created' })
-  create(@Body() dto: CreateVoucherDto) {
+  create(
+    @Body() dto: CreateVoucherDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // Per-kind gate. Can't sit in a @RequirePermissions decorator because the
+    // required permission depends on the request body (transKind); admins bypass
+    // exactly as the global PermissionsGuard does.
+    if (user.userType !== 'ADMIN') {
+      const kind = (dto.transKind ?? '').toUpperCase();
+      const needed =
+        kind === 'SALE'
+          ? 'canCreateSale'
+          : kind === 'RETURN'
+            ? 'canCreateReturn'
+            : 'canMakeVoucher';
+      if (!user.permissions?.[needed]) {
+        throw new ForbiddenException(`Missing permission: ${needed}`);
+      }
+    }
     return this.vouchersService.create(dto);
   }
 

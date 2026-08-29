@@ -13,6 +13,9 @@ export class UserResponseDto {
   @ApiPropertyOptional() lastLoginAt!: Date | null;
   @ApiProperty() isActive!: boolean;
   @ApiProperty() canMakeVoucher!: boolean;
+  @ApiProperty() canCreateSale!: boolean;
+  @ApiProperty() canCreateReturn!: boolean;
+  @ApiProperty() canMakeCollection!: boolean;
   @ApiProperty() canEditVoucher!: boolean;
   @ApiProperty({ enum: ['all', 'assigned'] }) repScopeMode!: 'all' | 'assigned';
   /**
@@ -47,6 +50,9 @@ export class UserResponseDto {
       lastLoginAt: u.lastLoginAt ?? null,
       isActive: u.isActive,
       canMakeVoucher: u.canMakeVoucher,
+      canCreateSale: u.canCreateSale,
+      canCreateReturn: u.canCreateReturn,
+      canMakeCollection: u.canMakeCollection,
       canEditVoucher: u.canEditVoucher,
       repScopeMode: u.repScopeMode,
       canAddCustomer: u.canAddCustomer,
