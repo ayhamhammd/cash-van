@@ -34,9 +34,20 @@ OUT="dist-windows-update"
 # NEXT_PUBLIC_* are inlined into the browser bundle at BUILD time. They must match
 # the address the device is reached at, or the dashboard calls an API that is not
 # there — .env on the device cannot fix it afterwards.
-API_ORIGIN="${API_ORIGIN:-http://77.245.5.113:3002}"
-NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL:-${API_ORIGIN}/api/v1}"
-NEXT_PUBLIC_WS_URL="${NEXT_PUBLIC_WS_URL:-${API_ORIGIN}}"
+#
+# DEFAULT IS RELATIVE (host-agnostic). The dashboard calls "/api/v1" and opens the
+# websocket on the same origin it was served from, so ONE image works on every
+# client behind a reverse proxy (Caddy) that serves the dashboard and API from one
+# HTTPS origin — no per-client rebuild, and no mixed-content when served over TLS.
+#
+# Only override for a device reached DIRECTLY on an ip:port with no proxy:
+#   NEXT_PUBLIC_API_BASE_URL=http://<ip>:3002/api/v1 NEXT_PUBLIC_WS_URL=http://<ip>:3002 ./scripts/build-windows-update.sh
+#
+# NOTE the operators below: ":-" would treat an explicit empty value as unset and
+# fall back to the default, which silently reverted a relative build to an absolute
+# one once. WS uses "-" (not ":-") so an explicit empty WS is honoured.
+NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL:-/api/v1}"
+NEXT_PUBLIC_WS_URL="${NEXT_PUBLIC_WS_URL-}"
 NEXT_PUBLIC_AI_ENABLED="${NEXT_PUBLIC_AI_ENABLED:-false}"
 NEXT_PUBLIC_DEFAULT_LOCALE="${NEXT_PUBLIC_DEFAULT_LOCALE:-ar}"
 # Placeholder, not a real key: the entrypoint substitutes GOOGLE_MAPS_API_KEY at
@@ -96,7 +107,13 @@ for img in "$API_IMAGE" "$WEB_IMAGE"; do
 done
 
 echo "==> Saving images to a compressed tarball ..."
-rm -rf "$OUT" && mkdir -p "$OUT"
+# Remove only what THIS script generates. `rm -rf "$OUT"` used to wipe the whole
+# folder — and that folder is where the site's own docker-compose.yml, Caddyfile,
+# INSTALL.txt and .env (real secrets) are kept between builds. dist-windows-update/
+# is gitignored, so there was no copy anywhere: one build erased the lot.
+mkdir -p "$OUT"
+rm -f "$OUT/vanflow-update.tar.gz" "$OUT/UPDATE.txt"
+rm -rf "$OUT/DANGER-reset"
 docker save --platform "$PLATFORM" "$API_IMAGE" "$WEB_IMAGE" \
   | gzip > "$OUT/vanflow-update.tar.gz"
 
@@ -159,8 +176,9 @@ STEPS
      docker compose logs -f app
    Wait for "Nest application successfully started".
 
-6) Check:
-     curl http://localhost:3002/api/v1/health
+6) Check (from inside the container, so the published port does not matter —
+   this compose publishes 3100, an older one published 3002):
+     docker compose exec app wget -qO- http://localhost:3000/api/v1/health
    Then open the dashboard and press Ctrl+F5 (a hard reload). The old browser
    cache holds the previous JavaScript and will otherwise hide the update.
 

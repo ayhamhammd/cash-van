@@ -4,6 +4,11 @@ node_modules
 .env
 .env.*
 dist
+# Build OUTPUT folders, not sources. They hold a ~170MB image tarball and the
+# site's own .env, so leaving them in the context copies real secrets into the
+# intermediate build layer and adds a slow 170MB transfer to every build.
+dist-windows/
+dist-windows-update/
 coverage
 *.log
 .idea
