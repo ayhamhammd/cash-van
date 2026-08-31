@@ -189,9 +189,17 @@ export class ErpHttpClient {
     const code = this.errorCode(json);
     const detail = this.errorDetail(json);
     if (res.status === 401) {
+      // Do NOT lead with "bad key". The ERP's auth helper returns the same empty
+      // result for a rate-limited key as for an invalid one, and all 54 of its
+      // routes report that as 401 — so on a busy sync this 401 is usually the
+      // per-minute budget, not the credential. Reading it as "bad key" sends the
+      // operator to re-enter a key that was never wrong.
       return new Error(
-        `ERP rejected the API key (HTTP 401) on ${path} — the key is wrong, ` +
-          'revoked or expired. Re-enter it in Settings → ERP.',
+        `ERP rejected the API key (HTTP 401) on ${path} — usually the ERP's ` +
+          'per-minute request budget, spent by an earlier bulk step in the same ' +
+          'sweep. Raise API_RATE_LIMIT_PER_MIN on the ERP if it repeats on every ' +
+          'run. Only if EVERY entity fails is the key itself wrong, revoked or ' +
+          'expired — then re-enter it in Settings → ERP.',
       );
     }
     if (res.status === 403) {
