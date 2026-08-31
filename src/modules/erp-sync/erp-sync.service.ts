@@ -277,8 +277,37 @@ export interface SyncEntityResult {
   entity: string;
   count: number;
   status: 'ok' | 'failed' | 'skipped';
+  /** Rows deliberately stepped over so one bad row can't abort the entity. */
+  skipped?: number;
+  durationMs?: number;
   error?: string;
 }
+
+/**
+ * How often an entity is worth re-pulling.
+ *
+ * `fast` is everything the 5-minute sweep can finish in seconds. `heavy` is the
+ * per-customer price resolution: the ERP has no bulk endpoint for it, so it costs
+ * ONE HTTP round-trip per active customer — 6,263 of them on the largest install,
+ * which is minutes of wall-clock and most of the ERP's per-minute request budget.
+ * Running that every five minutes is what made "Sync now" time out; it now runs
+ * once a night and on demand from its own row button. Price-LIST prices, which is
+ * what nearly every customer is actually priced on, still refresh every five
+ * minutes via `price_list` — that endpoint returns a whole list's items in one call.
+ */
+export type SyncTier = 'fast' | 'heavy';
+
+/**
+ * What a pull reports back. A bare number is "n rows applied, none skipped" —
+ * the shape every pull had before skip-and-continue existed, kept so the pulls
+ * that genuinely cannot skip anything stay one-liners.
+ */
+export type EntityRunOutcome = number | { count: number; skipped?: number };
+
+/** The hour (local) the nightly heavy pull runs. */
+const HEAVY_SYNC_HOUR = parseInt(process.env.ERP_HEAVY_SYNC_HOUR ?? '2', 10);
+/** How often the nightly scheduler wakes to check whether it is that hour. */
+const HEAVY_SYNC_CHECK_MS = 15 * 60 * 1000;
 
 /**
  * Where one ERP SKU's stock lands in cash-van: an item, and a POOL inside it.
@@ -302,6 +331,18 @@ export class ErpSyncService {
   private readonly logger = new Logger(ErpSyncService.name);
   private pulling = false;
   private webhookTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Entities with a run in flight right now, whether from the sweep or from a
+   * per-row button. Two runs of the same entity would race on the same cursor and
+   * the same rows, so the second is refused rather than queued — the operator
+   * pressing a button twice should be told it is already going, not silently
+   * given a duplicate pull.
+   */
+  private readonly inFlight = new Set<string>();
+  /** Set while a whole-catalogue run (sync now / refresh) is in flight. */
+  private sweepRunning: 'sync' | 'refresh' | null = null;
+  /** Guards the nightly heavy pull against firing twice inside its hour. */
+  private lastHeavyRunDay: string | null = null;
 
   constructor(
     private readonly erp: ErpHttpClient,
@@ -436,9 +477,23 @@ export class ErpSyncService {
     }
   }
 
-  /** Per-entity cursor + last-run summary for the dashboard. */
-  status(): Promise<ErpSyncCursor[]> {
-    return this.cursors.find();
+  /**
+   * Per-entity cursor + last-run summary for the dashboard.
+   *
+   * A row that says `running` while nothing is actually running is a lie the
+   * dashboard would show forever — it happens whenever the process is restarted
+   * or redeployed mid-sweep, which on this schedule is often. The in-process
+   * `inFlight` set is the authority, so reconcile against it on read rather than
+   * leaving the operator staring at a spinner for a run that died yesterday.
+   */
+  async status(): Promise<ErpSyncCursor[]> {
+    const rows = await this.cursors.find();
+    for (const r of rows) {
+      if (r.lastStatus !== 'running' || this.inFlight.has(r.entity)) continue;
+      r.lastStatus = 'interrupted';
+      r.lastError = r.lastError ?? 'the server restarted mid-sync — run it again';
+    }
+    return rows;
   }
 
   /**
@@ -1026,26 +1081,151 @@ export class ErpSyncService {
     this.webhookTimer.unref?.();
   }
 
-  /** Run an inbound pull now (admin "Sync now"). No-op when ERP mode is off. */
+  /**
+   * Every catalogue entity that can be pulled on its own, in dependency order.
+   *
+   * Order matters and is the same order the sweep uses: units and tobacco
+   * profiles are referenced while mirroring items, items are referenced while
+   * mirroring price lists, and customers must exist before their prices. Running
+   * one alone from its row button therefore assumes the ones above it have run at
+   * least once — which is true of any install that has ever synced.
+   *
+   * `movements:<store>` is NOT here: it is one entity per warehouse and the set
+   * changes as warehouses come and go, so it is enumerated dynamically.
+   */
+  private catalogEntities(): Array<{
+    entity: string;
+    tier: SyncTier;
+    run: () => Promise<EntityRunOutcome>;
+  }> {
+    return [
+      { entity: 'organization',    tier: 'fast',  run: () => this.pullOrganization() },
+      { entity: 'warehouse',       tier: 'fast',  run: () => this.pullWarehouses() },
+      { entity: 'category',        tier: 'fast',  run: () => this.pullCategories() },
+      { entity: 'unit',            tier: 'fast',  run: () => this.pullUnits() },
+      { entity: 'tobacco_profile', tier: 'fast',  run: () => this.pullTobaccoProfiles() },
+      { entity: 'item',            tier: 'fast',  run: () => this.pullItems() },
+      { entity: 'customer',        tier: 'fast',  run: () => this.pullCustomers() },
+      { entity: 'price_list',      tier: 'fast',  run: () => this.pullPriceLists() },
+      { entity: 'customer_price',  tier: 'heavy', run: () => this.pullCustomerPrices() },
+      { entity: 'receipts',        tier: 'fast',  run: () => this.pullReceipts() },
+    ];
+  }
+
+  /** Resolve one entity name (incl. `movements:<store>`) to its runner. */
+  private runnerFor(
+    entity: string,
+  ): { entity: string; tier: SyncTier; run: () => Promise<EntityRunOutcome> } | null {
+    const known = this.catalogEntities().find((e) => e.entity === entity);
+    if (known) return known;
+    if (entity.startsWith('movements:')) {
+      const store = entity.slice('movements:'.length);
+      if (!store) return null;
+      return { entity, tier: 'fast', run: () => this.pullMovementsForStore(store) };
+    }
+    return null;
+  }
+
+  /** The entity names the dashboard may ask for by name, for validation + the UI. */
+  async syncableEntities(): Promise<Array<{ entity: string; tier: SyncTier }>> {
+    const stores = await this.erpStoreCodes().catch(() => [] as string[]);
+    return [
+      ...this.catalogEntities().map((e) => ({ entity: e.entity, tier: e.tier })),
+      ...stores.map((s) => ({ entity: `movements:${s}`, tier: 'fast' as SyncTier })),
+    ];
+  }
+
+  // ── Kick-off (non-blocking) ────────────────────────────────────────────────
+  //
+  // A full sweep is minutes of work. Holding the HTTP request open for it meant
+  // the browser, and then the reverse proxy, timed out long before the sweep
+  // finished — the operator saw a failure on a sync that was in fact still
+  // running, and pressing the button again piled a second sweep on the first.
+  // The three `start*` methods return the moment the work is ACCEPTED; progress
+  // is read from `status()`, which the dashboard already polls every 15s.
+
+  /** Start a full inbound sweep in the background. Returns at once. */
+  async startFullSync(): Promise<{ started: boolean; reason?: string }> {
+    return this.startSweep('sync');
+  }
+
+  /** Start a full master-data refresh in the background. Returns at once. */
+  async startRefresh(): Promise<{ started: boolean; reason?: string }> {
+    return this.startSweep('refresh');
+  }
+
+  private async startSweep(
+    mode: 'sync' | 'refresh',
+  ): Promise<{ started: boolean; reason?: string }> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled) return { started: false, reason: 'ERP mode is off' };
+    if (!cfg.baseUrl || !cfg.apiKey) {
+      return { started: false, reason: 'ERP base URL or API key is not set' };
+    }
+    if (this.sweepRunning) {
+      return { started: false, reason: `a ${this.sweepRunning} is already running` };
+    }
+    this.sweepRunning = mode;
+    // Deliberately not awaited: this is the whole point of the endpoint.
+    void (mode === 'sync' ? this.syncNow() : this.refreshAll())
+      .catch((e) =>
+        this.logger.warn(`ERP ${mode} failed: ${e instanceof Error ? e.message : e}`),
+      )
+      .finally(() => {
+        this.sweepRunning = null;
+      });
+    return { started: true };
+  }
+
+  /**
+   * Re-run ONE entity on its own — the per-row button in Settings → ERP.
+   *
+   * This is the answer to a sweep in which one entity failed: before it, a single
+   * failed `item` meant re-running the whole catalogue (minutes) to retry a step
+   * that takes five seconds, and the retry dragged the failing customer-price pull
+   * along with it. Runs in the background for the same reason a sweep does.
+   */
+  async startEntity(entity: string): Promise<{ started: boolean; reason?: string }> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled) return { started: false, reason: 'ERP mode is off' };
+    if (!cfg.baseUrl || !cfg.apiKey) {
+      return { started: false, reason: 'ERP base URL or API key is not set' };
+    }
+    const runner = this.runnerFor(entity);
+    if (!runner) throw new NotFoundException(`Unknown sync entity '${entity}'`);
+    if (this.inFlight.has(entity)) {
+      return { started: false, reason: `${entity} is already running` };
+    }
+    void this.runEntity(runner.entity, runner.run).catch(() => undefined);
+    return { started: true };
+  }
+
+  /** True while any sweep or single-entity run is in flight (drives the UI spinner). */
+  syncActivity(): { sweep: 'sync' | 'refresh' | null; entities: string[] } {
+    return { sweep: this.sweepRunning, entities: [...this.inFlight] };
+  }
+
+  // ── The runs themselves ────────────────────────────────────────────────────
+
+  /**
+   * One inbound sweep: every `fast` entity plus the per-store movement mirrors.
+   *
+   * `heavy` entities are excluded — see SyncTier. Still awaited internally by
+   * `scheduledPull`, so the 5-minute poll and a manual sync can't overlap.
+   */
   async syncNow(): Promise<SyncEntityResult[]> {
     const cfg = await this.settings.getErpConfig();
     if (!cfg.enabled) {
       return [{ entity: 'all', count: 0, status: 'skipped', error: 'ERP mode is off' }];
     }
-    const results = [
-      await this.runEntity('organization', () => this.pullOrganization()),
-      await this.runEntity('warehouse', () => this.pullWarehouses()),
-      await this.runEntity('category', () => this.pullCategories()),
-      await this.runEntity('unit', () => this.pullUnits()),
-      await this.runEntity('tobacco_profile', () => this.pullTobaccoProfiles()),
-      await this.runEntity('item', () => this.pullItems()),
-      await this.runEntity('customer', () => this.pullCustomers()),
-      // Customer contract prices must reflect automatically (5-min poll + ERP
-      // webhook), not only on a manual "Refresh from ERP" — else an ERP price
-      // change never reaches the app.
-      await this.runEntity('price_list', () => this.pullPriceLists()),
-      await this.runEntity('customer_price', () => this.pullCustomerPrices()),
-    ];
+    const results: SyncEntityResult[] = [];
+    for (const e of this.catalogEntities()) {
+      if (e.tier !== 'fast') continue;
+      // `receipts` reads customers the movement mirror may have just created, so
+      // it runs after the movements below, not here.
+      if (e.entity === 'receipts') continue;
+      results.push(await this.runEntity(e.entity, e.run));
+    }
     // Mirror ERP stock movements for EVERY warehouse cash-van knows — vans AND
     // normal stores (Main Store …) — so ERP IN/OUT/TRANSFER affect cash-van
     // stock on both the dashboard and the app. Each ERP transfer is two ledger
@@ -1063,23 +1243,46 @@ export class ErpSyncService {
    * items (incl. old ones + price/cost), and customers. These are full pulls (no
    * cursor), so existing/old records are re-synced too. Transactions/movements
    * are NOT touched here (they're incremental via syncNow).
+   *
+   * This one DOES include the heavy per-customer price pull: "Refresh from ERP"
+   * is the explicit, deliberate rebuild, and it now runs in the background so its
+   * length no longer times the caller out.
    */
   async refreshAll(): Promise<SyncEntityResult[]> {
     const cfg = await this.settings.getErpConfig();
     if (!cfg.enabled) {
       return [{ entity: 'all', count: 0, status: 'skipped', error: 'ERP mode is off' }];
     }
-    return [
-      await this.runEntity('organization', () => this.pullOrganization()),
-      await this.runEntity('warehouse', () => this.pullWarehouses()),
-      await this.runEntity('category', () => this.pullCategories()),
-      await this.runEntity('unit', () => this.pullUnits()),
-      await this.runEntity('tobacco_profile', () => this.pullTobaccoProfiles()),
-      await this.runEntity('item', () => this.pullItems()),
-      await this.runEntity('customer', () => this.pullCustomers()),
-      await this.runEntity('price_list', () => this.pullPriceLists()),
-      await this.runEntity('customer_price', () => this.pullCustomerPrices()),
-    ];
+    const results: SyncEntityResult[] = [];
+    for (const e of this.catalogEntities()) {
+      if (e.entity === 'receipts') continue; // a transaction feed, not master data
+      results.push(await this.runEntity(e.entity, e.run));
+    }
+    return results;
+  }
+
+  /**
+   * Nightly pull of the `heavy` entities — today just `customer_price`, which
+   * costs one ERP call per active customer and cannot live in the 5-minute sweep.
+   *
+   * Checked every 15 min rather than scheduled with cron so it survives a restart:
+   * a server that was down at 02:00 picks the run up on its next wake inside the
+   * hour, and `lastHeavyRunDay` stops it repeating within the same day.
+   */
+  @Interval(HEAVY_SYNC_CHECK_MS)
+  async scheduledHeavyPull(): Promise<void> {
+    const now = new Date();
+    if (now.getHours() !== HEAVY_SYNC_HOUR) return;
+    const day = now.toISOString().slice(0, 10);
+    if (this.lastHeavyRunDay === day) return;
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return;
+    this.lastHeavyRunDay = day;
+    for (const e of this.catalogEntities()) {
+      if (e.tier !== 'heavy') continue;
+      this.logger.log(`nightly ERP pull: ${e.entity}`);
+      await this.runEntity(e.entity, e.run);
+    }
   }
 
   /**
@@ -1294,7 +1497,7 @@ export class ErpSyncService {
    * price-list resolution + the app apply to ERP-assigned customers. Local
    * (dashboard-authored) lists and manual assignments are left untouched.
    */
-  private async pullPriceLists(): Promise<number> {
+  private async pullPriceLists(): Promise<EntityRunOutcome> {
     let processed = 0;
     // 1) Pull the lists (paginated).
     const lists: ErpPriceList[] = [];
@@ -1312,15 +1515,41 @@ export class ErpSyncService {
       if (page > 100) break;
     }
     const keptErpIds = new Set<string>();
+    let skipped = 0;
     for (const l of lists) {
       keptErpIds.add(l.id);
       let local = await this.priceLists.findOne({ where: { erpId: l.id } });
+      // Anchoring only on erpId meant an ERP list whose CODE already exists
+      // locally — a dashboard-authored list, or an ERP list mirrored before it
+      // had an erpId — hit uq_price_lists_code and threw, killing the entity for
+      // every list after it (`price_list: failed, 0` on the live install). Adopt
+      // the existing row by code instead: it is the same list by the only
+      // identity the constraint cares about.
+      if (!local && l.code) {
+        local = await this.priceLists.findOne({ where: { code: l.code } });
+        if (local) {
+          this.logger.log(
+            `Adopting existing price list '${l.code}' for ERP list ${l.id}`,
+          );
+        }
+      }
       if (!local) local = this.priceLists.create({ erpId: l.id, code: l.code, origin: 'erp' });
+      local.erpId = l.id;
       local.origin = 'erp';
       local.code = l.code;
       local.name = l.name ?? l.code;
       local.isActive = l.isActive ?? true;
-      await this.priceLists.save(local);
+      try {
+        await this.priceLists.save(local);
+      } catch (err) {
+        // One unmirrorable list must not cost the other twelve.
+        skipped += 1;
+        this.logger.warn(
+          `Skipped ERP price list ${l.code ?? l.id}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+        continue;
+      }
 
       // 2) Pull its items → map skuCode→item, keep the lowest (base) tier price.
       const detail = await this.erp.getOne<ErpPriceListDetail>(`price-lists/${l.id}`);
@@ -1376,7 +1605,7 @@ export class ErpSyncService {
         await this.customers.save(c);
       }
     }
-    return processed;
+    return { count: processed, skipped };
   }
 
   /**
@@ -1567,6 +1796,31 @@ export class ErpSyncService {
   }
 
   /**
+   * The store codes the movement mirror should actually ask the ERP about.
+   *
+   * `allStoreCodes()` is every warehouse AND every rep code cash-van holds, and
+   * the mirror used to probe all of them every sweep. Most are not ERP warehouses
+   * at all — the ERP answers those with an empty 200, so each cost a round-trip
+   * and a cursor row that reads `ok, 0` forever and hides the stores that really
+   * are failing. `erp_id_map(entity:'warehouse')` is written by `pullWarehouses`
+   * for exactly the warehouses the ERP returned, so it is the honest list.
+   *
+   * Falls back to the full set when the map is empty — a fresh install that has
+   * not pulled warehouses yet must still be able to sync.
+   */
+  private async erpStoreCodes(): Promise<string[]> {
+    const mapped = await this.idmap.find({ where: { entity: 'warehouse' } });
+    const codes = [
+      ...new Set(
+        mapped
+          .map((m) => m.erpCode ?? m.localId)
+          .filter((c): c is string => !!c),
+      ),
+    ];
+    return codes.length > 0 ? codes : this.allStoreCodes();
+  }
+
+  /**
    * Mirror the ERP stock-movement ledger for every store into cash-van (the
    * per-store cursor + `movement` id-map make it idempotent). Runs inside
    * `syncNow` (5-min).
@@ -1575,7 +1829,7 @@ export class ErpSyncService {
     const cfg = await this.settings.getErpConfig();
     if (!cfg.enabled) return [];
     const results: SyncEntityResult[] = [];
-    for (const store of await this.allStoreCodes()) {
+    for (const store of await this.erpStoreCodes()) {
       results.push(
         await this.runEntity(`movements:${store}`, () => this.pullMovementsForStore(store)),
       );
@@ -2140,17 +2394,55 @@ export class ErpSyncService {
 
   private async runEntity(
     entity: string,
-    fn: () => Promise<number>,
+    fn: () => Promise<EntityRunOutcome>,
   ): Promise<SyncEntityResult> {
+    // Refuse rather than queue: a second concurrent run of the same entity races
+    // the first on the same cursor and the same rows.
+    if (this.inFlight.has(entity)) {
+      return {
+        entity,
+        count: 0,
+        status: 'skipped',
+        error: 'already running',
+      };
+    }
+    this.inFlight.add(entity);
+    const startedAt = Date.now();
+    // Marked BEFORE the work so the dashboard shows a step as running while it
+    // runs — the sweep's slow steps used to look untouched for minutes, which is
+    // indistinguishable from a sweep that never started.
+    await this.markRunning(entity);
     try {
-      const count = await fn();
-      await this.saveCursor(entity, 'ok', count, null);
-      return { entity, count, status: 'ok' };
+      const outcome = await fn();
+      const count = typeof outcome === 'number' ? outcome : outcome.count;
+      const skipped = typeof outcome === 'number' ? 0 : outcome.skipped ?? 0;
+      const durationMs = Date.now() - startedAt;
+      await this.saveCursor(entity, 'ok', count, null, { skipped, durationMs });
+      if (skipped > 0) {
+        this.logger.warn(`ERP sync ${entity}: ${count} applied, ${skipped} skipped`);
+      }
+      return { entity, count, skipped, durationMs, status: 'ok' };
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
-      this.logger.warn(`ERP sync ${entity} failed: ${error}`);
-      await this.saveCursor(entity, 'failed', 0, error);
-      return { entity, count: 0, status: 'failed', error };
+      const durationMs = Date.now() - startedAt;
+      this.logger.warn(`ERP sync ${entity} failed after ${durationMs}ms: ${error}`);
+      await this.saveCursor(entity, 'failed', 0, error, { skipped: 0, durationMs });
+      return { entity, count: 0, status: 'failed', durationMs, error };
+    } finally {
+      this.inFlight.delete(entity);
+    }
+  }
+
+  /** Flag an entity as in-progress without disturbing its last successful count. */
+  private async markRunning(entity: string): Promise<void> {
+    try {
+      const c = (await this.cursors.findOne({ where: { entity } })) ??
+        this.cursors.create({ entity });
+      c.lastStatus = 'running';
+      c.lastError = null;
+      await this.cursors.save(c);
+    } catch {
+      // Status is cosmetic; never let it stop the pull it is describing.
     }
   }
 
@@ -2213,7 +2505,7 @@ export class ErpSyncService {
    * So we page all SKUs, group by `productId`, pick the base unit as the item,
    * and mirror the other units into `item_units` — no change to the ERP.
    */
-  private async pullItems(): Promise<number> {
+  private async pullItems(): Promise<EntityRunOutcome> {
     const pageSize = 100;
     let page = 1;
     let total = Number.POSITIVE_INFINITY;
@@ -2240,12 +2532,34 @@ export class ErpSyncService {
     // origin once so the stored item image is directly loadable by dashboard + app.
     const cfg = await this.settings.getErpConfig().catch(() => null);
     const erpOrigin = cfg?.baseUrl ? cfg.baseUrl.replace(/\/+$/, '') : null;
+    // Skip-and-continue, per product.
+    //
+    // One product used to abort the whole catalogue: `item_cart.barcode` is
+    // UNIQUE, two ERP products can carry the same barcode (or a blank one, which
+    // falls back to the SKU), and the resulting
+    // `duplicate key value violates unique constraint "uq_item_cart_barcode"`
+    // propagated out of the loop. Every product after it in the batch was lost,
+    // and because the error is deterministic the NEXT sweep died on the same row
+    // — on the live install that is `item: failed, 0` on every run since the
+    // clash appeared, i.e. the catalogue simply stopped updating. One unusable
+    // product must cost one product.
     let processed = 0;
+    let skipped = 0;
     for (const skus of byProduct.values()) {
-      await this.upsertProductItem(skus, erpOrigin);
-      processed += 1;
+      try {
+        await this.upsertProductItem(skus, erpOrigin);
+        processed += 1;
+      } catch (err) {
+        skipped += 1;
+        const base = this.baseSku(skus);
+        this.logger.warn(
+          `Skipped ERP product ${base?.sku ?? '(no sku)'} ` +
+            `(${base?.productName ?? base?.label ?? 'unnamed'}): ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
-    return processed;
+    return { count: processed, skipped };
   }
 
   /** Resolve an ERP image path to an absolute URL (pass through absolute URLs). */
@@ -2283,7 +2597,11 @@ export class ErpSyncService {
     item.name = productName; // the PRODUCT name, never the unit name
     item.nameAr = productName; // ERP is master → its product name is the Arabic name
     item.nameEn = productName;
-    item.barcode = base.barcode || base.sku; // cash-van barcode is required + unique
+    // cash-van's barcode is required AND unique; the ERP's is neither. Two
+    // products sharing a barcode (or both blank, so both fall back to their SKU)
+    // used to collide on uq_item_cart_barcode. Prefer the ERP barcode, step down
+    // to the SKU — which IS unique per product — when it is already spoken for.
+    item.barcode = await this.freeItemBarcode(base.barcode || base.sku, base.sku, item.id);
     item.price = Math.round((Number(base.sellingPrice) || 0) * 1000); // major → fils
     item.cost = Math.round((Number(base.unitCost) || 0) * 1000); // major → fils
     item.isActive = base.isActive ?? true;
@@ -2338,7 +2656,8 @@ export class ErpSyncService {
         where: { itemId: item.id, unitId: unit.id },
       });
       if (!iu) iu = this.itemUnits.create({ itemId: item.id, unitId: unit.id });
-      iu.barcode = s.barcode || s.sku; // item_units.barcode is required + unique
+      // Same uniqueness story as the item barcode above (uq_item_units_barcode).
+      iu.barcode = await this.freeUnitBarcode(s.barcode || s.sku, s.sku, iu.id);
       iu.qty = mult;
       iu.salePrice = (Number(s.sellingPrice) || 0).toFixed(2); // JOD major
       // Both of these are written on UPDATE as well as INSERT, and that is what
@@ -2358,6 +2677,48 @@ export class ErpSyncService {
       iu.isStockUnit = mult === 1;
       await this.itemUnits.save(iu);
     }
+  }
+
+  /**
+   * A barcode that will not collide on `uq_item_cart_barcode`.
+   *
+   * Returns `preferred` when it is free (or already this item's own), else
+   * `fallback` — the SKU code, which the ERP guarantees unique per product.
+   * Returns `preferred` unchanged when both are taken so the insert still fails
+   * loudly and the product is reported as skipped, rather than silently
+   * overwriting whichever row holds it.
+   */
+  private async freeItemBarcode(
+    preferred: string,
+    fallback: string,
+    selfId: string | undefined,
+  ): Promise<string> {
+    for (const candidate of [preferred, fallback]) {
+      if (!candidate) continue;
+      const holder = await this.items.findOne({
+        where: { barcode: candidate },
+        select: { id: true },
+      });
+      if (!holder || holder.id === selfId) return candidate;
+    }
+    return preferred || fallback;
+  }
+
+  /** As `freeItemBarcode`, for `item_units.barcode`. */
+  private async freeUnitBarcode(
+    preferred: string,
+    fallback: string,
+    selfId: string | undefined,
+  ): Promise<string> {
+    for (const candidate of [preferred, fallback]) {
+      if (!candidate) continue;
+      const holder = await this.itemUnits.findOne({
+        where: { barcode: candidate },
+        select: { id: true },
+      });
+      if (!holder || holder.id === selfId) return candidate;
+    }
+    return preferred || fallback;
   }
 
   /** Find-or-create a unit master row keyed by its name (e.g. طرد). */
@@ -2388,6 +2749,7 @@ export class ErpSyncService {
     status: string,
     count: number,
     error: string | null,
+    extra: { skipped?: number; durationMs?: number } = {},
   ): Promise<void> {
     let c = await this.cursors.findOne({ where: { entity } });
     if (!c) c = this.cursors.create({ entity });
@@ -2395,6 +2757,8 @@ export class ErpSyncService {
     c.lastStatus = status;
     c.lastCount = count;
     c.lastError = error;
+    c.lastSkipped = extra.skipped ?? 0;
+    if (extra.durationMs !== undefined) c.durationMs = extra.durationMs;
     await this.cursors.save(c);
   }
 }

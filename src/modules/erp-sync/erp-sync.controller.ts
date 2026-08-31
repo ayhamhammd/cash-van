@@ -3,13 +3,21 @@ import {
   ForbiddenException,
   Get,
   Headers,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiAcceptedResponse,
+  ApiBearerAuth,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 
 import { ErpSyncService } from './erp-sync.service';
 import { ErpOutboxService } from './erp-outbox.service';
@@ -31,12 +39,56 @@ export class ErpSyncController {
 
   @Post('sync/now')
   @ApiOperation({
-    summary: 'Pull the ERP catalog now',
-    description: 'Runs an inbound pull (items so far). No-op when ERP mode is off. Admin only.',
+    summary: 'Start an inbound catalog pull',
+    description:
+      'Starts a FAST sweep (organization, warehouses, categories, units, tobacco ' +
+      'profiles, items, customers, price lists, per-store stock movements, receipts) ' +
+      'in the background and returns immediately — a full sweep takes minutes and ' +
+      'used to time the caller out. Poll GET /erp/sync/status for progress. The ' +
+      'heavy per-customer price pull is excluded here; it runs nightly and from its ' +
+      'own row button. No-op when ERP mode is off. Admin only.',
   })
-  @ApiOkResponse({ description: 'Per-entity results' })
+  @ApiAcceptedResponse({ description: '{ started: true } — watch /erp/sync/status' })
+  @HttpCode(HttpStatus.ACCEPTED)
   syncNow() {
-    return this.sync.syncNow();
+    return this.sync.startFullSync();
+  }
+
+  @Post('sync/entity/:entity')
+  @ApiOperation({
+    summary: 'Re-run ONE sync step',
+    description:
+      'Runs a single entity on its own — the per-row button in Settings → ERP. Use ' +
+      'it to retry a step that failed without re-running the whole catalogue, or to ' +
+      'pull `customer_price` on demand (it is excluded from the 5-minute sweep ' +
+      'because it costs one ERP call per customer). Accepts any name from ' +
+      'GET /erp/sync/entities, including `movements:<storeCode>`. Runs in the ' +
+      'background; poll GET /erp/sync/status. Admin only.',
+  })
+  @ApiAcceptedResponse({ description: '{ started: true } — watch /erp/sync/status' })
+  @HttpCode(HttpStatus.ACCEPTED)
+  syncEntity(@Param('entity') entity: string) {
+    return this.sync.startEntity(entity);
+  }
+
+  @Get('sync/entities')
+  @ApiOperation({
+    summary: 'Syncable entity names',
+    description: 'Every name POST /erp/sync/entity/:entity accepts, with its tier. Admin only.',
+  })
+  @ApiOkResponse({ description: 'Entity names + tier' })
+  syncEntities() {
+    return this.sync.syncableEntities();
+  }
+
+  @Get('sync/activity')
+  @ApiOperation({
+    summary: 'What is running right now',
+    description: 'The in-flight sweep (if any) and the entities currently pulling. Admin only.',
+  })
+  @ApiOkResponse({ description: 'Live sync activity' })
+  syncActivity() {
+    return this.sync.syncActivity();
   }
 
   @Post('webhook')
@@ -60,11 +112,14 @@ export class ErpSyncController {
   @ApiOperation({
     summary: 'Full master-data refresh from the ERP',
     description:
-      'Re-pulls all company info, stores, items (incl. old + price/cost) and customers from the ERP (full, not incremental). Admin only.',
+      'Re-pulls all company info, stores, items (incl. old + price/cost), customers, ' +
+      'price lists AND per-customer prices from the ERP (full, not incremental). ' +
+      'Runs in the background and returns immediately. Admin only.',
   })
-  @ApiOkResponse({ description: 'Per-entity results' })
+  @ApiAcceptedResponse({ description: '{ started: true } — watch /erp/sync/status' })
+  @HttpCode(HttpStatus.ACCEPTED)
   refresh() {
-    return this.sync.refreshAll();
+    return this.sync.startRefresh();
   }
 
   @Get('sync/status')

@@ -59,12 +59,7 @@ export class ErpHttpClient {
       signal: AbortSignal.timeout(this.timeout()),
     });
     this.logger.log(`← GET ${path} ${res.status}`);
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(`ERP rejected the API key (HTTP ${res.status}) on ${path}`);
-    }
-    if (!res.ok) {
-      throw new Error(`ERP ${path} failed (HTTP ${res.status})`);
-    }
+    if (!res.ok) throw await this.readError(res, path);
     const body: unknown = await res.json();
     const data = this.extractData<T>(body);
     const total = this.extractTotal(body) ?? data.length;
@@ -93,7 +88,7 @@ export class ErpHttpClient {
       signal: AbortSignal.timeout(this.timeout()),
     });
     this.logger.log(`← GET ${path} ${res.status}`);
-    if (!res.ok) throw new Error(`ERP ${path} failed (HTTP ${res.status})`);
+    if (!res.ok) throw await this.readError(res, path);
     return (await res.json()) as T;
   }
 
@@ -176,6 +171,49 @@ export class ErpHttpClient {
     if (!res.ok) throw new Error(`ERP PATCH ${path} failed (HTTP ${res.status})`);
     const json = (await res.json().catch(() => null)) as { data?: T } | null;
     return json?.data ?? null;
+  }
+
+  /**
+   * Turn a failed GET into an error an operator can act on.
+   *
+   * Every non-2xx used to collapse into "ERP rejected the API key (HTTP 401)" or
+   * a bare "failed (HTTP 500)", which conflated three different problems with
+   * three different fixes: a bad key (re-enter it), a key that is scoped to one
+   * warehouse or missing a scope (widen it in the ERP), and a rate-limited sweep
+   * (nothing is wrong, it asked too fast). The status code and the ERP's own
+   * `error.code` / `error.message` are all already on the wire — they were just
+   * being thrown away, and the dashboard's per-entity row is where they belong.
+   */
+  private async readError(res: Response, path: string): Promise<Error> {
+    const json: unknown = await res.json().catch(() => null);
+    const code = this.errorCode(json);
+    const detail = this.errorDetail(json);
+    if (res.status === 401) {
+      return new Error(
+        `ERP rejected the API key (HTTP 401) on ${path} — the key is wrong, ` +
+          'revoked or expired. Re-enter it in Settings → ERP.',
+      );
+    }
+    if (res.status === 403) {
+      // WAREHOUSE_FORBIDDEN is by far the common one: a key locked to a single
+      // warehouse 403s on every OTHER warehouse's movement feed, while unknown
+      // warehouse codes answer 200-empty — so the same key looks half-working.
+      return new Error(
+        `ERP refused the request (HTTP 403) on ${path}` +
+          (detail ? ` — ${detail}` : '') +
+          (code === 'WAREHOUSE_FORBIDDEN'
+            ? '. The ERP API key is restricted to ONE warehouse; clear that ' +
+              'restriction so it can read every store.'
+            : '. The API key is missing a scope for this endpoint.'),
+      );
+    }
+    if (res.status === 429) {
+      return new Error(
+        `ERP rate limit reached (HTTP 429) on ${path} — the sweep asked for too ` +
+          'much inside one minute. It will succeed on the next run.',
+      );
+    }
+    return new Error(`ERP ${path} failed (HTTP ${res.status})${detail ? ` — ${detail}` : ''}`);
   }
 
   /**
