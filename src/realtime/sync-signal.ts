@@ -26,8 +26,17 @@
 /** Socket event name the app subscribes to. */
 export const SYNC_REQUIRED_EVENT = 'sync.required';
 
-/** Which slice of the app's local data went stale. */
-export type SyncResource = 'offers' | 'customers' | 'stock';
+/**
+ * Which slice of the app's local data went stale.
+ *
+ * `items` is the CATALOGUE — a product's name, price, barcode, units, or the
+ * product existing at all. It is deliberately separate from `stock`: a stock
+ * signal only overlays quantities onto rows the device already has, so before
+ * this existed an ERP price change reached the backend and stopped there. The
+ * rep kept quoting the old price until they happened to leave and re-enter the
+ * home screen.
+ */
+export type SyncResource = 'offers' | 'customers' | 'stock' | 'items';
 
 export interface SyncSignal {
   resource: SyncResource;

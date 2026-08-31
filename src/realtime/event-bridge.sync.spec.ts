@@ -40,6 +40,38 @@ describe('EventBridgeService — sync signals', () => {
     });
   });
 
+  describe('items', () => {
+    // An item is not owned by a van: a price change matters to whoever is
+    // holding that product, which the server cannot know in advance.
+    it('goes to every rep', () => {
+      const { bridge, toRep, toAll } = build();
+      bridge.onItemsChanged({ reason: 'erp.items.pulled' });
+
+      expect(toRep).toHaveLength(0);
+      expect(toAll).toHaveLength(1);
+      expect(toAll[0].event).toBe(SYNC_REQUIRED_EVENT);
+      expect(toAll[0].payload).toMatchObject({
+        resource: 'items',
+        reason: 'erp.items.pulled',
+      });
+    });
+
+    // `items` and `stock` are NOT interchangeable. The app answers a stock
+    // signal by overlaying quantities onto rows it already holds; only `items`
+    // makes it re-pull the products themselves. Emitting the wrong one is how a
+    // price change reaches the backend and stops there.
+    it('is a distinct resource from stock', () => {
+      const { bridge, toAll } = build();
+      bridge.onItemsChanged({ reason: 'erp.price-lists.pulled' });
+      bridge.onStockChanged({ reason: 'erp.movements.pulled' });
+
+      expect(toAll.map((c) => (c.payload as { resource: string }).resource)).toEqual([
+        'items',
+        'stock',
+      ]);
+    });
+  });
+
   describe('customers', () => {
     it('goes to the owning rep only', () => {
       const { bridge, toRep, toAll } = build();

@@ -1516,6 +1516,7 @@ export class ErpSyncService {
     }
     const keptErpIds = new Set<string>();
     let skipped = 0;
+    let priceChanges = 0;
     for (const l of lists) {
       keptErpIds.add(l.id);
       let local = await this.priceLists.findOne({ where: { erpId: l.id } });
@@ -1571,13 +1572,25 @@ export class ErpSyncService {
         let row = await this.priceListItems.findOne({
           where: { priceListId: local.id, itemId },
         });
+        // Write only a price that actually moved. A list is re-read on every
+        // sweep, so an unconditional save rewrote every row every five minutes
+        // and made "did a price change?" unanswerable.
+        if (row && Number(row.unitPrice) === unitPrice) {
+          processed += 1;
+          continue;
+        }
         if (!row) row = this.priceListItems.create({ priceListId: local.id, itemId });
         row.unitPrice = unitPrice;
         await this.priceListItems.save(row);
+        priceChanges += 1;
         processed += 1;
       }
       for (const e of await this.priceListItems.find({ where: { priceListId: local.id } })) {
-        if (!keptItemIds.has(e.itemId)) await this.priceListItems.delete(e.id);
+        if (!keptItemIds.has(e.itemId)) {
+          await this.priceListItems.delete(e.id);
+          // A price the rep can no longer be given is as much a change as a new one.
+          priceChanges += 1;
+        }
       }
     }
 
@@ -1604,6 +1617,11 @@ export class ErpSyncService {
         c.priceListId = local.id;
         await this.customers.save(c);
       }
+    }
+    // Same rule as the item pull: signal only on a real price movement.
+    if (priceChanges > 0) {
+      this.logger.log(`price lists: ${priceChanges} price(s) changed — signalling vans`);
+      this.events.emit('items.changed', { reason: 'erp.price-lists.pulled' });
     }
     return { count: processed, skipped };
   }
@@ -2545,9 +2563,10 @@ export class ErpSyncService {
     // product must cost one product.
     let processed = 0;
     let skipped = 0;
+    let changed = 0;
     for (const skus of byProduct.values()) {
       try {
-        await this.upsertProductItem(skus, erpOrigin);
+        if (await this.upsertProductItem(skus, erpOrigin)) changed += 1;
         processed += 1;
       } catch (err) {
         skipped += 1;
@@ -2558,6 +2577,14 @@ export class ErpSyncService {
             `${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+    // Tell the vans ONLY when a product actually moved. `processed` is the whole
+    // catalogue on every sweep, so signalling on that would have every van
+    // re-downloading it every five minutes over mobile data — which is why this
+    // counts real mutations instead.
+    if (changed > 0) {
+      this.logger.log(`items: ${changed}/${processed} products changed — signalling vans`);
+      this.events.emit('items.changed', { reason: 'erp.items.pulled' });
     }
     return { count: processed, skipped };
   }
@@ -2585,14 +2612,24 @@ export class ErpSyncService {
    * the item itself; the bigger units (طرد …) are attached with their per-item
    * piece count + barcode + sale price.
    */
-  private async upsertProductItem(skus: ErpSku[], erpOrigin: string | null = null): Promise<void> {
+  private async upsertProductItem(
+    skus: ErpSku[],
+    erpOrigin: string | null = null,
+  ): Promise<boolean> {
     const base = this.baseSku(skus);
     const itemNumber = base?.sku;
-    if (!itemNumber) return;
+    if (!itemNumber) return false;
     const productName = base.productName || base.label || base.sku;
 
     let item = await this.items.findOne({ where: { itemNumber } });
+    const isNew = !item;
     if (!item) item = this.items.create({ itemNumber });
+    // Snapshot BEFORE the assignments, so we can tell a real change from the
+    // 99% of sweeps that rewrite a product with identical values. The vans are
+    // told to re-pull the catalogue off the back of this, and a signal on every
+    // 5-minute sweep would have every van downloading the whole catalogue over
+    // mobile data all day.
+    const before = isNew ? null : this.itemFingerprint(item);
     item.sku = base.sku;
     item.name = productName; // the PRODUCT name, never the unit name
     item.nameAr = productName; // ERP is master → its product name is the Arabic name
@@ -2623,7 +2660,11 @@ export class ErpSyncService {
       item.consumerPriceFils = null;
     }
 
-    item = await this.items.save(item);
+    const itemChanged = isNew || before !== this.itemFingerprint(item);
+    // Skipping the write when nothing moved is not just about the signal: it
+    // spares the database a full-catalogue UPDATE storm every five minutes.
+    if (itemChanged) item = await this.items.save(item);
+    let changed = itemChanged;
 
     // Map every unit-SKU (base + larger) to this item, so movements/sales that
     // reference any unit's SKU resolve back to the same cash-van item.
@@ -2655,7 +2696,9 @@ export class ErpSyncService {
       let iu = await this.itemUnits.findOne({
         where: { itemId: item.id, unitId: unit.id },
       });
+      const unitIsNew = !iu;
       if (!iu) iu = this.itemUnits.create({ itemId: item.id, unitId: unit.id });
+      const unitBefore = unitIsNew ? null : this.unitFingerprint(iu);
       // Same uniqueness story as the item barcode above (uq_item_units_barcode).
       iu.barcode = await this.freeUnitBarcode(s.barcode || s.sku, s.sku, iu.id);
       iu.qty = mult;
@@ -2675,8 +2718,33 @@ export class ErpSyncService {
       // كرتونة ×12 to its own pool would zero it on upgrade and fail their next
       // sale (spec §2.3).
       iu.isStockUnit = mult === 1;
-      await this.itemUnits.save(iu);
+      if (unitIsNew || unitBefore !== this.unitFingerprint(iu)) {
+        await this.itemUnits.save(iu);
+        changed = true;
+      }
     }
+    return changed;
+  }
+
+  /**
+   * The fields of an item the salesman app actually renders or prices on.
+   *
+   * Anything not in here (timestamps, internal ids) must NOT make a sweep look
+   * like a change, or the "only signal on a real change" guarantee is worthless.
+   */
+  private itemFingerprint(i: ItemCart): string {
+    return JSON.stringify([
+      i.sku, i.name, i.nameAr, i.nameEn, i.barcode, i.price, i.cost,
+      i.isActive, i.imageUrl, i.isTobaccoProduct, i.tobaccoTaxProfileId,
+      i.consumerPriceFils,
+    ]);
+  }
+
+  /** As `itemFingerprint`, for an item_units row. */
+  private unitFingerprint(u: ItemUnit): string {
+    return JSON.stringify([
+      u.barcode, u.qty, u.salePrice, u.erpSkuCode, u.isStockUnit, u.unitId,
+    ]);
   }
 
   /**

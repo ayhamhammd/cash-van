@@ -74,6 +74,23 @@ export class EventBridgeService {
     }
   }
 
+  /**
+   * The catalogue changed — a product's price, name, barcode or units, or a
+   * product appearing or disappearing (an ERP pull, a dashboard edit).
+   *
+   * Goes to every rep: an item is not owned by one van, and the emitters upstream
+   * only fire when a row genuinely changed, so this is not chatty. The app
+   * responds by re-pulling products, which a `stock` signal does NOT do — that one
+   * writes quantities onto rows the device already holds.
+   */
+  @OnEvent('items.changed')
+  onItemsChanged(p: { reason?: string } = {}): void {
+    this.gateway.emitToAllReps(
+      SYNC_REQUIRED_EVENT,
+      syncSignal('items', p.reason ?? 'items.changed'),
+    );
+  }
+
   /** A van's stock moved from outside the app (load, return, ERP correction). */
   @OnEvent('stock.changed')
   onStockChanged(p: { repId?: string | null; reason?: string }): void {
