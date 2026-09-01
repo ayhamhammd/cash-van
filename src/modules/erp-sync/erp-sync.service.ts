@@ -1293,13 +1293,18 @@ export class ErpSyncService {
   private async pullCategories(): Promise<number> {
     const { data } = await this.erp.list<ErpCategory>('categories', { page: 1, pageSize: 500 });
     let n = 0;
+    const seen = new Set<string>();
     for (const c of data) {
       if (!c.id || !c.name) continue;
+      seen.add(String(c.id));
       const map = await this.idmap.findOne({ where: { entity: 'category', erpId: c.id } });
       let cat = map?.localId
-        ? await this.productCategories.findOne({ where: { id: map.localId } })
+        ? // withDeleted: a category the ERP deleted then re-created must be restored,
+          // not duplicated past its still-soft-deleted twin.
+          await this.productCategories.findOne({ where: { id: map.localId }, withDeleted: true })
         : null;
       if (!cat) cat = this.productCategories.create();
+      cat.deletedAt = null; // restore if it had been pruned
       cat.nameAr = c.name;
       cat.nameEn = c.name;
       if (c.parentId) {
@@ -1312,6 +1317,10 @@ export class ErpSyncService {
       await this.upsertIdMap('category', c.id, c.name, cat.id);
       n += 1;
     }
+    // Categories deleted in the ERP → soft-delete locally (guarded against an empty pull).
+    await this.pruneVanished('category', seen, async (id) => {
+      await this.productCategories.softDelete(id);
+    });
     return n;
   }
 
@@ -1378,27 +1387,38 @@ export class ErpSyncService {
     let page = 1;
     let total = Number.POSITIVE_INFINITY;
     let processed = 0;
+    const seen = new Set<string>();
     while (processed < total) {
       const { data, total: t } = await this.erp.list<ErpCustomer>('customers', { page, pageSize });
       total = t;
       if (data.length === 0) break;
       for (const c of data) {
+        seen.add(String(c.id));
         // Anchor on the ERP customer id (stable), NOT the code — customers
         // created in the ERP UI have a NULL code, and we must still mirror them.
         const existingMap = await this.idmap.findOne({
           where: { entity: 'customer', erpId: String(c.id) },
         });
+        // withDeleted: a customer the ERP deleted then restored must be un-pruned,
+        // not re-inserted next to its soft-deleted self (customerNumber is unique).
         let cust = existingMap?.localId
-          ? await this.customers.findOne({ where: { customerNumber: existingMap.localId } })
+          ? await this.customers.findOne({
+              where: { customerNumber: existingMap.localId },
+              withDeleted: true,
+            })
           : null;
         if (!cust && c.code) {
-          cust = await this.customers.findOne({ where: { customerNumber: c.code } });
+          cust = await this.customers.findOne({
+            where: { customerNumber: c.code },
+            withDeleted: true,
+          });
         }
         // Customer number: prefer the ERP code, else keep an already-assigned
         // local number, else derive a stable one from the ERP id.
         const number =
           cust?.customerNumber ?? c.code ?? `ERP-${String(c.id).slice(0, 8)}`;
         if (!cust) cust = this.customers.create({ customerNumber: number });
+        cust.deletedAt = null; // restore if it had been pruned
         const display = c.name ?? c.code ?? number;
         cust.customerName = display;
         cust.nameAr = cust.nameAr || display; // don't clobber a curated Arabic name
@@ -1436,6 +1456,11 @@ export class ErpSyncService {
       page += 1;
       if (page > 200) break; // safety cap (20k customers)
     }
+    // Customers deleted in the ERP → soft-delete locally (keeps their vouchers/
+    // collections intact and readable; guarded against an empty pull).
+    await this.pruneVanished('customer', seen, async (num) => {
+      await this.customers.softDelete({ customerNumber: num });
+    });
     // AR: mirror each customer's live open balance from the ERP onto total_debt so the
     // dashboard + van see receivables without recomputing. Best-effort — a failure here
     // must not fail the whole customer sync.
@@ -2478,10 +2503,13 @@ export class ErpSyncService {
       .salesmanActivationEnabled()
       .catch(() => false);
     let n = 0;
+    const seen = new Set<string>();
     for (const w of data) {
       if (!w.code) continue; // only warehouses with an external code are syncable
-      let wh = await this.whs.findOne({ where: { whNumber: w.code } });
+      seen.add(String(w.id));
+      let wh = await this.whs.findOne({ where: { whNumber: w.code }, withDeleted: true });
       if (!wh) wh = this.whs.create({ whNumber: w.code });
+      wh.deletedAt = null; // restore if it had been pruned
       wh.whName = w.name ?? w.code;
       wh.isVan = w.isVan ?? false; // store type mirrors the ERP warehouse
       await this.whs.save(wh);
@@ -2510,6 +2538,14 @@ export class ErpSyncService {
       }
       n += 1;
     }
+    // Depots deleted in the ERP → soft-delete locally. VAN warehouses are exempt:
+    // a van store is a salesman, tied to a rep and their stock, and a sync must not
+    // decommission one because the ERP list momentarily dropped it. Guarded against
+    // an empty pull.
+    await this.pruneVanished('warehouse', seen, async (code) => {
+      const wh = await this.whs.findOne({ where: { whNumber: code } });
+      if (wh && !wh.isVan) await this.whs.softDelete({ whNumber: code });
+    });
     return n;
   }
 
@@ -2586,6 +2622,15 @@ export class ErpSyncService {
       this.logger.log(`items: ${changed}/${processed} products changed — signalling vans`);
       this.events.emit('items.changed', { reason: 'erp.items.pulled' });
     }
+    // Items whose every SKU disappeared from the ERP → soft-delete locally. Keeps
+    // the item on its historical vouchers (RESTRICT) while hiding it from the
+    // dashboard and every van. `all` is the full SKU snapshot; the guard in
+    // pruneVanished makes an empty/failed pull a no-op.
+    const seenItemIds = new Set(all.map((s) => String(s.id)));
+    const removed = await this.pruneVanished('item', seenItemIds, async (num) => {
+      await this.items.softDelete({ itemNumber: num });
+    });
+    if (removed > 0) this.events.emit('items.changed', { reason: 'erp.items.pruned' });
     return { count: processed, skipped };
   }
 
@@ -2621,9 +2666,12 @@ export class ErpSyncService {
     if (!itemNumber) return false;
     const productName = base.productName || base.label || base.sku;
 
-    let item = await this.items.findOne({ where: { itemNumber } });
+    // withDeleted: an item the ERP deleted then brought back must be restored, not
+    // re-inserted beside its soft-deleted self (item_number / barcode are unique).
+    let item = await this.items.findOne({ where: { itemNumber }, withDeleted: true });
     const isNew = !item;
     if (!item) item = this.items.create({ itemNumber });
+    item.deletedAt = null; // restore if it had been pruned
     // Snapshot BEFORE the assignments, so we can tell a real change from the
     // 99% of sweeps that rewrite a product with identical values. The vans are
     // told to re-pull the catalogue off the back of this, and a signal on every
@@ -2810,6 +2858,75 @@ export class ErpSyncService {
     m.erpCode = erpCode;
     m.localId = localId;
     await this.idmap.save(m);
+  }
+
+  /**
+   * Reconcile the local table against the ERP: SOFT-DELETE every local row of
+   * `entity` whose ERP record is gone (its id is not in `seenErpIds`, the full set
+   * the just-finished pull saw). ERP is the master, so a record deleted there must
+   * disappear from the dashboard and the app — soft-delete does exactly that: a
+   * `@DeleteDateColumn` row is hidden from every repository read, YET it physically
+   * stays, so the RESTRICT foreign keys from vouchers/collections still hold and the
+   * history stays readable. Reappearance is handled by the pulls, which look the row
+   * up `withDeleted` and clear `deleted_at`.
+   *
+   * WIPE GUARD — the reason this is a helper and not four ad-hoc loops: NEVER prune
+   * from an empty snapshot. If the ERP returned nothing for this entity (an outage, a
+   * bad page, an auth blip, or the ERP itself was reset), "everything vanished" is a
+   * lie and pruning would erase the whole catalogue — the exact way this install lost
+   * its data once. An empty pull leaves every local row untouched.
+   *
+   * A local row can carry SEVERAL erp ids (an item groups its unit-SKUs), so it is
+   * pruned only when NONE of its ids survive — removing one variant never deletes the
+   * item.
+   */
+  private async pruneVanished(
+    entity: string,
+    seenErpIds: Set<string>,
+    softDeleteLocal: (localId: string) => Promise<void>,
+  ): Promise<number> {
+    if (seenErpIds.size === 0) {
+      this.logger.warn(`prune ${entity}: skipped — empty ERP snapshot (wipe guard)`);
+      return 0;
+    }
+    const maps = await this.idmap.find({ where: { entity } });
+    const idsByLocal = new Map<string, string[]>();
+    for (const m of maps) {
+      const arr = idsByLocal.get(m.localId) ?? [];
+      arr.push(m.erpId);
+      idsByLocal.set(m.localId, arr);
+    }
+    const vanished = [...idsByLocal].filter(
+      ([, erpIds]) => !erpIds.some((id) => seenErpIds.has(id)),
+    );
+    // PROPORTION GUARD. An empty snapshot is not the only bad one — a broken page
+    // can return 5 of 500 rows with no error, and pruning the "missing" 495 is a
+    // wipe in slow motion. Half or more of a mapped catalogue disappearing in one
+    // pull is not a real day's deletions; treat it as a bad snapshot and prune
+    // nothing. Genuine bulk removals are done deliberately from the ERP a chunk at
+    // a time, or via a manual reconcile — never silently here.
+    if (idsByLocal.size >= 4 && vanished.length / idsByLocal.size >= 0.5) {
+      this.logger.warn(
+        `prune ${entity}: skipped — ${vanished.length}/${idsByLocal.size} would be removed ` +
+          `(≥50%); treating as a bad snapshot, not real deletions`,
+      );
+      return 0;
+    }
+    let pruned = 0;
+    for (const [localId] of vanished) {
+      try {
+        await softDeleteLocal(localId);
+        pruned += 1;
+      } catch (e) {
+        this.logger.warn(
+          `prune ${entity} ${localId}: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+    if (pruned) {
+      this.logger.log(`prune ${entity}: removed ${pruned} record(s) gone from the ERP`);
+    }
+    return pruned;
   }
 
   private async saveCursor(
