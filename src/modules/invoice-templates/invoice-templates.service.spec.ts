@@ -1,10 +1,12 @@
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { InvoiceTemplatesService, toBuiltin } from './invoice-templates.service';
 
 /**
  * The fallback chain and the "one global default" rule, exercised against a
  * hand-rolled repository mock — no Nest context, no database.
  */
+const LAYOUT = { version: 1, layout: { width: 210 }, elements: [] };
+
 describe('InvoiceTemplatesService', () => {
   function build(rows: Array<Record<string, unknown>> = []) {
     const findOne = jest.fn(async ({ where }: { where: Record<string, unknown> }) => {
@@ -54,7 +56,7 @@ describe('InvoiceTemplatesService', () => {
 
   it('unsets the previous global default when creating a new one', async () => {
     const { svc, repo } = build([]);
-    await svc.create({ name: 'x', documentType: 'SALE_INVOICE', isDefault: true, layout: {} });
+    await svc.create({ name: 'x', documentType: 'SALE_INVOICE', isDefault: true, layout: LAYOUT });
     expect(repo.update).toHaveBeenCalledWith(
       expect.objectContaining({ documentType: 'SALE_INVOICE', isDefault: true }),
       { isDefault: false },
@@ -63,8 +65,14 @@ describe('InvoiceTemplatesService', () => {
 
   it('does not touch the global default when creating a branch template', async () => {
     const { svc, repo } = build([]);
-    await svc.create({ name: 'x', documentType: 'SALE_INVOICE', isDefault: true, branchId: 'wh-1', layout: {} });
+    await svc.create({ name: 'x', documentType: 'SALE_INVOICE', isDefault: true, branchId: 'wh-1', layout: LAYOUT });
     expect(repo.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a layout with no elements array', async () => {
+    const { svc } = build([]);
+    await expect(svc.create({ name: 'x', documentType: 'SALE_INVOICE', layout: {} })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(svc.create({ name: 'x', documentType: 'SALE_INVOICE', layout: { elements: [] } })).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('404s on a missing delete', async () => {
