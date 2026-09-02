@@ -54,6 +54,7 @@ import { AiInsightsModule } from './modules/ai-insights/ai-insights.module';
 import { TargetsModule } from './modules/targets/targets.module';
 import { ArModule } from './modules/ar/ar.module';
 import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module';
+import { InvoiceTemplatesModule } from './modules/invoice-templates/invoice-templates.module';
 
 @Module({
   imports: [
@@ -118,6 +119,7 @@ import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module
     TargetsModule,
     ArModule,
     CashAccountsModule,
+    InvoiceTemplatesModule,
   ],
   controllers: [HealthController],
   providers: [
