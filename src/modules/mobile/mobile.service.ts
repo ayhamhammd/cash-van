@@ -285,11 +285,20 @@ export class MobileService {
    * when no depot exists at all.
    */
   async resolveMainStore(): Promise<{ number: string; name: string | null } | null> {
+    // 1) An explicit admin override always wins.
     const cfg = await this.settings.findOne({ where: { id: 1 } });
     if (cfg?.mainStoreNumber) {
       const wh = await this.warehouses.findOne({ where: { whNumber: cfg.mainStoreNumber } });
       return { number: cfg.mainStoreNumber, name: wh?.whName ?? null };
     }
+    // 2) The store the ERP itself flags as main (mirrored onto is_main each sync).
+    //    This is the real detection — it survives a settings reset because the next
+    //    warehouse sync sets it again.
+    const flagged = await this.warehouses.findOne({
+      where: { isMain: true, isVan: false },
+    });
+    if (flagged) return { number: flagged.whNumber, name: flagged.whName ?? null };
+    // 3) Last resort when the ERP flags none: the lowest-numbered depot.
     const depots = await this.warehouses.find({ where: { isVan: false } });
     if (!depots.length) return null;
     const first = [...depots].sort((a, b) =>

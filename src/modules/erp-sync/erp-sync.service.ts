@@ -2512,6 +2512,7 @@ export class ErpSyncService {
       wh.deletedAt = null; // restore if it had been pruned
       wh.whName = w.name ?? w.code;
       wh.isVan = w.isVan ?? false; // store type mirrors the ERP warehouse
+      wh.isMain = w.isMain ?? false; // main-store flag → the ORDER flow's depot
       await this.whs.save(wh);
       await this.upsertIdMap('warehouse', w.id, w.code, w.code);
 

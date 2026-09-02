@@ -17,6 +17,15 @@ export class Warehouse extends BaseEntity {
   @Column({ name: 'is_van', type: 'boolean', default: false })
   isVan!: boolean;
 
+  /**
+   * The ERP's "main store" — the central depot the ORDER flow draws from. Mirrored
+   * from the ERP warehouse `isMain` flag on every sync, so the main store is
+   * detected FROM the ERP rather than guessed. An explicit settings.mainStoreNumber
+   * still overrides it.
+   */
+  @Column({ name: 'is_main', type: 'boolean', default: false })
+  isMain!: boolean;
+
   @Column({
     name: 'wh_credit_box',
     type: 'numeric',
