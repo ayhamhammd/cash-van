@@ -395,13 +395,25 @@ export class ErpSyncService {
     // Page through the allowlist (the endpoint caps pageSize at 100).
     const skus: Array<{ skuId: string; skuCode: string }> = [];
     const pageSize = 100;
-    for (let page = 1; page <= 200; page++) {
-      const res = await this.erp.list<{ skuId: string; skuCode: string }>(
-        'inventory/allowed-items',
-        { warehouseId: whMap.erpId, page, pageSize },
+    try {
+      for (let page = 1; page <= 200; page++) {
+        const res = await this.erp.list<{ skuId: string; skuCode: string }>(
+          'inventory/allowed-items',
+          { warehouseId: whMap.erpId, page, pageSize },
+        );
+        skus.push(...res.data);
+        if (res.data.length < pageSize) break;
+      }
+    } catch (e) {
+      // The per-warehouse allowlist endpoint is optional/newer on the ERP. If it
+      // is missing or erroring, DEGRADE TO "no restriction" — never let it blank a
+      // salesman's whole catalogue. Returning empty here means the caller shows the
+      // full catalogue (same as an unrestricted van), instead of the request 500ing.
+      this.logger.warn(
+        `allowed-items for warehouse ${whNumber} failed → showing full catalogue: ` +
+          `${e instanceof Error ? e.message : String(e)}`,
       );
-      skus.push(...res.data);
-      if (res.data.length < pageSize) break;
+      return new Set();
     }
     if (skus.length === 0) return new Set();
 
