@@ -13,6 +13,7 @@ import { ProductCategory } from '../products/entities/product-category.entity';
 import { VanStock } from '../products/entities/van-stock.entity';
 
 import { MobileController } from './mobile.controller';
+import { MobileOrderController } from './mobile-order.controller';
 import { MobileService } from './mobile.service';
 import { MobileContextGuard } from './mobile-context.guard';
 import { ErpSyncModule } from '../erp-sync/erp-sync.module';
@@ -34,7 +35,7 @@ import { ErpSyncModule } from '../erp-sync/erp-sync.module';
     // For live ERP on-hand overlay on the cross-store itemBalance lookup.
     ErpSyncModule,
   ],
-  controllers: [MobileController],
+  controllers: [MobileController, MobileOrderController],
   providers: [MobileService, MobileContextGuard],
 })
 export class MobileModule {}
