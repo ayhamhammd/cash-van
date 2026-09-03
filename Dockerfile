@@ -23,6 +23,12 @@ RUN npm run build && npm prune --omit=dev
 FROM node:${NODE_VERSION} AS production
 WORKDIR /app
 RUN addgroup -g 1001 -S nodegrp && adduser -S nodeusr -u 1001 -G nodegrp
+# The uploads root (customer photos, attachments, agent reports). It must exist
+# in the image, owned by the runtime user, BEFORE a named volume is mounted on
+# it: Docker copies the directory's ownership into a fresh volume, whereas a
+# mount point the image lacks is created root-owned and every upload then dies
+# with EACCES (a 500 on /customers/photo). STORAGE_LOCAL_ROOT defaults to it.
+RUN mkdir -p /app/storage && chown nodeusr:nodegrp /app/storage
 USER nodeusr
 ENV NODE_ENV=production
 COPY --from=build --chown=nodeusr:nodegrp /app/dist ./dist
