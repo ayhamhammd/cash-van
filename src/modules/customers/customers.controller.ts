@@ -8,6 +8,7 @@ import {
   Param,
   ParseUUIDPipe,
   Patch,
+  BadRequestException,
   Post,
   Query,
   Res,
@@ -297,6 +298,30 @@ export class CustomersController {
   @ApiCreatedResponse({ description: 'Import summary (created/updated/skipped counts)' })
   import(@UploadedFile() file: Express.Multer.File) {
     return this.customers.importCsv(file.buffer);
+  }
+
+  @Post('assign-salesmen')
+  @Roles('admin', 'manager')
+  @UseInterceptors(FileInterceptor('file'))
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
+  })
+  @ApiOperation({
+    summary: 'Bulk-assign customers to salesmen (Excel)',
+    description:
+      'Excel upload, two columns: customer number + salesman number (matched on rep ' +
+      'code, the salesman login number, or the van store number). Sets each customer\'s ' +
+      'assigned salesman. Returns { assigned, unchanged, unmatchedCustomers, unmatchedSalesmen }. ' +
+      'Admin/manager only.',
+  })
+  @ApiCreatedResponse({ description: 'Assignment summary' })
+  assignSalesmen(@UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No file uploaded');
+    return this.customers.assignSalesmenFromXlsx(file.buffer);
   }
 
   @Get(':id/attachments')

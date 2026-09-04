@@ -9,8 +9,9 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { IsNull, Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { parse } from 'csv-parse/sync';
+import { Workbook } from 'exceljs';
 
 import { Customer } from './entities/customer.entity';
 import { CustomerAiProfile } from './entities/customer-ai-profile.entity';
@@ -435,6 +436,117 @@ export class CustomersService {
     return saved;
   }
 
+  /**
+   * Bulk-assign customers to salesmen from an Excel upload. Each row: customer
+   * number (column 1) + salesman number (column 2). The salesman number matches
+   * the rep code, the linked user's login number, OR the van store number —
+   * whichever the office typed. Rows whose customer or salesman is not found are
+   * reported back, never silently dropped.
+   */
+  async assignSalesmenFromXlsx(buffer: Buffer): Promise<{
+    total: number;
+    assigned: number;
+    unchanged: number;
+    unmatchedCustomers: string[];
+    unmatchedSalesmen: string[];
+  }> {
+    const wb = new Workbook();
+    try {
+      // Pass a precisely-sized ArrayBuffer — the @types/node Buffer generic does
+      // not line up with exceljs's Buffer param, and buffer.buffer may be pooled.
+      const ab = buffer.buffer.slice(
+        buffer.byteOffset,
+        buffer.byteOffset + buffer.byteLength,
+      ) as ArrayBuffer;
+      await wb.xlsx.load(ab);
+    } catch (err) {
+      throw new BadRequestException(`Malformed Excel file: ${(err as Error).message}`);
+    }
+    const ws = wb.worksheets[0];
+    if (!ws) throw new BadRequestException('The Excel file has no sheets');
+
+    // (customerNumber, salesmanNumber) per row. A first row whose column 1 has no
+    // digit is treated as a header and skipped.
+    const pairs: Array<{ cust: string; sales: string }> = [];
+    ws.eachRow((row) => {
+      const cust = cellText(row.getCell(1).value);
+      const sales = cellText(row.getCell(2).value);
+      if (!cust && !sales) return;
+      pairs.push({ cust, sales });
+    });
+    if (pairs.length && !/\d/.test(pairs[0].cust)) pairs.shift();
+    if (pairs.length === 0) throw new BadRequestException('The file has no data rows');
+    if (pairs.length > 20000) throw new BadRequestException('The file exceeds 20000 rows');
+
+    // Salesman number → repId, matched on rep code, the linked user's number, or
+    // the van store number (any of the three the office might use).
+    const repRows: Array<{
+      repId: string;
+      code: string | null;
+      userNumber: string | null;
+      vanNumber: string | null;
+    }> = await this.customers.manager.query(
+      `SELECT r.id AS "repId", r.code AS code, u.user_number AS "userNumber", w.wh_number AS "vanNumber"
+         FROM reps r
+         LEFT JOIN users u ON u.id = r.user_id
+         LEFT JOIN warehouses w ON w.id = r.van_id
+        WHERE r.deleted_at IS NULL`,
+    );
+    const repByKey = new Map<string, string>();
+    for (const r of repRows) {
+      for (const key of [r.code, r.userNumber, r.vanNumber]) {
+        if (key != null && String(key).trim() !== '') repByKey.set(String(key).trim(), r.repId);
+      }
+    }
+
+    // Customers by number, loaded once.
+    const custNumbers = [...new Set(pairs.map((p) => p.cust).filter(Boolean))];
+    const custRows = custNumbers.length
+      ? await this.customers.find({ where: { customerNumber: In(custNumbers) } })
+      : [];
+    const custByNumber = new Map(custRows.map((c) => [c.customerNumber, c]));
+
+    const result = {
+      total: pairs.length,
+      assigned: 0,
+      unchanged: 0,
+      unmatchedCustomers: [] as string[],
+      unmatchedSalesmen: [] as string[],
+    };
+
+    await this.customers.manager.transaction(async (em) => {
+      const repo = em.getRepository(Customer);
+      for (const { cust, sales } of pairs) {
+        const customer = custByNumber.get(cust);
+        if (!customer) {
+          result.unmatchedCustomers.push(cust);
+          continue;
+        }
+        const repId = repByKey.get(sales);
+        if (!repId) {
+          result.unmatchedSalesmen.push(sales);
+          continue;
+        }
+        if (customer.repId === repId) {
+          result.unchanged++;
+          continue;
+        }
+        customer.repId = repId;
+        await repo.save(customer);
+        result.assigned++;
+      }
+    });
+
+    // Tell every affected van to re-pull its customer list (old + new owners),
+    // exactly as the single-customer reassign does. Broad signal = every van.
+    if (result.assigned > 0) {
+      this.events.emit('customer.changed', { reason: 'bulk.salesman.assignment' });
+    }
+    result.unmatchedCustomers = [...new Set(result.unmatchedCustomers)];
+    result.unmatchedSalesmen = [...new Set(result.unmatchedSalesmen)];
+    return result;
+  }
+
   async addVisit(customerId: string, dto: CreateVisitDto): Promise<CustomerVisit> {
     await this.findOneOrThrow(customerId);
     return this.recordVisit({
@@ -718,4 +830,24 @@ export class CustomersService {
       .replace(/\s+/g, '_')
       .slice(0, 120);
   }
+}
+
+/**
+ * Read an ExcelJS cell value as trimmed text — cells can be a plain string/number,
+ * a formula ({ result }), a hyperlink ({ text }), or rich text ({ richText: [...] }).
+ */
+function cellText(v: unknown): string {
+  if (v == null) return '';
+  if (typeof v === 'object') {
+    const o = v as {
+      result?: unknown;
+      text?: unknown;
+      richText?: Array<{ text?: string }>;
+    };
+    if (o.result != null) return String(o.result).trim();
+    if (Array.isArray(o.richText)) return o.richText.map((t) => t.text ?? '').join('').trim();
+    if (o.text != null) return String(o.text).trim();
+    return '';
+  }
+  return String(v).trim();
 }
