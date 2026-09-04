@@ -64,6 +64,7 @@ export class ProductsService {
     if (query.categoryId) qb.andWhere('p.category_id = :cid', { cid: query.categoryId });
     if (query.isActive !== undefined) qb.andWhere('p.is_active = :a', { a: query.isActive });
     applyTokenSearch(qb, query.q, [
+      'p.item_number',
       'p.sku',
       'p.name_ar',
       'p.item_name',

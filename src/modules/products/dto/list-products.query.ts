@@ -3,7 +3,7 @@ import { Type } from 'class-transformer';
 import { IsBoolean, IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
 
 export class ListProductsQuery {
-  @ApiPropertyOptional({ description: 'Substring on sku / name / name_ar / barcode' })
+  @ApiPropertyOptional({ description: 'Substring on item_number / sku / name / name_ar / barcode' })
   @IsOptional()
   @IsString()
   q?: string;
