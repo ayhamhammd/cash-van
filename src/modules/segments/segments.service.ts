@@ -1,20 +1,35 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EventEmitter2 } from '@nestjs/event-emitter';
+import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { In, Repository } from 'typeorm';
 
 import { CustomerSegment } from './entities/customer-segment.entity';
 import { SegmentCustomer } from './entities/segment-customer.entity';
 import { Customer } from '../customers/entities/customer.entity';
+import { CustomerAiProfile } from '../customers/entities/customer-ai-profile.entity';
 import { CreateSegmentDto } from './dto/create-segment.dto';
 import { UpdateSegmentDto } from './dto/update-segment.dto';
 import { ListSegmentsQuery } from './dto/list-segments.query';
 import { ListMembersQuery } from './dto/list-members.query';
 import { AddMembersDto } from './dto/add-members.dto';
 import { applyTokenSearch } from '../../common/search/token-search.util';
+import { applyRules, rulesNeedAiJoin, validateRules } from './segment-rules';
 
 /** A rep_id no customer has — used so an empty supervisor scope matches nothing. */
 const NO_MATCH_UUID = '00000000-0000-0000-0000-000000000000';
+
+/** Upper bound on how many customers one dynamic refresh will materialise. */
+const REFRESH_MEMBER_CAP = 100_000;
+/** How long to wait after the last customer.changed before refreshing dynamics. */
+const DYNAMIC_REFRESH_DEBOUNCE_MS = 5_000;
+
+/** Split an array into fixed-size chunks (for batched inserts). */
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 
 export interface SegmentView {
   id: string;
@@ -50,6 +65,10 @@ export interface CustomerSegmentTag {
 
 @Injectable()
 export class SegmentsService {
+  private readonly logger = new Logger(SegmentsService.name);
+  /** Coalesces a burst of customer.changed events into one dynamic refresh. */
+  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(
     @InjectRepository(CustomerSegment)
     private readonly segments: Repository<CustomerSegment>,
@@ -91,6 +110,11 @@ export class SegmentsService {
   }
 
   async create(dto: CreateSegmentDto, userId?: string | null): Promise<SegmentView> {
+    // Reject bad rules before persisting, so a dynamic segment is never saved
+    // with criteria that would only blow up later at refresh time.
+    if ((dto.kind ?? 'STATIC') === 'DYNAMIC') {
+      validateRules(dto.rules ?? { match: 'ALL', conditions: [] });
+    }
     const row = this.segments.create({
       nameAr: dto.nameAr,
       nameEn: dto.nameEn ?? null,
@@ -103,11 +127,23 @@ export class SegmentsService {
     });
     const saved = await this.segments.save(row);
     this.events.emit('segment.changed', { segmentId: saved.id, reason: 'created' });
-    return this.toView(saved, 0);
+    // A dynamic segment is populated from its rules the moment it is created.
+    if (saved.kind === 'DYNAMIC') {
+      await this.refresh(saved.id).catch((e) =>
+        this.logger.warn(`initial refresh of segment ${saved.id} failed: ${e}`),
+      );
+    }
+    return this.toView(saved, await this.count(saved.id));
   }
 
   async update(id: string, dto: UpdateSegmentDto): Promise<SegmentView> {
     const s = await this.findOneOrThrow(id);
+    // Validate the effective rules when the segment ends up dynamic.
+    const nextKind = dto.kind ?? s.kind;
+    if (nextKind === 'DYNAMIC') {
+      const nextRules = dto.rules !== undefined ? dto.rules : s.rules;
+      validateRules(nextRules ?? { match: 'ALL', conditions: [] });
+    }
     if (dto.nameAr !== undefined) s.nameAr = dto.nameAr;
     if (dto.nameEn !== undefined) s.nameEn = dto.nameEn ?? null;
     if (dto.description !== undefined) s.description = dto.description ?? null;
@@ -117,6 +153,12 @@ export class SegmentsService {
     if (dto.isActive !== undefined) s.isActive = dto.isActive;
     const saved = await this.segments.save(s);
     this.events.emit('segment.changed', { segmentId: id, reason: 'updated' });
+    // Re-materialise a dynamic segment so an edited rule takes effect immediately.
+    if (saved.kind === 'DYNAMIC') {
+      await this.refresh(id).catch((e) =>
+        this.logger.warn(`refresh of segment ${id} after edit failed: ${e}`),
+      );
+    }
     return this.toView(saved, await this.count(id));
   }
 
@@ -187,6 +229,14 @@ export class SegmentsService {
     const wanted = [...ids];
     if (!wanted.length) return { added: 0, total: await this.count(id) };
 
+    // Pin any of these that a rule had auto-added (source='RULE') as MANUAL, so a
+    // later refresh — which prunes only RULE rows — can never silently drop a
+    // customer an admin explicitly added.
+    await this.members.update(
+      { segmentId: id, customerId: In(wanted), source: 'RULE' },
+      { source: 'MANUAL', addedBy: userId ?? null },
+    );
+
     // Skip customers already in the segment so `added` is an honest count.
     const existing = await this.members.find({
       where: { segmentId: id, customerId: In(wanted) },
@@ -238,6 +288,109 @@ export class SegmentsService {
       ])
       .orderBy('s.name_ar', 'ASC')
       .getRawMany<CustomerSegmentTag>();
+  }
+
+  // ── Dynamic membership (rules) ────────────────────────────────────────────
+
+  /**
+   * Re-materialise a DYNAMIC segment: run its rules and replace the RULE-sourced
+   * members with the current matches. MANUAL/IMPORT members are left untouched —
+   * a rule never removes a hand-added customer. A no-op for a STATIC segment.
+   */
+  async refresh(segmentId: string): Promise<{ matched: number; total: number }> {
+    const seg = await this.findOneOrThrow(segmentId);
+    if (seg.kind !== 'DYNAMIC') return { matched: 0, total: await this.count(segmentId) };
+
+    const rules = validateRules(seg.rules ?? { match: 'ALL', conditions: [] });
+    const qb = this.customers
+      .createQueryBuilder('c')
+      .where('c.deleted_at IS NULL');
+    if (rulesNeedAiJoin(rules)) {
+      qb.leftJoin(CustomerAiProfile, 'cap', 'cap.customer_id = c.id');
+    }
+    applyRules(qb, rules);
+    const rows = await qb
+      .select('c.id', 'id')
+      // Deterministic order so the cap always keeps the SAME customers — without
+      // it an over-cap segment would churn a random subset in and out each refresh.
+      .orderBy('c.id', 'ASC')
+      .limit(REFRESH_MEMBER_CAP)
+      .getRawMany<{ id: string }>();
+    const ids = rows.map((r) => r.id);
+    if (ids.length === REFRESH_MEMBER_CAP) {
+      this.logger.warn(
+        `segment ${segmentId} hit the ${REFRESH_MEMBER_CAP}-member cap — membership is truncated`,
+      );
+    }
+
+    await this.members.manager.transaction(async (mgr) => {
+      // Recompute the whole RULE set; never touch MANUAL/IMPORT rows.
+      await mgr.delete(SegmentCustomer, { segmentId, source: 'RULE' });
+      for (const part of chunk(ids, 1000)) {
+        await mgr
+          .createQueryBuilder()
+          .insert()
+          .into(SegmentCustomer)
+          .values(
+            part.map((customerId) => ({
+              segmentId,
+              customerId,
+              source: 'RULE' as const,
+            })),
+          )
+          // A customer already present as MANUAL/IMPORT stays as-is.
+          .orIgnore()
+          .execute();
+      }
+    });
+
+    this.events.emit('segment.changed', { segmentId, reason: 'refreshed' });
+    return { matched: ids.length, total: await this.count(segmentId) };
+  }
+
+  /**
+   * Refresh every active dynamic segment — used by the event debounce and cron.
+   * Never rejects: both callers fire it and forget, and a rejection outside an
+   * HTTP context would otherwise become an unhandled rejection and kill the API.
+   */
+  async refreshAllDynamic(): Promise<void> {
+    try {
+      const dyn = await this.segments.find({
+        where: { kind: 'DYNAMIC', isActive: true },
+        select: { id: true },
+      });
+      for (const s of dyn) {
+        await this.refresh(s.id).catch((e) =>
+          this.logger.warn(`dynamic refresh of segment ${s.id} failed: ${e}`),
+        );
+      }
+    } catch (e) {
+      this.logger.warn(`refreshAllDynamic failed: ${e}`);
+    }
+  }
+
+  /**
+   * A customer changed (created/edited/reassigned/imported): its segment
+   * membership may have shifted. Coalesce a burst into one refresh a few seconds
+   * later rather than recomputing on every single change.
+   */
+  @OnEvent('customer.changed')
+  onCustomerChanged(): void {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      void this.refreshAllDynamic().catch((e) =>
+        this.logger.warn(`debounced dynamic refresh failed: ${e}`),
+      );
+    }, DYNAMIC_REFRESH_DEBOUNCE_MS);
+  }
+
+  /** Nightly safety net so dynamic segments never drift, even if an event is missed. */
+  @Cron(CronExpression.EVERY_DAY_AT_3AM, { name: 'segment-dynamic-refresh' })
+  nightlyRefresh(): void {
+    void this.refreshAllDynamic().catch((e) =>
+      this.logger.warn(`nightly dynamic refresh failed: ${e}`),
+    );
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

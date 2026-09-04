@@ -91,6 +91,14 @@ export class SegmentsController {
     return { success: true };
   }
 
+  @Post(':id/refresh')
+  @Roles('admin')
+  @ApiOperation({ summary: 'Re-materialise a dynamic segment from its rules' })
+  @ApiOkResponse({ description: '{ matched, total }' })
+  refresh(@Param('id', ParseUUIDPipe) id: string) {
+    return this.segments.refresh(id);
+  }
+
   @Get(':id/members')
   @Roles('admin', 'manager')
   @ApiOperation({ summary: 'List a segment’s members (rep-scope filtered)' })
