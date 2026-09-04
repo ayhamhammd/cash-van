@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Not, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 
 import { UserDevice } from './entities/user-device.entity';
 import { User } from '../users/entities/user.entity';
@@ -17,6 +17,16 @@ export interface DeviceIdentity {
   deviceId: string;
   platform?: string | null;
   model?: string | null;
+}
+
+/**
+ * A binding row plus the owning salesman's name and login number — what the
+ * office's release screen shows. Resolving the name here saves the dashboard a
+ * second round-trip to the users list just to label each handset.
+ */
+export interface DeviceBinding extends UserDevice {
+  userName: string | null;
+  userNumber: string | null;
 }
 
 @Injectable()
@@ -118,18 +128,37 @@ export class DevicesService {
     );
   }
 
-  listForUser(userId: string): Promise<UserDevice[]> {
-    return this.devices.find({
+  async listForUser(userId: string): Promise<DeviceBinding[]> {
+    const rows = await this.devices.find({
       where: { userId },
       order: { releasedAt: 'ASC', boundAt: 'DESC' },
     });
+    return this.withUsers(rows);
   }
 
-  listLive(): Promise<UserDevice[]> {
-    return this.devices.find({
+  async listLive(): Promise<DeviceBinding[]> {
+    const rows = await this.devices.find({
       where: { releasedAt: IsNull() },
       order: { lastSeenAt: 'DESC' },
     });
+    return this.withUsers(rows);
+  }
+
+  /** Attach the salesman's name and login number to each binding in one query. */
+  private async withUsers(rows: UserDevice[]): Promise<DeviceBinding[]> {
+    const ids = [...new Set(rows.map((r) => r.userId))];
+    const users = ids.length
+      ? await this.users.find({
+          where: { id: In(ids) },
+          select: { id: true, name: true, userNumber: true },
+        })
+      : [];
+    const byId = new Map(users.map((u) => [u.id, u]));
+    return rows.map((r) => ({
+      ...r,
+      userName: byId.get(r.userId)?.name ?? null,
+      userNumber: byId.get(r.userId)?.userNumber ?? null,
+    }));
   }
 
   /**
