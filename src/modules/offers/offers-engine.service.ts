@@ -9,6 +9,7 @@ import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { AppSettings } from '../settings/entities/app-settings.entity';
 import { Offer } from './entities/offer.entity';
 import { OfferRedemption } from './entities/offer-redemption.entity';
+import { SegmentCustomer } from '../segments/entities/segment-customer.entity';
 import type {
   AppliedOffer,
   CartLineInput,
@@ -68,6 +69,8 @@ export class OffersEngineService {
     private readonly vouchersRepo: Repository<VoucherHeader>,
     @InjectRepository(AppSettings)
     private readonly settingsRepo: Repository<AppSettings>,
+    @InjectRepository(SegmentCustomer)
+    private readonly segmentMembersRepo: Repository<SegmentCustomer>,
   ) {}
 
   async evaluate(
@@ -97,6 +100,23 @@ export class OffersEngineService {
       needsNew && ctx.customerNumber
         ? await this.isNewCustomer(ctx.customerNumber)
         : false;
+
+    // Resolve the customer's real segment ids ONCE, and only when some active
+    // offer actually targets by segment — a single indexed lookup, never per-offer.
+    const needsSegments = offers.some(
+      (o) => (o.eligibility?.segmentIds?.length ?? 0) > 0,
+    );
+    const customerSegmentIds =
+      needsSegments && customer
+        ? new Set(
+            (
+              await this.segmentMembersRepo.find({
+                where: { customerId: customer.id },
+                select: { segmentId: true },
+              })
+            ).map((m) => m.segmentId),
+          )
+        : new Set<string>();
 
     const perCustomerCounts = await this.loadPerCustomerCounts(offers, ctx);
 
@@ -162,7 +182,8 @@ export class OffersEngineService {
 
     for (const offer of offers) {
       if (!this.isWithinSchedule(offer, at)) continue;
-      if (!this.isEligible(offer.eligibility, customer, ctx, isNew)) continue;
+      if (!this.isEligible(offer.eligibility, customer, ctx, isNew, customerSegmentIds))
+        continue;
       if (
         offer.totalRedemptionLimit != null &&
         offer.redemptionCount >= offer.totalRedemptionLimit
@@ -566,15 +587,25 @@ export class OffersEngineService {
     customer: Customer | null,
     ctx: EvaluationContext,
     isNew: boolean,
+    customerSegmentIds: Set<string> = new Set(),
   ): boolean {
     const e = eligibility ?? { customerScope: 'ALL' as const };
     switch (e.customerScope) {
       case 'ALL':
         break;
       case 'SEGMENT':
-        if (!customer || !e.segments?.includes(customer.category ?? '')) {
+        if (e.segments?.length) {
+          // Legacy free-text category match.
+          if (!customer || !e.segments.includes(customer.category ?? '')) {
+            return false;
+          }
+        } else if (!e.segmentIds?.length) {
+          // SEGMENT scope with NEITHER a category list nor real segment ids targets
+          // nobody — unchanged from before segmentIds existed. Without this guard a
+          // criteria-less SEGMENT offer would fall through and match EVERYONE.
           return false;
         }
+        // When segmentIds is set, membership is enforced by the additive check below.
         break;
       case 'SPECIFIC':
         if (!customer || !e.customerNumbers?.includes(customer.customerNumber)) {
@@ -584,6 +615,14 @@ export class OffersEngineService {
       case 'NEW_ONLY':
         if (!customer || !isNew) return false;
         break;
+    }
+    // Real segment membership — additive AND filter, independent of scope. The
+    // customer must belong to at least one of the offer's segments (OR within the
+    // list, matching how every other array filter here behaves).
+    if (e.segmentIds?.length) {
+      if (!customer || !e.segmentIds.some((id) => customerSegmentIds.has(id))) {
+        return false;
+      }
     }
     if (e.regionIds?.length) {
       if (!customer?.regionId || !e.regionIds.includes(customer.regionId)) {

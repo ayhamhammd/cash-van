@@ -219,11 +219,20 @@ export class OfferEligibilityDto {
   @IsIn(CUSTOMER_SCOPES)
   customerScope!: CustomerScope;
 
-  @ApiPropertyOptional({ type: [String], description: 'SEGMENT: customer categories.' })
+  @ApiPropertyOptional({ type: [String], description: 'SEGMENT (legacy): customer categories.' })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   segments?: string[];
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Real segment ids the customer must belong to. Additive filter, any scope.',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  segmentIds?: string[];
 
   @ApiPropertyOptional({ type: [String], description: 'SPECIFIC: customer numbers.' })
   @IsOptional()

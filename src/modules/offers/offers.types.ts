@@ -262,13 +262,24 @@ export type OfferRewardConfig =
 
 export interface OfferEligibility {
   customerScope: CustomerScope;
-  /** SEGMENT: matches customer.category. */
+  /** SEGMENT (legacy): matches the free-text customer.category. Kept for old offers. */
   segments?: string[];
+  /**
+   * Real customer_segments membership: the customer must belong to at least one
+   * of these segment ids. Additive AND filter, honoured under ANY customerScope.
+   */
+  segmentIds?: string[];
   /** SPECIFIC: explicit customer numbers. */
   customerNumbers?: string[];
   regionIds?: string[];
   repIds?: string[];
   storeNumbers?: string[];
+  /**
+   * Server-computed for the offline device only: the member customer numbers of
+   * `segmentIds`, resolved at /offers/active time so the app can match segment
+   * targeting offline without a membership table. Never set by a client.
+   */
+  segmentCustomerNumbers?: string[];
 }
 
 // ---- evaluation I/O (the /offers/evaluate contract) ----

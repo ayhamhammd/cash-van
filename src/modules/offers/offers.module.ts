@@ -7,6 +7,7 @@ import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { AppSettings } from '../settings/entities/app-settings.entity';
 import { Offer } from './entities/offer.entity';
 import { OfferRedemption } from './entities/offer-redemption.entity';
+import { SegmentCustomer } from '../segments/entities/segment-customer.entity';
 import { OffersController } from './offers.controller';
 import { OffersService } from './offers.service';
 import { OffersEngineService } from './offers-engine.service';
@@ -26,6 +27,7 @@ import { OffersEngineService } from './offers-engine.service';
       Customer,
       VoucherHeader,
       AppSettings,
+      SegmentCustomer,
     ]),
   ],
   controllers: [OffersController],

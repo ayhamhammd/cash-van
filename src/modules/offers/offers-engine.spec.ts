@@ -54,6 +54,9 @@ describe('OffersEngineService', () => {
     const settingsRepo = {
       findOne: jest.fn().mockResolvedValue({ id: 1, taxCalcMethod }),
     } as any;
+    const segmentMembersRepo = {
+      find: jest.fn().mockResolvedValue([]),
+    } as any;
 
     return new OffersEngineService(
       offersRepo,
@@ -62,6 +65,7 @@ describe('OffersEngineService', () => {
       customersRepo,
       vouchersRepo,
       settingsRepo,
+      segmentMembersRepo,
     );
   }
 
@@ -86,6 +90,51 @@ describe('OffersEngineService', () => {
     expect(b.lineDiscountFils).toBe(50); // 1000 × 5%
     expect(res.totals.lineDiscountFils).toBe(250);
     expect(res.appliedOffers).toHaveLength(1);
+  });
+
+  it('a SEGMENT offer with no segments and no segmentIds matches NOBODY, not everybody', async () => {
+    const seg: Partial<Offer> = {
+      ...cashStatic5,
+      eligibility: { customerScope: 'SEGMENT' },
+    };
+    // With a real customer present.
+    const withCust = await makeEngine([seg], 'EXCLUSIVE', undefined, {
+      customerNumber: 'C1',
+      category: 'retail',
+    }).evaluate([{ itemNumber: 'A', qty: 4 }], {
+      paymentMethod: 'CASH',
+      customerNumber: 'C1',
+    });
+    expect(withCust.appliedOffers).toHaveLength(0);
+    // And for an anonymous / walk-in sale with no customer.
+    const anon = await makeEngine([seg]).evaluate(
+      [{ itemNumber: 'A', qty: 4 }],
+      { paymentMethod: 'CASH' },
+    );
+    expect(anon.appliedOffers).toHaveLength(0);
+  });
+
+  it('a legacy SEGMENT offer still matches on customer.category', async () => {
+    const seg: Partial<Offer> = {
+      ...cashStatic5,
+      eligibility: { customerScope: 'SEGMENT', segments: ['retail'] },
+    };
+    const match = await makeEngine([seg], 'EXCLUSIVE', undefined, {
+      customerNumber: 'C1',
+      category: 'retail',
+    }).evaluate([{ itemNumber: 'A', qty: 4 }], {
+      paymentMethod: 'CASH',
+      customerNumber: 'C1',
+    });
+    expect(match.appliedOffers).toHaveLength(1);
+    const noMatch = await makeEngine([seg], 'EXCLUSIVE', undefined, {
+      customerNumber: 'C2',
+      category: 'wholesale',
+    }).evaluate([{ itemNumber: 'A', qty: 4 }], {
+      paymentMethod: 'CASH',
+      customerNumber: 'C2',
+    });
+    expect(noMatch.appliedOffers).toHaveLength(0);
   });
 
   it('honours the company tax mode: INCLUSIVE extracts tax, EXCLUSIVE adds it on top', async () => {

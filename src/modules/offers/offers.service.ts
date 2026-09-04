@@ -10,6 +10,8 @@ import { Repository } from 'typeorm';
 import { PaginatedResult } from '../../common/dto/pagination.dto';
 import { Offer } from './entities/offer.entity';
 import { OfferRedemption } from './entities/offer-redemption.entity';
+import { SegmentCustomer } from '../segments/entities/segment-customer.entity';
+import { Customer } from '../customers/entities/customer.entity';
 import { OffersEngineService } from './offers-engine.service';
 import { CreateOfferDto } from './dto/create-offer.dto';
 import { UpdateOfferDto } from './dto/update-offer.dto';
@@ -47,6 +49,8 @@ export class OffersService {
     private readonly offersRepo: Repository<Offer>,
     @InjectRepository(OfferRedemption)
     private readonly redemptionsRepo: Repository<OfferRedemption>,
+    @InjectRepository(SegmentCustomer)
+    private readonly segmentMembersRepo: Repository<SegmentCustomer>,
     private readonly engine: OffersEngineService,
     private readonly events: EventEmitter2,
   ) {}
@@ -146,7 +150,53 @@ export class OffersService {
         })
       : offers;
 
-    return scoped.map((o) => this.toView(o, now));
+    // Resolve segment targeting to member customer NUMBERS for the offline device.
+    // The app has no membership table, so we bake each segment-targeted offer's
+    // members into eligibility.segmentCustomerNumbers here; the app matches on
+    // that additively, exactly like the server engine matches on segmentIds.
+    const membersBySegment = await this.membersForSegments(
+      scoped.flatMap((o) => o.eligibility?.segmentIds ?? []),
+    );
+
+    return scoped.map((o) => {
+      const segIds = o.eligibility?.segmentIds ?? [];
+      if (segIds.length === 0) return this.toView(o, now);
+      const segmentCustomerNumbers = [
+        ...new Set(segIds.flatMap((id) => membersBySegment.get(id) ?? [])),
+      ];
+      // Clone so the expanded (potentially large) list never leaks onto the
+      // persisted entity or other in-request consumers — device payload only.
+      const cloned = {
+        ...o,
+        eligibility: { ...o.eligibility, segmentCustomerNumbers },
+      } as Offer;
+      return this.toView(cloned, now);
+    });
+  }
+
+  /**
+   * Member customer NUMBERS per segment id (deleted customers excluded). One
+   * query joining segment_customers → customers, since membership keys on the
+   * customer uuid, not the number the device knows.
+   */
+  private async membersForSegments(
+    segmentIds: string[],
+  ): Promise<Map<string, string[]>> {
+    const ids = [...new Set(segmentIds)];
+    const out = new Map<string, string[]>();
+    if (ids.length === 0) return out;
+    const rows = await this.segmentMembersRepo
+      .createQueryBuilder('m')
+      .innerJoin(Customer, 'c', 'c.id = m.customer_id AND c.deleted_at IS NULL')
+      .where('m.segment_id IN (:...ids)', { ids })
+      .select(['m.segment_id AS "segmentId"', 'c.customer_number AS "customerNumber"'])
+      .getRawMany<{ segmentId: string; customerNumber: string }>();
+    for (const r of rows) {
+      const list = out.get(r.segmentId);
+      if (list) list.push(r.customerNumber);
+      else out.set(r.segmentId, [r.customerNumber]);
+    }
+    return out;
   }
 
   async update(id: string, dto: UpdateOfferDto): Promise<OfferView> {
