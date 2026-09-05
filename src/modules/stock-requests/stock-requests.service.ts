@@ -540,7 +540,11 @@ export class StockRequestsService {
     flag: 'canRequestStock' | 'canApproveStockRequest',
     message: string,
   ): Promise<void> {
+    // Admins and managers decide as part of running the office; a stock manager
+    // holds the explicit flag. (Applies to canApproveStockRequest; canRequestStock
+    // is a salesman capability and still needs its own flag on non-admins.)
     if (user.role === 'admin' || user.userType === 'ADMIN') return;
+    if (flag === 'canApproveStockRequest' && user.role === 'manager') return;
     const row = await this.users.findOne({ where: { id: user.sub } });
     if (!row?.[flag]) throw new ForbiddenException(message);
   }

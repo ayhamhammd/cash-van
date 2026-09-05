@@ -11,7 +11,9 @@ export type UserPermission =
   | 'canAddItems'
   | 'canEditExpiry'
   | 'canManageOffers'
-  | 'canFindCustomers';
+  | 'canFindCustomers'
+  | 'canRequestStock'
+  | 'canApproveStockRequest';
 
 export const PERMISSIONS_KEY = 'requiredPermissions';
 

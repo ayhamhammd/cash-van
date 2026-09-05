@@ -190,7 +190,12 @@ export class AuthService {
       canCreateCustomerDirect: user.canCreateCustomerDirect,
       canPrintLineDiscount: user.canPrintLineDiscount,
       canRequestStock: user.canRequestStock,
-      canApproveStockRequest: user.canApproveStockRequest,
+      // A dashboard manager/admin decides stock requests as part of running the
+      // office; a "stock manager" holds only this flag. Granting it to
+      // manager/admin here keeps the request-queue guard and the FE decide UI in
+      // step with assertCan (which bypasses for those roles).
+      canApproveStockRequest:
+        user.canApproveStockRequest || user.role === 'admin' || user.role === 'manager',
       canFindCustomers: user.canFindCustomers,
       routesOnly: user.routesOnly,
       canEditCustomerCredit: user.canEditCustomerCredit,

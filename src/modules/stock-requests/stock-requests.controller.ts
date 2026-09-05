@@ -30,7 +30,7 @@ import {
   CurrentUser,
   AuthenticatedUser,
 } from '../../common/decorators/current-user.decorator';
-import { Roles } from '../../common/decorators/roles.decorator';
+import { RequireAnyPermission } from '../../common/decorators/permissions.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { RepScopeService } from '../users/rep-scope.service';
 
@@ -57,7 +57,7 @@ export class StockRequestsController {
   }
 
   @Get()
-  @Roles('admin', 'manager')
+  @RequireAnyPermission('canApproveStockRequest')
   @ApiOperation({ summary: 'Stock request queue', description: 'Newest first, rep-scoped.' })
   @ApiOkResponse({ description: '{ items, total }' })
   async list(
@@ -99,7 +99,7 @@ export class StockRequestsController {
   }
 
   @Post(':id/approve')
-  @Roles('admin', 'manager')
+  @RequireAnyPermission('canApproveStockRequest')
   @ApiOperation({
     summary: 'Approve, in full or in part',
     description:
@@ -118,7 +118,7 @@ export class StockRequestsController {
   }
 
   @Post(':id/reject')
-  @Roles('admin', 'manager')
+  @RequireAnyPermission('canApproveStockRequest')
   @ApiOperation({ summary: 'Reject with a reason (shown verbatim to the salesman)' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ description: 'Rejected request' })
@@ -139,7 +139,7 @@ export class StockRequestsController {
   }
 
   @Post(':id/transfer')
-  @Roles('admin', 'manager')
+  @RequireAnyPermission('canApproveStockRequest')
   @ApiOperation({
     summary: 'Record the transfer the office raised for this request',
     description:
@@ -157,7 +157,7 @@ export class StockRequestsController {
   }
 
   @Delete(':id')
-  @Roles('admin', 'manager')
+  @RequireAnyPermission('canApproveStockRequest')
   @ApiOperation({
     summary: 'Hide a decided request',
     description:
