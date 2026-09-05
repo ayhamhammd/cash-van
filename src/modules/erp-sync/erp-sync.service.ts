@@ -3244,7 +3244,12 @@ export class ErpSyncService {
     item.price = Math.round((Number(base.sellingPrice) || 0) * 1000); // major → fils
     item.cost = Math.round((Number(base.unitCost) || 0) * 1000); // major → fils
     item.isActive = base.isActive ?? true;
-    item.imageUrl = this.absoluteImageUrl(base.imageUrl, erpOrigin);
+    // Only overwrite the stored image when this sweep yields a usable one. A sweep
+    // that returns no image, or a relative path we can't resolve (erpOrigin
+    // momentarily unavailable), must NOT blank an image the item already shows —
+    // an unconditional assign here made product images vanish on the next sync.
+    const resolvedImage = this.absoluteImageUrl(base.imageUrl, erpOrigin);
+    if (resolvedImage) item.imageUrl = resolvedImage;
 
     // Tobacco tax: the ERP /skus already resolves SKU→product inheritance. Map
     // the ERP profile id → our local profile id (synced just before items), and
