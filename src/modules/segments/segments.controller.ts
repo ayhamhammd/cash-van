@@ -31,6 +31,8 @@ import { UpdateSegmentDto } from './dto/update-segment.dto';
 import { ListSegmentsQuery } from './dto/list-segments.query';
 import { ListMembersQuery } from './dto/list-members.query';
 import { AddMembersDto } from './dto/add-members.dto';
+import { SegmentStatsQuery } from './dto/segment-stats.query';
+import { AssignRepDto } from './dto/assign-rep.dto';
 
 @ApiTags('segments')
 @ApiBearerAuth()
@@ -97,6 +99,67 @@ export class SegmentsController {
   @ApiOkResponse({ description: '{ matched, total }' })
   refresh(@Param('id', ParseUUIDPipe) id: string) {
     return this.segments.refresh(id);
+  }
+
+  @Get(':id/stats')
+  @Roles('admin', 'manager')
+  @ApiOperation({ summary: 'Segment sales performance (rep-scope filtered)' })
+  @ApiOkResponse({ description: 'Sales stats over [from, to]' })
+  async stats(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: SegmentStatsQuery,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.segments.stats(id, query, await this.repScope.visibleRepIds(user));
+  }
+
+  @Get(':id/reps')
+  @Roles('admin', 'manager')
+  @ApiOperation({ summary: 'Salesmen linked to a segment' })
+  @ApiOkResponse({ description: 'Linked reps' })
+  listReps(@Param('id', ParseUUIDPipe) id: string) {
+    return this.segments.listReps(id);
+  }
+
+  @Post(':id/reps')
+  @Roles('admin')
+  @ApiOperation({ summary: 'Link a salesman to a segment' })
+  @ApiCreatedResponse({ description: 'Linked reps' })
+  addRep(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AssignRepDto,
+    @CurrentUser('sub') userId: string,
+  ) {
+    return this.segments.addRep(id, dto.repId, userId);
+  }
+
+  @Delete(':id/reps/:repId')
+  @Roles('admin')
+  @ApiOperation({ summary: 'Unlink a salesman from a segment' })
+  @ApiOkResponse({ description: 'Linked reps' })
+  removeRep(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('repId', ParseUUIDPipe) repId: string,
+  ) {
+    return this.segments.removeRep(id, repId);
+  }
+
+  @Post(':id/assign-rep')
+  @Roles('admin')
+  @ApiOperation({
+    summary: 'Assign every member of a segment to one salesman (bulk reassign)',
+  })
+  @ApiOkResponse({ description: '{ assigned }' })
+  async assignRep(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AssignRepDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.segments.assignAllToRep(
+      id,
+      dto.repId,
+      await this.repScope.visibleRepIds(user),
+    );
   }
 
   @Get(':id/members')

@@ -3,7 +3,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { CustomerSegment } from './entities/customer-segment.entity';
 import { SegmentCustomer } from './entities/segment-customer.entity';
+import { SegmentRep } from './entities/segment-rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
+import { Rep } from '../reps/entities/rep.entity';
 import { UsersModule } from '../users/users.module';
 import { SegmentsService } from './segments.service';
 import { SegmentsController } from './segments.controller';
@@ -18,7 +20,13 @@ import { SegmentsController } from './segments.controller';
 @Module({
   imports: [
     UsersModule,
-    TypeOrmModule.forFeature([CustomerSegment, SegmentCustomer, Customer]),
+    TypeOrmModule.forFeature([
+      CustomerSegment,
+      SegmentCustomer,
+      SegmentRep,
+      Customer,
+      Rep,
+    ]),
   ],
   controllers: [SegmentsController],
   providers: [SegmentsService],

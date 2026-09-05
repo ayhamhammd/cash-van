@@ -1,13 +1,21 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 
 import { CustomerSegment } from './entities/customer-segment.entity';
 import { SegmentCustomer } from './entities/segment-customer.entity';
+import { SegmentRep } from './entities/segment-rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { CustomerAiProfile } from '../customers/entities/customer-ai-profile.entity';
+import { Rep } from '../reps/entities/rep.entity';
+import { SegmentStatsQuery } from './dto/segment-stats.query';
 import { CreateSegmentDto } from './dto/create-segment.dto';
 import { UpdateSegmentDto } from './dto/update-segment.dto';
 import { ListSegmentsQuery } from './dto/list-segments.query';
@@ -63,6 +71,29 @@ export interface CustomerSegmentTag {
   color: string | null;
 }
 
+export interface SegmentRepView {
+  repId: string;
+  code: string | null;
+  nameAr: string;
+  nameEn: string | null;
+  addedAt: Date;
+}
+
+export interface SegmentStats {
+  from: string;
+  to: string;
+  memberCount: number;
+  activeMembers: number;
+  dormantMembers: number;
+  salesNet: number;
+  returnsNet: number;
+  netOfReturns: number;
+  orderCount: number;
+  avgOrderValue: number;
+  topItems: Array<{ itemNumber: string; itemName: string; qty: number; amount: number }>;
+  byRep: Array<{ repId: string; nameAr: string; nameEn: string | null; salesNet: number; orders: number }>;
+}
+
 @Injectable()
 export class SegmentsService {
   private readonly logger = new Logger(SegmentsService.name);
@@ -76,6 +107,12 @@ export class SegmentsService {
     private readonly members: Repository<SegmentCustomer>,
     @InjectRepository(Customer)
     private readonly customers: Repository<Customer>,
+    @InjectRepository(SegmentRep)
+    private readonly segmentReps: Repository<SegmentRep>,
+    @InjectRepository(Rep)
+    private readonly reps: Repository<Rep>,
+    @InjectDataSource()
+    private readonly ds: DataSource,
     private readonly events: EventEmitter2,
   ) {}
 
@@ -288,6 +325,204 @@ export class SegmentsService {
       ])
       .orderBy('s.name_ar', 'ASC')
       .getRawMany<CustomerSegmentTag>();
+  }
+
+  // ── Reps + analytics (phase 4) ────────────────────────────────────────────
+
+  /** Salesmen linked to the segment (ownership metadata). */
+  async listReps(id: string): Promise<SegmentRepView[]> {
+    await this.findOneOrThrow(id);
+    return this.segmentReps
+      .createQueryBuilder('sr')
+      .innerJoin(Rep, 'r', 'r.id = sr.rep_id AND r.deleted_at IS NULL')
+      .where('sr.segment_id = :id', { id })
+      .select([
+        'sr.rep_id AS "repId"',
+        'r.code AS code',
+        'r.name_ar AS "nameAr"',
+        'r.name_en AS "nameEn"',
+        'sr.added_at AS "addedAt"',
+      ])
+      .orderBy('r.name_ar', 'ASC')
+      .getRawMany<SegmentRepView>();
+  }
+
+  async addRep(id: string, repId: string, userId?: string | null): Promise<SegmentRepView[]> {
+    await this.findOneOrThrow(id);
+    const rep = await this.reps.findOne({ where: { id: repId } });
+    if (!rep) throw new BadRequestException('Unknown salesman');
+    await this.segmentReps
+      .createQueryBuilder()
+      .insert()
+      .into(SegmentRep)
+      .values({ segmentId: id, repId, addedBy: userId ?? null })
+      .orIgnore()
+      .execute();
+    this.events.emit('segment.changed', { segmentId: id, reason: 'rep.linked' });
+    return this.listReps(id);
+  }
+
+  async removeRep(id: string, repId: string): Promise<SegmentRepView[]> {
+    await this.findOneOrThrow(id);
+    await this.segmentReps.delete({ segmentId: id, repId });
+    this.events.emit('segment.changed', { segmentId: id, reason: 'rep.unlinked' });
+    return this.listReps(id);
+  }
+
+  /**
+   * Assign every member of the segment to one salesman — a bulk customer.rep_id
+   * change. One set-based UPDATE (not a per-customer loop) and a SINGLE broadcast
+   * customer.changed, matching the Excel bulk-assign pattern: previous owners vary,
+   * so one broadcast covers every affected van. Scoped so a supervisor can only
+   * move their own members.
+   */
+  async assignAllToRep(
+    id: string,
+    repId: string,
+    visibleRepIds: string[] | null,
+  ): Promise<{ assigned: number }> {
+    await this.findOneOrThrow(id);
+    const rep = await this.reps.findOne({ where: { id: repId } });
+    if (!rep) throw new BadRequestException('Unknown salesman');
+    const scope = this.scopeParam(visibleRepIds);
+
+    const result = await this.customers
+      .createQueryBuilder()
+      .update(Customer)
+      // A raw UPDATE bypasses save(), so bump updated_at explicitly.
+      .set({ repId, updatedAt: () => 'now()' })
+      .where(
+        'id IN (SELECT customer_id FROM segment_customers WHERE segment_id = :id)',
+        { id },
+      )
+      .andWhere('deleted_at IS NULL')
+      .andWhere('rep_id IS DISTINCT FROM :repId', { repId })
+      .andWhere('(CAST(:scope AS uuid[]) IS NULL OR rep_id = ANY(:scope))', { scope })
+      .execute();
+
+    const assigned = result.affected ?? 0;
+    if (assigned > 0) {
+      // No repId in the payload → broadcast to all vans (previous owners differ).
+      this.events.emit('customer.changed', { reason: 'segment.bulk.reassign' });
+    }
+    return { assigned };
+  }
+
+  /**
+   * Sales performance of a segment's members over [from, to] (inclusive), joined
+   * segment_customers → customers → voucher_headers. Money is JOD-major (net_total),
+   * SALE/RETURN split, posted only, windowed on in_date. Scoped to the supervisor's
+   * own members (c.rep_id). Anonymous/empty scope → all zeros.
+   */
+  async stats(
+    id: string,
+    q: SegmentStatsQuery,
+    visibleRepIds: string[] | null,
+  ): Promise<SegmentStats> {
+    await this.findOneOrThrow(id);
+    const scope = this.scopeParam(visibleRepIds);
+    const p = [id, q.from, q.to, scope];
+
+    const [memberRow] = await this.ds.query(
+      `SELECT COUNT(*)::int AS n
+         FROM segment_customers m
+         JOIN customers c ON c.id = m.customer_id AND c.deleted_at IS NULL
+        WHERE m.segment_id = $1 AND ($2::uuid[] IS NULL OR c.rep_id = ANY($2))`,
+      [id, scope],
+    );
+
+    const [totals] = await this.ds.query(
+      `SELECT
+         COALESCE(SUM(h.net_total) FILTER (WHERE h.trans_kind='SALE'), 0)::float8   AS "salesNet",
+         COALESCE(SUM(h.net_total) FILTER (WHERE h.trans_kind='RETURN'), 0)::float8 AS "returnsNet",
+         COUNT(*) FILTER (WHERE h.trans_kind='SALE')::int                           AS "orderCount",
+         COUNT(DISTINCT c.customer_number) FILTER (WHERE h.trans_kind='SALE')::int  AS "activeMembers"
+       FROM segment_customers m
+       JOIN customers c ON c.id = m.customer_id AND c.deleted_at IS NULL
+       JOIN voucher_headers h ON h.customer_number = c.customer_number
+         AND h.is_posted = true AND h.deleted_at IS NULL
+         AND h.trans_kind IN ('SALE','RETURN')
+         AND h.in_date >= $2::date AND h.in_date < ($3::date + 1)
+       WHERE m.segment_id = $1 AND ($4::uuid[] IS NULL OR c.rep_id = ANY($4))`,
+      p,
+    );
+
+    const topItems = await this.ds.query(
+      `SELECT t.item_number AS "itemNumber", MAX(t.item_name) AS "itemName",
+              COALESCE(SUM(t.item_qty), 0)::float8   AS qty,
+              COALESCE(SUM(t.net_total), 0)::float8  AS amount
+         FROM segment_customers m
+         JOIN customers c ON c.id = m.customer_id AND c.deleted_at IS NULL
+         JOIN voucher_headers h ON h.customer_number = c.customer_number
+           AND h.is_posted = true AND h.deleted_at IS NULL
+           AND h.in_date >= $2::date AND h.in_date < ($3::date + 1)
+         JOIN voucher_transactions t ON t.voucher_number = h.voucher_number AND t.trans_kind = 'SALE'
+        WHERE m.segment_id = $1 AND ($4::uuid[] IS NULL OR c.rep_id = ANY($4))
+        GROUP BY t.item_number
+        ORDER BY amount DESC
+        LIMIT 10`,
+      p,
+    );
+
+    const byRep = await this.ds.query(
+      `SELECT r.id AS "repId", r.name_ar AS "nameAr", r.name_en AS "nameEn",
+              COALESCE(SUM(h.net_total) FILTER (WHERE h.trans_kind='SALE'), 0)::float8 AS "salesNet",
+              COUNT(*) FILTER (WHERE h.trans_kind='SALE')::int                          AS orders
+         FROM segment_customers m
+         JOIN customers c ON c.id = m.customer_id AND c.deleted_at IS NULL
+         JOIN voucher_headers h ON h.customer_number = c.customer_number
+           AND h.is_posted = true AND h.deleted_at IS NULL
+           AND h.trans_kind IN ('SALE','RETURN')
+           AND h.in_date >= $2::date AND h.in_date < ($3::date + 1)
+         JOIN users u ON u.user_number = h.user_code
+         JOIN reps r ON r.user_id = u.id AND r.deleted_at IS NULL
+        WHERE m.segment_id = $1 AND ($4::uuid[] IS NULL OR c.rep_id = ANY($4))
+        GROUP BY r.id, r.name_ar, r.name_en
+        ORDER BY "salesNet" DESC
+        LIMIT 20`,
+      p,
+    );
+
+    const memberCount = Number(memberRow?.n ?? 0);
+    const salesNet = Number(totals?.salesNet ?? 0);
+    const returnsNet = Number(totals?.returnsNet ?? 0);
+    const orderCount = Number(totals?.orderCount ?? 0);
+    const activeMembers = Number(totals?.activeMembers ?? 0);
+    return {
+      from: q.from,
+      to: q.to,
+      memberCount,
+      activeMembers,
+      dormantMembers: Math.max(0, memberCount - activeMembers),
+      salesNet,
+      returnsNet,
+      netOfReturns: salesNet - returnsNet,
+      orderCount,
+      avgOrderValue: orderCount ? salesNet / orderCount : 0,
+      topItems: topItems.map(
+        (r: { itemNumber: string; itemName: string; qty: string; amount: string }) => ({
+          itemNumber: r.itemNumber,
+          itemName: r.itemName,
+          qty: Number(r.qty),
+          amount: Number(r.amount),
+        }),
+      ),
+      byRep: byRep.map(
+        (r: { repId: string; nameAr: string; nameEn: string | null; salesNet: string; orders: string }) => ({
+          repId: r.repId,
+          nameAr: r.nameAr,
+          nameEn: r.nameEn,
+          salesNet: Number(r.salesNet),
+          orders: Number(r.orders),
+        }),
+      ),
+    };
+  }
+
+  /** Supervisor scope as an array param: null = unrestricted, [] = match nothing. */
+  private scopeParam(visibleRepIds: string[] | null): string[] | null {
+    if (visibleRepIds === null) return null;
+    return visibleRepIds.length ? visibleRepIds : [NO_MATCH_UUID];
   }
 
   // ── Dynamic membership (rules) ────────────────────────────────────────────
