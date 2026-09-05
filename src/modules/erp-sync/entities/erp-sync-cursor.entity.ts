@@ -35,4 +35,12 @@ export class ErpSyncCursor {
 
   @Column({ name: 'last_error', type: 'text', nullable: true })
   lastError?: string | null;
+
+  /**
+   * Where a bounded run stopped, for the next one to continue from. NULL means
+   * "start at the beginning" — either nothing has run yet, or the last run
+   * reached the end.
+   */
+  @Column({ name: 'resume_key', type: 'text', nullable: true })
+  resumeKey?: string | null;
 }

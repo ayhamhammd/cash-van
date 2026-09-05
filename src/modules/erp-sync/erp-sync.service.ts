@@ -262,6 +262,14 @@ interface ErpPriceList {
  * and comparing it back as a string never matches, so every re-sync would see a
  * changed row and rewrite the whole list on every sweep.
  */
+/**
+ * How long one customer_price run may take before it stops and records where it
+ * got to. Five minutes keeps the nightly heavy pull answerable and, more to the
+ * point, keeps the manual "sync" button on the dashboard from appearing to hang
+ * for ever.
+ */
+const CUSTOMER_PRICE_BUDGET_MS = 5 * 60 * 1000;
+
 function toDateOnly(v: string | null | undefined): string | null {
   if (!v) return null;
   const s = String(v);
@@ -1812,9 +1820,42 @@ export class ErpSyncService {
    * Assumes `pullCustomers()` ran first.
    */
   private async pullCustomerPrices(): Promise<number> {
-    const custs = await this.customers.find({ where: { isActive: true } });
+    // BOUNDED AND RESUMABLE.
+    //
+    // This asks the ERP to resolve every SKU for one customer, paginated — so it
+    // is one HTTP round trip per page PER CUSTOMER. At a few thousand customers
+    // that is tens of thousands of calls and the run never reached the end: it
+    // never wrote a cursor, so the next run started again at the first customer
+    // and no later customer was ever synced. On the dashboard it sat at
+    // "running" with a count of 0 for as long as anyone cared to watch.
+    //
+    // So each run takes a slice: it starts after the customer the last run
+    // stopped at, works until the budget is spent, and records where it got to.
+    // Progress is made every run and the entity always finishes. Reaching the
+    // end clears the mark, and the next run starts from the top again.
+    const all = await this.customers.find({
+      where: { isActive: true },
+      order: { customerNumber: 'ASC' },
+    });
+    const cursor = await this.cursors.findOne({ where: { entity: 'customer_price' } });
+    const resumeAfter = cursor?.resumeKey ?? null;
+    const startAt = resumeAfter
+      ? all.findIndex((c) => c.customerNumber > resumeAfter)
+      : 0;
+    // A resume mark for a customer that has since been deleted, or one that now
+    // sorts last, leaves nothing after it — begin again rather than do nothing.
+    const custs = startAt < 0 ? all : all.slice(startAt);
+
+    const deadline = Date.now() + CUSTOMER_PRICE_BUDGET_MS;
+    let lastDone: string | null = null;
+    let ranOut = false;
+
     let processed = 0;
     for (const cust of custs) {
+      if (Date.now() > deadline) {
+        ranOut = true;
+        break;
+      }
       // Identify the customer to the ERP. Customers created in the ERP UI have a
       // NULL code — FlowVan shows them as `ERP-<id>` — so CODE alone can't reach
       // them. The id-map always holds the ERP customer id (`erpId`); prefer that
@@ -1838,6 +1879,25 @@ export class ErpSyncService {
           `customer-price pull skipped ${cust.customerNumber}: ${e instanceof Error ? e.message : e}`,
         );
       }
+      // Written even when that customer failed: a customer the ERP will never
+      // answer for must not be retried first on every run, blocking everyone
+      // behind them for ever.
+      lastDone = cust.customerNumber;
+    }
+
+    // Out of budget → remember the place. Finished the list → clear it, so the
+    // next run starts from the top and picks up anything that changed.
+    const c = cursor ?? this.cursors.create({ entity: 'customer_price' });
+    c.resumeKey = ranOut ? lastDone : null;
+    await this.cursors.save(c);
+    if (ranOut) {
+      const done = lastDone
+        ? all.findIndex((x) => x.customerNumber === lastDone) + 1
+        : all.length - custs.length;
+      this.logger.log(
+        `customer prices: budget spent after ${done}/${all.length} customers; ` +
+          `resuming after ${lastDone ?? 'the same point'} next run`,
+      );
     }
     return processed;
   }
@@ -1864,10 +1924,19 @@ export class ErpSyncService {
       page += 1;
       if (page > 100) break; // safety cap
     }
-    // Keep only real overrides (skip the plain SKU default).
-    const overrides = rows.filter(
-      (r) => r.skuCode && (r.priceSource ?? '').toUpperCase() !== 'DEFAULT_PRICE',
-    );
+    // Keep only the customer's OWN contract prices.
+    //
+    // PRICE_LIST rows used to be cached here too, and that quietly defeated the
+    // price list itself: /prices resolves at qty 1, PricingService consults
+    // customer_prices BEFORE the list, so the qty-1 price was returned for every
+    // quantity and the list's own bands never got a look in. The list is
+    // mirrored locally with its bands now, so it answers for itself; this table
+    // is for what the list cannot express — a price agreed with one customer.
+    const overrides = rows.filter((r) => {
+      if (!r.skuCode) return false;
+      const src = (r.priceSource ?? '').toUpperCase();
+      return src === 'CUSTOMER_PRICE';
+    });
     const keptSkus = new Set<string>();
     for (const r of overrides) {
       const sku = r.skuCode;
@@ -1903,6 +1972,8 @@ export class ErpSyncService {
       processed += 1;
     }
     // Prune ERP-owned overrides that no longer apply; keep local (dashboard) ones.
+    // This also clears the PRICE_LIST rows earlier versions cached here, which
+    // were shadowing the price list's own quantity bands.
     const existing = await this.customerPrices.find({ where: { customerId: cust.id } });
     for (const e of existing) {
       if (e.origin === 'local') continue;
