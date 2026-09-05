@@ -1,8 +1,45 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "frontend", "runtimeExecutable": "npm", "runtimeArgs": ["--prefix", "../cash-van-dashboard-frontend", "run", "dev", "--", "-p", "3001"], "port": 3001 },
-    { "name": "backend", "runtimeExecutable": "npm", "runtimeArgs": ["run", "start:dev"], "port": 3100 },
-    { "name": "erp", "runtimeExecutable": "npm", "runtimeArgs": ["--prefix", "../ERP", "run", "dev"], "port": 3000 }
+    {
+      "name": "frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "../cash-van-dashboard-frontend",
+        "run",
+        "dev",
+        "--",
+        "-p",
+        "3002"
+      ],
+      "port": 3002,
+      "autoPort": false
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "start:dev"
+      ],
+      "port": 3100,
+      "autoPort": false
+    },
+    {
+      "name": "erp",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "../ERP",
+        "run",
+        "dev",
+        "--",
+        "-p",
+        "3005"
+      ],
+      "port": 3005,
+      "autoPort": false
+    }
   ]
 }

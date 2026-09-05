@@ -30,11 +30,20 @@ WEB_IMAGE="vanflow-dashboard:prod"
 OUT="dist-windows"
 
 # NEXT_PUBLIC_* are inlined into the browser bundle at BUILD time — changing them
-# needs a rebuild, not a restart. These default to the layout the compose file
-# below exposes: dashboard on host :3001, API on host :3002.
-API_ORIGIN="${API_ORIGIN:-http://77.245.5.113:3002}"
-NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL:-${API_ORIGIN}/api/v1}"
-NEXT_PUBLIC_WS_URL="${NEXT_PUBLIC_WS_URL:-${API_ORIGIN}}"
+# needs a rebuild, not a restart.
+#
+# DEFAULT IS RELATIVE (host-agnostic): the dashboard calls "/api/v1" and opens its
+# websocket on the same origin it was served from, so ONE image works on every
+# client behind a reverse proxy that fronts the dashboard and API as one origin —
+# no per-client rebuild and no mixed content over HTTPS.
+#
+# Override ONLY for a device reached directly on ip:port with no proxy:
+#   NEXT_PUBLIC_API_BASE_URL=http://<ip>:3002/api/v1 NEXT_PUBLIC_WS_URL=http://<ip>:3002 ./scripts/build-windows-bundle.sh
+#
+# ":-" would treat an explicit empty value as unset and fall back to the default;
+# WS uses "-" so an explicit empty WS (same-origin) is honoured.
+NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL:-/api/v1}"
+NEXT_PUBLIC_WS_URL="${NEXT_PUBLIC_WS_URL-}"
 NEXT_PUBLIC_AI_ENABLED="${NEXT_PUBLIC_AI_ENABLED:-false}"
 NEXT_PUBLIC_DEFAULT_LOCALE="${NEXT_PUBLIC_DEFAULT_LOCALE:-ar}"
 # Defaults to the placeholder token (matching the Dockerfile's own ARG default) so
