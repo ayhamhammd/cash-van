@@ -310,7 +310,12 @@ export class CustomersService {
    * can never move an established one; if an admin later clears the pin (PATCH),
    * seeding re-opens. Returns the customer (updated when it took effect).
    */
-  async seedLocation(id: string, lat: number, lng: number): Promise<Customer> {
+  async seedLocation(
+    id: string,
+    lat: number,
+    lng: number,
+    overwrite = false,
+  ): Promise<Customer> {
     if (
       !Number.isFinite(lat) ||
       lat < -90 ||
@@ -321,8 +326,10 @@ export class CustomersService {
     ) {
       throw new BadRequestException('Invalid coordinates');
     }
+    // Seed-once by default (only fills an empty pin). `overwrite` MOVES an
+    // existing pin — the rep's "update customer location" button.
     const res = await this.customers.update(
-      { id, latitude: IsNull() },
+      overwrite ? { id } : { id, latitude: IsNull() },
       { latitude: lat.toFixed(6), longitude: lng.toFixed(6) },
     );
     const customer = await this.findOneOrThrow(id);

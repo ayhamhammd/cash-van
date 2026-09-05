@@ -210,11 +210,12 @@ export class CustomersController {
 
   @Post(':id/location')
   @ApiOperation({
-    summary: 'Seed customer location',
+    summary: 'Set customer location',
     description:
-      "Set a customer's GPS location if it has none yet (seed-once — only fills " +
-      'an empty pin, never moves an existing one). Used by location-locked reps ' +
-      'to bootstrap a store that has no coordinates. Admins edit/remove via PATCH.',
+      "Set a customer's GPS location. Default is seed-once (only fills an empty " +
+      'pin, never moves an existing one) — used by location-locked reps to bootstrap ' +
+      'a store with no coordinates. With `overwrite: true` it MOVES the pin to the ' +
+      'given coordinates (the rep\'s "update customer location" button).',
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
   @ApiCreatedResponse({ description: 'The customer (with location if it took effect)' })
@@ -222,7 +223,7 @@ export class CustomersController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SeedLocationDto,
   ) {
-    return this.customers.seedLocation(id, dto.lat, dto.lng);
+    return this.customers.seedLocation(id, dto.lat, dto.lng, dto.overwrite ?? false);
   }
 
   @Post(':id/reassign')
