@@ -9,7 +9,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
@@ -255,11 +255,32 @@ interface ErpPriceList {
 }
 
 /** `GET /api/v1/price-lists/{id}` → the list + its items. */
+/**
+ * ISO timestamp or date → the 'YYYY-MM-DD' a `date` column round-trips.
+ *
+ * The ERP serialises these as full timestamps. Storing one in a `date` column
+ * and comparing it back as a string never matches, so every re-sync would see a
+ * changed row and rewrite the whole list on every sweep.
+ */
+function toDateOnly(v: string | null | undefined): string | null {
+  if (!v) return null;
+  const s = String(v);
+  return s.length >= 10 ? s.slice(0, 10) : null;
+}
+
 interface ErpPriceListDetail extends ErpPriceList {
   items?: Array<{
+    /** The ERP's price_list_items.id — the identity a mirrored tier keeps. */
+    id?: string | null;
     skuCode: string;
     price: number | string; // ERP major units
+    /** Quantity band. The ERP prices per band; a list may hold several per SKU. */
     minQty?: number | null;
+    maxQty?: number | null;
+    /** Validity window, ISO dates. Null on either side means open-ended. */
+    startDate?: string | null;
+    endDate?: string | null;
+    isActive?: boolean | null;
   }>;
 }
 
@@ -1484,6 +1505,17 @@ export class ErpSyncService {
         `AR balance mirror skipped: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    // Point customers at their ERP price list here as well as in pullPriceLists.
+    // This is the pull that LEARNS a new assignment, and doing it only in the
+    // other entity made "my customer has a price list in the ERP" depend on the
+    // price-list pull succeeding — a different entity, with its own failures.
+    try {
+      await this.mirrorCustomerPriceListAssignments();
+    } catch (err) {
+      this.logger.warn(
+        `price-list assignment mirror skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     // An ERP pull can touch any rep's customers, and the batch does not track
     // which. Signal with no repId so every van re-pulls, rather than guessing
     // and leaving one holding stale credit limits or prices.
@@ -1590,9 +1622,30 @@ export class ErpSyncService {
         continue;
       }
 
-      // 2) Pull its items → map skuCode→item, keep the lowest (base) tier price.
-      const detail = await this.erp.getOne<ErpPriceListDetail>(`price-lists/${l.id}`);
-      const byItem = new Map<string, number>();
+      // 2) Pull its items → one local row per ERP TIER, not one per item.
+      //
+      // This used to collapse every tier of an item down to the cheapest one.
+      // The ERP prices per quantity band and per date window and picks the
+      // highest matching minQty, so a list reading "1-9 → 1.000, 10+ → 0.900"
+      // was charging 0.900 for a single unit here. Bands are mirrored verbatim
+      // and PricingService applies the ERP's own selection rule.
+      // One unreadable list must not cost the other twelve, NOR the customer
+      // assignments at the end of this method. An unguarded throw here aborted
+      // the whole pull, and the assignment step never ran — which is how a list
+      // attached to a customer in the ERP failed to show up on that customer
+      // here at all, not merely with stale prices.
+      let detail: ErpPriceListDetail | null = null;
+      try {
+        detail = await this.erp.getOne<ErpPriceListDetail>(`price-lists/${l.id}`);
+      } catch (err) {
+        skipped += 1;
+        this.logger.warn(
+          `Skipped items of ERP price list ${l.code ?? l.id}: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+        continue;
+      }
+      const keptErpItemIds = new Set<string>();
       for (const it of detail?.items ?? []) {
         if (!it.skuCode) continue;
         const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: it.skuCode } });
@@ -1601,30 +1654,63 @@ export class ErpSyncService {
           : null;
         if (!item) continue;
         const unitPrice = Math.round((Number(it.price) || 0) * 1000);
-        const prev = byItem.get(item.id);
-        if (prev === undefined || unitPrice < prev) byItem.set(item.id, unitPrice);
-      }
-      const keptItemIds = new Set<string>();
-      for (const [itemId, unitPrice] of byItem) {
-        keptItemIds.add(itemId);
-        let row = await this.priceListItems.findOne({
-          where: { priceListId: local.id, itemId },
-        });
-        // Write only a price that actually moved. A list is re-read on every
+        const minQty = Number(it.minQty) > 0 ? Math.trunc(Number(it.minQty)) : 1;
+        const maxQty = it.maxQty == null ? null : Math.trunc(Number(it.maxQty));
+        const startDate = toDateOnly(it.startDate);
+        const endDate = toDateOnly(it.endDate);
+        const isActive = it.isActive ?? true;
+
+        // An ERP tier is identified by the ERP's own row id, so re-pricing or
+        // re-banding it updates that tier instead of creating a second one.
+        // A list served before this change has rows with no erpItemId; adopt the
+        // one for this item so the upgrade does not duplicate every price.
+        let row = it.id
+          ? await this.priceListItems.findOne({ where: { erpItemId: it.id } })
+          : null;
+        if (!row) {
+          row = await this.priceListItems.findOne({
+            where: { priceListId: local.id, itemId: item.id, erpItemId: IsNull() },
+          });
+        }
+        if (it.id) keptErpItemIds.add(it.id);
+
+        const unchanged =
+          row &&
+          Number(row.unitPrice) === unitPrice &&
+          Number(row.minQty) === minQty &&
+          (row.maxQty ?? null) === maxQty &&
+          (row.startDate ?? null) === startDate &&
+          (row.endDate ?? null) === endDate &&
+          row.isActive === isActive &&
+          (row.erpItemId ?? null) === (it.id ?? null);
+        // Write only a tier that actually moved. A list is re-read on every
         // sweep, so an unconditional save rewrote every row every five minutes
         // and made "did a price change?" unanswerable.
-        if (row && Number(row.unitPrice) === unitPrice) {
+        if (unchanged) {
           processed += 1;
           continue;
         }
-        if (!row) row = this.priceListItems.create({ priceListId: local.id, itemId });
+        if (!row) row = this.priceListItems.create({ priceListId: local.id, itemId: item.id });
+        row.priceListId = local.id;
+        row.itemId = item.id;
+        row.erpItemId = it.id ?? null;
         row.unitPrice = unitPrice;
+        row.minQty = minQty;
+        row.maxQty = maxQty;
+        row.startDate = startDate;
+        row.endDate = endDate;
+        row.isActive = isActive;
         await this.priceListItems.save(row);
         priceChanges += 1;
         processed += 1;
       }
+      // Prune tiers the ERP no longer serves. Only rows that carry an ERP id are
+      // considered: a row with none is either dashboard-authored or was just
+      // adopted above, and deleting those would drop a local price the ERP has
+      // no way to give back.
       for (const e of await this.priceListItems.find({ where: { priceListId: local.id } })) {
-        if (!keptItemIds.has(e.itemId)) {
+        if (!e.erpItemId) continue;
+        if (!keptErpItemIds.has(e.erpItemId)) {
           await this.priceListItems.delete(e.id);
           // A price the rep can no longer be given is as much a change as a new one.
           priceChanges += 1;
@@ -1641,27 +1727,69 @@ export class ErpSyncService {
       }
     }
 
-    // 4) Map each customer's ERP assignment → the local mirror. Never override a
-    //    dashboard-set assignment to a LOCAL list.
-    for (const c of await this.customers.find({ where: { isActive: true } })) {
-      if (!c.erpPriceListId) continue;
-      const local = await this.priceLists.findOne({ where: { erpId: c.erpPriceListId } });
-      if (!local) continue;
-      if (c.priceListId) {
-        const current = await this.priceLists.findOne({ where: { id: c.priceListId } });
-        if (current && current.origin === 'local') continue; // keep manual/local assignment
-      }
-      if (c.priceListId !== local.id) {
-        c.priceListId = local.id;
-        await this.customers.save(c);
-      }
-    }
+    // 4) Mirror each customer's ERP assignment onto the local list.
+    await this.mirrorCustomerPriceListAssignments();
     // Same rule as the item pull: signal only on a real price movement.
     if (priceChanges > 0) {
       this.logger.log(`price lists: ${priceChanges} price(s) changed — signalling vans`);
       this.events.emit('items.changed', { reason: 'erp.price-lists.pulled' });
     }
     return { count: processed, skipped };
+  }
+
+  /**
+   * Point each customer at the local mirror of the price list the ERP gave them.
+   *
+   * Assign the list to a customer in the ERP and it appears, already selected,
+   * on that customer in the dashboard — that is the whole contract here.
+   *
+   * CLEARING IS MIRRORED TOO. This used to `continue` on a customer with no ERP
+   * list, so taking the list off a customer in the ERP left the old one attached
+   * here for ever, and the van went on quoting a price list the ERP had already
+   * withdrawn. "The same as the ERP" has to include the empty case.
+   *
+   * A dashboard-authored (origin 'local') assignment still wins: the ERP has no
+   * API to receive one back, so overwriting it would silently destroy work that
+   * cannot be recovered from upstream.
+   *
+   * Inactive customers are included. They were skipped, which meant reactivating
+   * a customer surfaced whatever list they carried before rather than the one
+   * the ERP holds now.
+   */
+  private async mirrorCustomerPriceListAssignments(): Promise<number> {
+    // Every list once, rather than two findOne per customer. This walks the whole
+    // customer table on each sweep, and at six thousand customers the per-row
+    // lookups were the expensive part.
+    const lists = await this.priceLists.find();
+    const byId = new Map(lists.map((l) => [l.id, l]));
+    const byErpId = new Map(
+      lists.filter((l) => l.erpId).map((l) => [l.erpId as string, l]),
+    );
+
+    let changed = 0;
+    for (const c of await this.customers.find()) {
+      // A local assignment is the merchant's own and outranks the ERP.
+      if (c.priceListId && byId.get(c.priceListId)?.origin === 'local') continue;
+
+      let target: string | null = null;
+      if (c.erpPriceListId) {
+        const local = byErpId.get(c.erpPriceListId);
+        // The list is named but not mirrored yet (a list the item pull skipped,
+        // say). Leave what is there rather than clearing on a half-synced view.
+        if (!local) continue;
+        target = local.id;
+      }
+
+      if ((c.priceListId ?? null) !== target) {
+        c.priceListId = target;
+        await this.customers.save(c);
+        changed += 1;
+      }
+    }
+    if (changed > 0) {
+      this.logger.log(`price lists: ${changed} customer assignment(s) updated`);
+    }
+    return changed;
   }
 
   /**
