@@ -325,37 +325,51 @@ export class MobileService {
     const main = await this.resolveMainStore();
     if (!main) return [];
 
-    const live = await this.erpSync.liveErpStock({
-      itemNumbers: itemNumber ? [itemNumber] : [],
-      stockNumber: main.number,
-    });
-    if (live.source === 'erp') {
-      return live.rows
-        .filter((r) => r.stockNumber === main.number)
-        .map((r) => ({
-          companyNumber,
-          salesmanCode,
-          itemNumber: r.itemNumber,
-          stockUnitCode: r.stockUnitCode ?? '',
-          itemQty: String(Math.trunc(r.quantity)),
-          storeNumber: main.number,
-        }));
+    // Live ERP on-hand for the main store — the book of record for quantities, but
+    // its broad snapshot silently DROPS any SKU it can't map back to a cash-van
+    // item (resolveStockTarget → continue). That is how main-store items went
+    // missing from the ORDER picker. So it is used for quantities, not membership.
+    const live = await this.erpSync
+      .liveErpStock({
+        itemNumbers: itemNumber ? [itemNumber] : [],
+        stockNumber: main.number,
+      })
+      .catch(() => null);
+    const liveQty = new Map<string, number>();
+    if (live?.source === 'erp') {
+      for (const r of live.rows) {
+        if (r.stockNumber !== main.number) continue;
+        liveQty.set(`${r.itemNumber}|${r.stockUnitCode ?? ''}`, r.quantity);
+      }
     }
 
-    // ERP unavailable → fall back to the local ledger for the main store.
+    // The local ledger is the COMPLETE list of items the main store carries — it
+    // never drops an item the live snapshot couldn't map. Base the picker on it so
+    // EVERY main-store item shows, and overlay the live quantity where we have it
+    // (live wins on quantity, and also contributes any pool not yet booked locally).
     const qb = this.balances
       .createQueryBuilder('b')
       .where('b.stock_number = :s', { s: main.number });
     if (itemNumber) qb.andWhere('b.item_number = :itemNumber', { itemNumber });
-    const rows = await qb.orderBy('b.item_number', 'ASC').getMany();
-    return rows.map((r) => ({
-      companyNumber,
-      salesmanCode,
-      itemNumber: r.itemNumber,
-      stockUnitCode: r.stockUnitCode ?? '',
-      itemQty: String(Math.trunc(Number(r.qty))),
-      storeNumber: main.number,
-    }));
+    const ledger = await qb.orderBy('b.item_number', 'ASC').getMany();
+
+    const out = new Map<string, ItemBalanceRowDto>();
+    const put = (item: string, pool: string, qty: number) => {
+      out.set(`${item}|${pool}`, {
+        companyNumber,
+        salesmanCode,
+        itemNumber: item,
+        stockUnitCode: pool,
+        itemQty: String(Math.trunc(qty)),
+        storeNumber: main.number,
+      });
+    };
+    for (const r of ledger) put(r.itemNumber, r.stockUnitCode ?? '', Number(r.qty) || 0);
+    for (const [key, qty] of liveQty) {
+      const sep = key.indexOf('|');
+      put(key.slice(0, sep), key.slice(sep + 1), qty);
+    }
+    return [...out.values()];
   }
 }
 
