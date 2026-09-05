@@ -498,10 +498,21 @@ export class CustomersService {
          LEFT JOIN warehouses w ON w.id = r.van_id
         WHERE r.deleted_at IS NULL`,
     );
+    // Index the raw code/number/van AND a leading-zero-stripped form of numeric
+    // ids, because ERP exports often zero-pad ("00008") while the rep is stored as
+    // "8" (and vice-versa). First writer wins, so an exact id is never shadowed by
+    // another rep's normalized form.
     const repByKey = new Map<string, string>();
+    const putRep = (key: string, repId: string) => {
+      if (key && !repByKey.has(key)) repByKey.set(key, repId);
+    };
     for (const r of repRows) {
       for (const key of [r.code, r.userNumber, r.vanNumber]) {
-        if (key != null && String(key).trim() !== '') repByKey.set(String(key).trim(), r.repId);
+        if (key == null) continue;
+        const k = String(key).trim();
+        if (!k) continue;
+        putRep(k, r.repId);
+        putRep(normSalesman(k), r.repId);
       }
     }
 
@@ -552,7 +563,7 @@ export class CustomersService {
         result.ambiguousCustomers.push(cust);
         continue;
       }
-      const repId = repByKey.get(sales);
+      const repId = repByKey.get(sales) ?? repByKey.get(normSalesman(sales));
       if (!repId) {
         result.unmatchedSalesmen.push(sales);
         continue;
@@ -891,12 +902,32 @@ function cellText(v: unknown): string {
 }
 
 /**
- * Normalize a customer name for matching: collapse internal whitespace, trim, and
- * lowercase. Conservative on purpose — it forgives stray or duplicated spaces and
- * Latin-letter casing without risking false merges between genuinely different
- * names (no diacritic/alef folding).
+ * Normalize a customer name for matching: collapse whitespace, trim, lowercase
+ * (for Latin), then fold the common Arabic spelling variants — alef forms
+ * (أ إ آ ٱ → ا), alef-maqsura (ى → ي), taa-marbuta (ة → ه), tatweel, and the
+ * harakat diacritics — so "الخمايسة" and "الخمايسه" match. Folding can only ever
+ * merge two names; if that merges two DIFFERENT real customers the caller reports
+ * it as ambiguous and assigns neither, so it never mis-assigns.
  */
 function normalizeName(v: string | null | undefined): string {
   if (v == null) return '';
-  return String(v).replace(/\s+/g, ' ').trim().toLowerCase();
+  return String(v)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/[أإآٱ]/g, 'ا') // أ إ آ ٱ → ا
+    .replace(/ى/g, 'ي') // ى → ي
+    .replace(/ة/g, 'ه') // ة → ه
+    .replace(/ـ/g, '') // ـ tatweel
+    .replace(/[ً-ْ]/g, ''); // harakat / diacritics
+}
+
+/**
+ * Normalize a salesman id for matching: an all-digit id has its leading zeros
+ * stripped ("00008" → "8"), so a zero-padded ERP export matches a rep stored as
+ * "8". Non-numeric ids (rep codes) are returned trimmed, unchanged.
+ */
+function normSalesman(v: string): string {
+  const t = v.trim();
+  return /^\d+$/.test(t) ? t.replace(/^0+(?=\d)/, '') : t;
 }

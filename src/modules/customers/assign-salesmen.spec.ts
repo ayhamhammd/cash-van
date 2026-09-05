@@ -142,4 +142,31 @@ describe('CustomersService.assignSalesmenFromXlsx (match customer by NAME)', () 
     expect(updates).toEqual([]);
     expect(events.emit).not.toHaveBeenCalled();
   });
+
+  it('matches a zero-padded salesman number against a rep stored without zeros', async () => {
+    const { svc, updates } = makeSvc({
+      customers: [{ id: 'c1', customerName: 'Alpha', repId: null }],
+      reps: [{ repId: 'rep-8', userNumber: '8' }], // rep stored as "8"
+    });
+    const buf = await xlsx([['Alpha', '00008']]); // ERP export zero-pads
+
+    const r = await svc.assignSalesmenFromXlsx(buf);
+
+    expect(r.assigned).toBe(1);
+    expect(r.unmatchedSalesmen).toEqual([]);
+    expect(updates).toEqual([{ crit: { id: 'c1' }, patch: { repId: 'rep-8' } }]);
+  });
+
+  it('folds Arabic spelling variants (alef + ة/ه) when matching the name', async () => {
+    const { svc } = makeSvc({
+      customers: [{ id: 'c1', nameAr: 'ابراهيم الخمايسه', repId: null }], // stored with bare alef + ه
+      reps: [{ repId: 'rep-3', userNumber: '3' }],
+    });
+    const buf = await xlsx([['إبراهيم الخمايسة', '00003']]); // file: hamza alef + ة
+
+    const r = await svc.assignSalesmenFromXlsx(buf);
+
+    expect(r.assigned).toBe(1);
+    expect(r.unmatchedCustomers).toEqual([]);
+  });
 });
