@@ -262,6 +262,13 @@ interface ErpPriceList {
  * and comparing it back as a string never matches, so every re-sync would see a
  * changed row and rewrite the whole list on every sweep.
  */
+/** Split a list into fixed-size chunks, so an IN (...) never grows unbounded. */
+function chunked<T>(xs: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));
+  return out;
+}
+
 /** One row of the ERP's `GET /api/v1/customer-prices` — a raw contract price. */
 interface ErpCustomerPrice {
   id?: string | null;
@@ -2950,6 +2957,150 @@ export class ErpSyncService {
     user.name = erpName;
     user.nameAr = erpName;
     await users.save(user);
+  }
+
+  /**
+   * Reconcile the local customer list against the ERP's.
+   *
+   * WHY THIS IS NOT THE SYNC'S JOB
+   * `pruneVanished` cannot do it, for two reasons that are both deliberate.
+   * It only ever considers customers that are IN THE ID MAP, so a customer that
+   * never came from the ERP is invisible to it; and it refuses outright when half
+   * or more of the mapped set would go, because a broken page returning 5 rows of
+   * 500 looks exactly like 495 deletions. Both guards are right for something
+   * that runs unattended every five minutes. Neither can be relaxed to let a
+   * genuine bulk cleanup through, which is why that cleanup is asked for by hand,
+   * here, and reports before it touches anything.
+   *
+   * REPORT BY DEFAULT. `apply` has to be passed explicitly, and even then a
+   * customer carrying vouchers or collections is left alone unless
+   * `includeWithHistory` is also set — an archived customer keeps their documents
+   * readable, but a salesman looking for a shop that has bought from them and
+   * finding nothing is a support call, not a tidy database.
+   */
+  async reconcileCustomers(opts: {
+    apply?: boolean;
+    includeWithHistory?: boolean;
+  } = {}): Promise<{
+    erpCustomers: number;
+    localCustomers: number;
+    matched: number;
+    onlyInErp: number;
+    onlyLocally: number;
+    onlyLocallyWithHistory: number;
+    archived: number;
+    applied: boolean;
+    sampleOnlyLocally: string[];
+    sampleOnlyInErp: string[];
+  }> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) {
+      throw new Error('ERP mode is off, so there is nothing to reconcile against');
+    }
+
+    // The ERP's whole customer list. Ordering upstream is stable now, so an
+    // OFFSET walk no longer skips rows — which is what made this list wrong
+    // before and is exactly what must not be wrong when deleting from it.
+    const erp: ErpCustomer[] = [];
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+    while (erp.length < total) {
+      const { data, total: t } = await this.erp.list<ErpCustomer>('customers', {
+        page,
+        pageSize: 200,
+      });
+      total = t;
+      if (data.length === 0) break;
+      erp.push(...data);
+      page += 1;
+      if (page > 500) break;
+    }
+    if (erp.length === 0) {
+      throw new Error('The ERP returned no customers at all; refusing to reconcile against an empty list');
+    }
+
+    const erpIds = new Set(erp.map((c) => String(c.id)));
+    const erpCodes = new Set(erp.filter((c) => c.code).map((c) => String(c.code)));
+
+    const locals = await this.customers.find();
+    const maps = await this.idmap.find({ where: { entity: 'customer' } });
+    const erpIdByLocal = new Map(maps.map((m) => [m.localId, m.erpId]));
+
+    const onlyLocally: typeof locals = [];
+    let matched = 0;
+    for (const c of locals) {
+      const mappedErpId = erpIdByLocal.get(c.customerNumber);
+      // Matched on the ERP id when we have one, else on the customer number,
+      // which IS the ERP code for anything that came from there.
+      const isInErp = mappedErpId
+        ? erpIds.has(mappedErpId)
+        : erpCodes.has(c.customerNumber);
+      if (isInErp) matched += 1;
+      else onlyLocally.push(c);
+    }
+
+    // Which of the strangers have traded? Two queries, not two per customer.
+    const withHistory = new Set<string>();
+    if (onlyLocally.length) {
+      const numbers = onlyLocally.map((c) => c.customerNumber);
+      const ids = onlyLocally.map((c) => c.id);
+      for (const chunk of chunked(numbers, 500)) {
+        const rows = await this.headers.find({
+          where: { customerNumber: In(chunk) },
+          select: { customerNumber: true },
+        });
+        for (const r of rows) if (r.customerNumber) withHistory.add(r.customerNumber);
+      }
+      for (const chunk of chunked(ids, 500)) {
+        const rows = await this.collections.find({
+          where: { customerId: In(chunk) },
+          select: { customerId: true },
+        });
+        const byId = new Map(onlyLocally.map((c) => [c.id, c.customerNumber]));
+        for (const r of rows) {
+          const num = byId.get(r.customerId);
+          if (num) withHistory.add(num);
+        }
+      }
+    }
+    const onlyLocallyWithHistory = onlyLocally.filter((c) =>
+      withHistory.has(c.customerNumber),
+    ).length;
+
+    let archived = 0;
+    if (opts.apply) {
+      for (const c of onlyLocally) {
+        if (!opts.includeWithHistory && withHistory.has(c.customerNumber)) continue;
+        await this.customers.softDelete({ id: c.id });
+        archived += 1;
+      }
+      this.logger.warn(
+        `reconcile customers: archived ${archived} local customer(s) the ERP does not have`,
+      );
+    }
+
+    const localCodes = new Set(locals.map((c) => c.customerNumber));
+    const onlyInErp = erp.filter(
+      (c) => !(c.code && localCodes.has(String(c.code))) &&
+             ![...erpIdByLocal.values()].includes(String(c.id)),
+    );
+
+    return {
+      erpCustomers: erp.length,
+      localCustomers: locals.length,
+      matched,
+      onlyInErp: onlyInErp.length,
+      onlyLocally: onlyLocally.length,
+      onlyLocallyWithHistory,
+      archived,
+      applied: Boolean(opts.apply),
+      sampleOnlyLocally: onlyLocally.slice(0, 20).map(
+        (c) => `${c.customerNumber} · ${c.customerName ?? ''}`.trim(),
+      ),
+      sampleOnlyInErp: onlyInErp.slice(0, 20).map(
+        (c) => `${c.code ?? c.id} · ${c.name ?? ''}`.trim(),
+      ),
+    };
   }
 
   /**

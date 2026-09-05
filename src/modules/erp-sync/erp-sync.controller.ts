@@ -122,6 +122,45 @@ export class ErpSyncController {
     return this.sync.startRefresh();
   }
 
+  @Get('reconcile/customers')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  @ApiOperation({
+    summary: 'Compare the local customer list with the ERP (read-only)',
+    description:
+      'Counts how many customers match, how many the ERP has that are missing here, ' +
+      'and how many exist here that the ERP does not have — with a sample of each. ' +
+      'Changes nothing. Use POST to act on it.',
+  })
+  @ApiOkResponse({ description: 'The comparison' })
+  reconcileCustomersReport() {
+    return this.sync.reconcileCustomers();
+  }
+
+  @Post('reconcile/customers')
+  @UseGuards(RolesGuard)
+  @Roles('admin')
+  @ApiOperation({
+    summary: 'Archive local customers the ERP does not have',
+    description:
+      'Soft-deletes every customer that exists here but not in the ERP, so the two ' +
+      'lists match. Their vouchers and collections stay readable. Customers that ' +
+      'have traded are SKIPPED unless includeWithHistory=true. Requires confirm=true — ' +
+      'without it this behaves exactly like the GET. Admin only.',
+  })
+  @ApiOkResponse({ description: 'What was archived' })
+  reconcileCustomersApply(
+    @Query('confirm') confirm?: string,
+    @Query('includeWithHistory') includeWithHistory?: string,
+  ) {
+    return this.sync.reconcileCustomers({
+      // Anything other than an explicit "true" is a dry run. This deletes in
+      // bulk on a live system; a mistyped flag must fall back to reporting.
+      apply: confirm === 'true',
+      includeWithHistory: includeWithHistory === 'true',
+    });
+  }
+
   @Get('sync/status')
   @ApiOperation({ summary: 'ERP sync status', description: 'Per-entity cursor + last run. Admin only.' })
   @ApiOkResponse({ description: 'Sync cursors' })
