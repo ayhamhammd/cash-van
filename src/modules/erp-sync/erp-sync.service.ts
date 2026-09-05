@@ -16,6 +16,7 @@ import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity'
 import { Warehouse } from '../warehouses/entities/warehouse.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { provisionRep } from '../reps/rep-provision';
+import { User } from '../users/entities/user.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { Unit } from '../units/entities/unit.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
@@ -2547,6 +2548,8 @@ export class ErpSyncService {
               frozen: activationOn,
             }),
           );
+        } else {
+          await this.renameRepFromErp(existing, w.name ?? w.code!);
         }
       }
       n += 1;
@@ -2560,6 +2563,40 @@ export class ErpSyncService {
       if (wh && !wh.isVan) await this.whs.softDelete({ whNumber: code });
     });
     return n;
+  }
+
+  /**
+   * Keep a salesman's name in step with their van warehouse in the ERP.
+   *
+   * The rep's name was written once, at provision, and never again — so renaming
+   * a salesman in the ERP renamed their store here and left the salesman
+   * themselves on the old name, everywhere they are shown: the mobile app's
+   * header, the settlement notifications, the dashboard list, and the repName on
+   * every voucher pushed back to the ERP.
+   *
+   * There is no local edit to lose. `RepsService.update` already strips nameAr
+   * and nameEn while ERP mode is on, on the grounds that the salesman's identity
+   * is ERP-managed — this is the half of that arrangement that was missing.
+   *
+   * The login user is renamed only when it was auto-provisioned from this same
+   * salesman code. A user linked by hand is a person with their own name and an
+   * account of their own; a warehouse being renamed is no reason to rename them.
+   *
+   * nameEn is left alone: the ERP carries one name per warehouse, so there is
+   * nothing to put in it, and blanking a curated English name would be a loss.
+   */
+  private async renameRepFromErp(rep: Rep, erpName: string): Promise<void> {
+    if (rep.nameAr === erpName) return;
+    rep.nameAr = erpName;
+    await this.reps.save(rep);
+
+    if (!rep.userId || !rep.code) return;
+    const users = this.dataSource.getRepository(User);
+    const user = await users.findOne({ where: { id: rep.userId } });
+    if (!user || user.userNumber !== rep.code) return;
+    user.name = erpName;
+    user.nameAr = erpName;
+    await users.save(user);
   }
 
   /**

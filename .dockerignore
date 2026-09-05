@@ -4,11 +4,16 @@ node_modules
 .env
 .env.*
 dist
-# Build OUTPUT folders, not sources. They hold a ~170MB image tarball and the
-# site's own .env, so leaving them in the context copies real secrets into the
-# intermediate build layer and adds a slow 170MB transfer to every build.
-dist-windows/
-dist-windows-update/
+# Build OUTPUT folders, not sources. They hold image tarballs and the site's own
+# .env, so leaving them in the context copies real secrets into the intermediate
+# build layer and adds a slow multi-GB transfer to every build.
+#
+# Matched by prefix rather than named one at a time: dist-onprem/ and
+# dist-new-customer/ were missed by the old explicit list and together carried
+# 3.1 GB and two live client .env files into the context. A top-level `.env`
+# rule does not save you here — .dockerignore matches whole paths, so `.env`
+# never matches `dist-onprem/.env`.
+dist-*/
 coverage
 *.log
 .idea
