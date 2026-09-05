@@ -37,6 +37,9 @@ function makeSvc(opts: { customers: string[]; resumeKey?: string | null; perCust
 
   const svc = new (ErpSyncService as any)(...args) as ErpSyncService;
   (svc as any).logger = { warn: jest.fn(), log: jest.fn(), error: jest.fn(), debug: jest.fn() };
+  // These cases are about the FALLBACK walk, which only runs against an ERP with
+  // no /customer-prices endpoint — so say so explicitly.
+  (svc as any).pullCustomerPricesBulk = jest.fn().mockResolvedValue(null);
   // Stand in for the per-customer ERP round trips, optionally burning clock.
   (svc as any).syncCustomerPricesFor = jest.fn(async (cust: any) => {
     seen.push(cust.customerNumber);
@@ -48,7 +51,7 @@ function makeSvc(opts: { customers: string[]; resumeKey?: string | null; perCust
 
 const run = (svc: ErpSyncService) => (svc as any).pullCustomerPrices() as Promise<number>;
 
-describe('pullCustomerPrices', () => {
+describe("pullCustomerPrices — fallback walk (ERP without /customer-prices)", () => {
   beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick'] }));
   afterEach(() => jest.useRealTimers());
 
@@ -105,5 +108,77 @@ describe('pullCustomerPrices', () => {
     // permanently failing customer must not block everyone behind them.
     expect(seen).toEqual(['C1', 'C2']);
     expect(saved.at(-1).resumeKey).toBeNull();
+  });
+});
+
+/**
+ * The bulk path: one paginated call for every contract price, instead of
+ * resolving the whole catalogue once per customer.
+ */
+function makeBulkSvc(opts: { rows: any[]; listThrows?: Error }) {
+  const savedPrices: any[] = [];
+  const deleted: string[] = [];
+  const args: any[] = new Array(23).fill(null);
+
+  args[0] = {
+    list: jest.fn(async () => {
+      if (opts.listThrows) throw opts.listThrows;
+      return { data: opts.rows, total: opts.rows.length };
+    }),
+  };
+  args[3] = { findOne: jest.fn().mockResolvedValue({ id: 'item-1' }) };
+  args[7] = { findOne: jest.fn().mockResolvedValue({ id: 'cust-local-1' }) };
+  args[9] = { findOne: jest.fn().mockResolvedValue(null) };
+  args[10] = {
+    findOne: jest.fn().mockResolvedValue(null),
+    find: jest.fn().mockResolvedValue([]),
+    create: jest.fn((v: any) => ({ ...v })),
+    save: jest.fn(async (r: any) => { savedPrices.push({ ...r }); return r; }),
+    delete: jest.fn(async (id: string) => { deleted.push(id); }),
+  };
+  args[17] = {
+    findOne: jest.fn(async ({ where }: any) =>
+      where.entity === 'customer'
+        ? { localId: 'CUST-1', erpId: 'erp-c1' }
+        : { localId: 'ITEM-1', erpCode: where.erpCode },
+    ),
+  };
+  args[18] = {
+    findOne: jest.fn().mockResolvedValue(null),
+    create: jest.fn((v: any) => ({ ...v })),
+    save: jest.fn(async (c: any) => c),
+  };
+
+  const svc = new (ErpSyncService as any)(...args) as ErpSyncService;
+  (svc as any).logger = { warn: jest.fn(), log: jest.fn(), error: jest.fn(), debug: jest.fn() };
+  return { svc, savedPrices, deleted };
+}
+
+const bulk = (svc: ErpSyncService) =>
+  (svc as any).pullCustomerPricesBulk() as Promise<number | null>;
+
+describe('pullCustomerPricesBulk', () => {
+  it('writes the contract prices the ERP hands over', async () => {
+    const { svc, savedPrices } = makeBulkSvc({
+      rows: [{ customerId: 'erp-c1', skuCode: 'SKU-1', price: 0.9, isActive: true }],
+    });
+
+    const n = await bulk(svc);
+
+    expect(n).toBe(1);
+    expect(savedPrices[0].unitPrice).toBe(900); // major → fils
+    expect(savedPrices[0].priceSource).toBe('CUSTOMER_PRICE');
+  });
+
+  it('falls back when the ERP has no such endpoint', async () => {
+    const { svc } = makeBulkSvc({ rows: [], listThrows: new Error('Request failed 404') });
+    expect(await bulk(svc)).toBeNull();
+  });
+
+  it('does NOT fall back on a real failure', async () => {
+    // A broken sync must not be mistaken for an old ERP and quietly downgraded
+    // to the path that cannot finish.
+    const { svc } = makeBulkSvc({ rows: [], listThrows: new Error('500 Internal Server Error') });
+    await expect(bulk(svc)).rejects.toThrow('500');
   });
 });

@@ -262,6 +262,21 @@ interface ErpPriceList {
  * and comparing it back as a string never matches, so every re-sync would see a
  * changed row and rewrite the whole list on every sweep.
  */
+/** One row of the ERP's `GET /api/v1/customer-prices` — a raw contract price. */
+interface ErpCustomerPrice {
+  id?: string | null;
+  customerId?: string | null;
+  customerCode?: string | null;
+  skuCode: string;
+  barcode?: string | null;
+  price: number | string; // ERP major units
+  minQty?: number | null;
+  maxQty?: number | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  isActive?: boolean | null;
+}
+
 /**
  * How long one customer_price run may take before it stops and records where it
  * got to. Five minutes keeps the nightly heavy pull answerable and, more to the
@@ -1819,6 +1834,124 @@ export class ErpSyncService {
    * follow-up. Dashboard-authored (origin='local') rows are left untouched.
    * Assumes `pullCustomers()` ran first.
    */
+  /**
+   * Pull every per-customer contract price in a handful of paginated calls.
+   *
+   * The ERP serves the raw agreements at `GET /api/v1/customer-prices`. Contract
+   * prices are sparse — a few hundred rows — so this replaces the per-customer
+   * walk of the whole catalogue that could not finish.
+   *
+   * Returns null when the ERP does not have the endpoint (an older build), and
+   * the caller falls back to the slow path rather than silently syncing nothing.
+   */
+  private async pullCustomerPricesBulk(): Promise<number | null> {
+    const rows: ErpCustomerPrice[] = [];
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+    while (rows.length < total) {
+      let batch: { data: ErpCustomerPrice[]; total: number };
+      try {
+        batch = await this.erp.list<ErpCustomerPrice>('customer-prices', {
+          page,
+          pageSize: 500,
+        });
+      } catch (e) {
+        // Only a missing endpoint means "this ERP is too old". Anything else is a
+        // real failure and must not be mistaken for one, or a broken sync would
+        // quietly downgrade to the path that cannot finish.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (page === 1 && /\b404\b|not found/i.test(msg)) {
+          this.logger.log(
+            'ERP has no /customer-prices endpoint; falling back to the per-customer pull',
+          );
+          return null;
+        }
+        throw e;
+      }
+      total = batch.total;
+      if (batch.data.length === 0) break;
+      rows.push(...batch.data);
+      page += 1;
+      if (page > 200) break; // safety cap (100k rows)
+    }
+
+    // Group by ERP customer id so each customer is reconciled in one go.
+    const byCustomer = new Map<string, ErpCustomerPrice[]>();
+    for (const r of rows) {
+      if (!r.customerId || !r.skuCode) continue;
+      const arr = byCustomer.get(r.customerId) ?? [];
+      arr.push(r);
+      byCustomer.set(r.customerId, arr);
+    }
+
+    let processed = 0;
+    const touched = new Set<string>();
+    for (const [erpCustomerId, prices] of byCustomer) {
+      const map = await this.idmap.findOne({
+        where: { entity: 'customer', erpId: erpCustomerId },
+      });
+      if (!map?.localId) continue;
+      const cust = await this.customers.findOne({
+        where: { customerNumber: map.localId },
+      });
+      if (!cust) continue;
+      touched.add(cust.id);
+      processed += await this.applyCustomerPrices(cust.id, prices);
+    }
+
+    // A customer whose last contract price was withdrawn upstream appears in no
+    // group at all, so their rows have to be cleared by absence rather than by
+    // comparison. Local (dashboard-authored) rows are never touched.
+    for (const e of await this.customerPrices.find()) {
+      if (e.origin === 'local') continue;
+      if (!touched.has(e.customerId)) await this.customerPrices.delete(e.id);
+    }
+    return processed;
+  }
+
+  /** Write one customer's contract prices, pruning the ERP rows that went away. */
+  private async applyCustomerPrices(
+    customerId: string,
+    prices: ErpCustomerPrice[],
+  ): Promise<number> {
+    let processed = 0;
+    const keptSkus = new Set<string>();
+    for (const r of prices) {
+      const sku = r.skuCode;
+      keptSkus.add(sku);
+      const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: sku } });
+      const item = map?.localId
+        ? await this.items.findOne({ where: { itemNumber: map.localId } })
+        : null;
+      let itemUnitId: string | null = null;
+      if (item && r.barcode) {
+        const iu = await this.itemUnits.findOne({
+          where: { itemId: item.id, barcode: r.barcode },
+        });
+        itemUnitId = iu?.id ?? null;
+      }
+      let row = await this.customerPrices.findOne({ where: { customerId, erpSku: sku } });
+      // A dashboard-authored override is sticky — the ERP has no API to receive
+      // it back, so a sync must never overwrite it.
+      if (row && row.origin === 'local') continue;
+      if (!row) row = this.customerPrices.create({ customerId, erpSku: sku });
+      row.origin = 'erp';
+      row.itemId = item?.id ?? null;
+      row.itemUnitId = itemUnitId;
+      row.barcode = r.barcode ?? null;
+      row.unitPrice = Math.round((Number(r.price) || 0) * 1000); // ERP major → fils
+      row.priceSource = 'CUSTOMER_PRICE';
+      row.syncedAt = new Date();
+      await this.customerPrices.save(row);
+      processed += 1;
+    }
+    for (const e of await this.customerPrices.find({ where: { customerId } })) {
+      if (e.origin === 'local') continue;
+      if (!keptSkus.has(e.erpSku)) await this.customerPrices.delete(e.id);
+    }
+    return processed;
+  }
+
   private async pullCustomerPrices(): Promise<number> {
     // BOUNDED AND RESUMABLE.
     //
@@ -1833,6 +1966,18 @@ export class ErpSyncService {
     // stopped at, works until the budget is spent, and records where it got to.
     // Progress is made every run and the entity always finishes. Reaching the
     // end clears the mark, and the next run starts from the top again.
+    // One bulk call beats tens of thousands of per-customer ones. Only an ERP
+    // that does not serve the endpoint falls through to the walk below.
+    const bulk = await this.pullCustomerPricesBulk();
+    if (bulk !== null) {
+      const done = await this.cursors.findOne({ where: { entity: 'customer_price' } });
+      if (done?.resumeKey) {
+        done.resumeKey = null; // the slow path's place-marker is meaningless now
+        await this.cursors.save(done);
+      }
+      return bulk;
+    }
+
     const all = await this.customers.find({
       where: { isActive: true },
       order: { customerNumber: 'ASC' },
