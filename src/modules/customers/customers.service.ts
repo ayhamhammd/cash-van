@@ -466,23 +466,61 @@ export class CustomersService {
     } catch (err) {
       throw new BadRequestException(`Malformed Excel file: ${(err as Error).message}`);
     }
-    const ws = wb.worksheets[0];
-    if (!ws) throw new BadRequestException('The Excel file has no sheets');
+    if (wb.worksheets.length === 0) throw new BadRequestException('The Excel file has no sheets');
 
-    // (customerName, salesmanNumber) per row. Column 1 is now a customer NAME, so
-    // the header is detected from column 2 instead: a salesman number always has a
-    // digit, a header label ("رقم المندوب" / "salesman number") does not, so a
-    // first row whose column 2 has no digit is treated as a header and skipped.
-    const pairs: Array<{ cust: string; sales: string }> = [];
-    ws.eachRow((row) => {
-      const cust = cellText(row.getCell(1).value);
-      const sales = cellText(row.getCell(2).value);
-      if (!cust && !sales) return;
-      pairs.push({ cust, sales });
-    });
-    if (pairs.length && !/\d/.test(pairs[0].sales)) pairs.shift();
-    if (pairs.length === 0) throw new BadRequestException('The file has no data rows');
-    if (pairs.length > 20000) throw new BadRequestException('The file exceeds 20000 rows');
+    // Per-row (customerCode, customerName, salesmanNumber). Two layouts are
+    // supported, detected by HEADER on each sheet independently:
+    //   • the ERP "linked customers" export — Account Code | Account Name |
+    //     SALESNO | DAYINDX — often split across SEVERAL sheets;
+    //   • the older two-column file — customer name | salesman number.
+    // Every worksheet is read, not just the first, so a multi-sheet export links
+    // all its rows instead of only the first tab's.
+    const CODE_RE = [/account\s*code/, /^code$/, /كود/, /رقم\s*الحساب/, /رقم\s*العميل/];
+    const NAME_RE = [/account\s*name/, /^name$/, /customer/, /اسم/, /العميل/];
+    const SALES_RE = [/sales\s*?no/, /salesman/, /مندوب/];
+    const headerCol = (cells: string[], patterns: RegExp[]): number => {
+      for (let i = 0; i < cells.length; i++) {
+        const h = (cells[i] ?? '').trim().toLowerCase();
+        if (h && patterns.some((p) => p.test(h))) return i + 1; // 1-based
+      }
+      return 0;
+    };
+
+    type Entry = { code: string; name: string; sales: string };
+    const entries: Entry[] = [];
+    for (const ws of wb.worksheets) {
+      const rows: string[][] = [];
+      ws.eachRow((row) => {
+        const vals: string[] = [];
+        row.eachCell({ includeEmpty: true }, (cell, col) => {
+          vals[col - 1] = cellText(cell.value);
+        });
+        rows.push(vals);
+      });
+      if (rows.length === 0) continue;
+
+      let codeCol = headerCol(rows[0], CODE_RE);
+      let nameCol = headerCol(rows[0], NAME_RE);
+      let salesCol = headerCol(rows[0], SALES_RE);
+      const hasHeader = codeCol > 0 || nameCol > 0 || salesCol > 0;
+      const dataRows = hasHeader ? rows.slice(1) : rows;
+      if (!hasHeader) {
+        // No recognizable header → positional. 3+ columns is the code/name/sales
+        // export without headers; 2 columns is the legacy name/salesman file.
+        const width = Math.max(0, ...rows.map((r) => r.length));
+        if (width >= 3) { codeCol = 1; nameCol = 2; salesCol = 3; }
+        else { nameCol = 1; salesCol = 2; }
+      }
+      for (const r of dataRows) {
+        const code = codeCol ? (r[codeCol - 1] ?? '').trim() : '';
+        const name = nameCol ? (r[nameCol - 1] ?? '').trim() : '';
+        const sales = salesCol ? (r[salesCol - 1] ?? '').trim() : '';
+        if (!code && !name && !sales) continue;
+        entries.push({ code, name, sales });
+      }
+    }
+    if (entries.length === 0) throw new BadRequestException('The file has no data rows');
+    if (entries.length > 100000) throw new BadRequestException('The file exceeds 100000 rows');
 
     // Salesman number → repId, matched on rep code, the linked user's number, or
     // the van store number (any of the three the office might use).
@@ -522,9 +560,17 @@ export class CustomersService {
     // all three name fields (customerName / name_ar / name_en) so the office can use
     // whichever spelling it has.
     const allCustomers = await this.customers.find({
-      select: ['id', 'customerName', 'nameAr', 'nameEn', 'repId'],
+      select: ['id', 'customerNumber', 'customerName', 'nameAr', 'nameEn', 'repId'],
     });
     const custByName = new Map<string, Array<{ id: string; repId: string | null }>>();
+    // Exact, UNIQUE match by customer number (the Account Code) — preferred over
+    // name, which is not unique. Indexed raw AND leading-zero-stripped, since ERP
+    // exports and the stored number can differ only by zero-padding.
+    const custByNumber = new Map<string, { id: string; repId: string | null }>();
+    const putNumber = (key: string, rec: { id: string; repId: string | null }) => {
+      const k = key.trim();
+      if (k && !custByNumber.has(k)) custByNumber.set(k, rec);
+    };
     const indexName = (
       name: string | null | undefined,
       rec: { id: string; repId: string | null },
@@ -537,13 +583,17 @@ export class CustomersService {
     };
     for (const c of allCustomers) {
       const rec = { id: c.id, repId: c.repId ?? null };
+      if (c.customerNumber) {
+        putNumber(String(c.customerNumber), rec);
+        putNumber(normSalesman(String(c.customerNumber)), rec);
+      }
       indexName(c.customerName, rec);
       indexName(c.nameAr, rec);
       indexName(c.nameEn, rec);
     }
 
     const result = {
-      total: pairs.length,
+      total: entries.length,
       assigned: 0,
       unchanged: 0,
       ambiguousCustomers: [] as string[],
@@ -553,14 +603,23 @@ export class CustomersService {
 
     // Decide every row first (pure), then apply the assignments in one transaction.
     const toAssign: Array<{ id: string; repId: string }> = [];
-    for (const { cust, sales } of pairs) {
-      const matches = custByName.get(normalizeName(cust));
-      if (!matches || matches.length === 0) {
-        result.unmatchedCustomers.push(cust);
-        continue;
+    for (const { code, name, sales } of entries) {
+      // Prefer the exact Account Code → customer_number match (unique). Fall back
+      // to name only when there is no code / no code match; a name that resolves to
+      // more than one customer is reported as ambiguous, not assigned.
+      const label = code || name;
+      let customer =
+        (code && (custByNumber.get(code) ?? custByNumber.get(normSalesman(code)))) || null;
+      if (!customer) {
+        const byName = name ? custByName.get(normalizeName(name)) : undefined;
+        if (byName && byName.length > 1) {
+          result.ambiguousCustomers.push(label);
+          continue;
+        }
+        customer = byName?.[0] ?? null;
       }
-      if (matches.length > 1) {
-        result.ambiguousCustomers.push(cust);
+      if (!customer) {
+        result.unmatchedCustomers.push(label);
         continue;
       }
       const repId = repByKey.get(sales) ?? repByKey.get(normSalesman(sales));
@@ -568,7 +627,6 @@ export class CustomersService {
         result.unmatchedSalesmen.push(sales);
         continue;
       }
-      const customer = matches[0];
       if (customer.repId === repId) {
         result.unchanged++;
         continue;
