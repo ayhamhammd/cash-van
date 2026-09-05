@@ -539,12 +539,27 @@ export class ErpOutboxService {
     if (lines.length === 0) {
       throw new TerminalPayloadError('Order has no lines.');
     }
-    const orderLines: Array<{ skuId: string; quantity: number }> = [];
+    const orderLines: Array<{
+      skuId: string;
+      quantity: number;
+      sellingPrice: number;
+      discountPercent: number;
+    }> = [];
     for (const l of lines) {
       // Also not terminal — items mirror on the next catalogue sync.
       const sku = await this.idmap.findOne({ where: { entity: 'item', localId: l.itemNumber } });
       if (!sku?.erpId) return null;
-      orderLines.push({ skuId: sku.erpId, quantity: Math.round(Number(l.itemQty) || 0) });
+      orderLines.push({
+        skuId: sku.erpId,
+        // Send the EXACT quantity — the ERP scales by QUANTITY_SCALE and accepts
+        // decimals, so a 2.5-unit order must not be rounded to an integer here.
+        quantity: Number(l.itemQty) || 0,
+        // Carry the salesman's quoted price + discount (human units — the ERP
+        // scales by MONEY_SCALE) so the sales order reflects what was offered,
+        // not the ERP catalogue price.
+        sellingPrice: Number(l.unitPrice) || 0,
+        discountPercent: Number(l.discountPercentage) || 0,
+      });
     }
     return { path: 'sales-orders', body: { customerId: cust.erpId, lines: orderLines } };
   }
