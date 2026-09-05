@@ -8,6 +8,7 @@ import { StockRequestsController } from './stock-requests.controller';
 import { Rep } from '../reps/entities/rep.entity';
 import { User } from '../users/entities/user.entity';
 import { Warehouse } from '../warehouses/entities/warehouse.entity';
+import { AppSettings } from '../settings/entities/app-settings.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { UsersModule } from '../users/users.module';
@@ -18,7 +19,7 @@ import { ErpSyncModule } from '../erp-sync/erp-sync.module';
 @Module({
   imports: [
     UsersModule,
-    TypeOrmModule.forFeature([StockRequest, StockRequestItem, Rep, User, Warehouse, ItemCart, ItemUnit]),
+    TypeOrmModule.forFeature([StockRequest, StockRequestItem, Rep, User, Warehouse, AppSettings, ItemCart, ItemUnit]),
     // Receiving a request raises a TRANSFER voucher. Deferred for the same
     // reason ApprovalsModule defers it: Vouchers pulls in Customers, which
     // pulls in Approvals, and this module sits in that same graph.

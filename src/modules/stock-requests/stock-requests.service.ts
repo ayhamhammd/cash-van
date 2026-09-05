@@ -22,6 +22,7 @@ import {
 import { Rep } from '../reps/entities/rep.entity';
 import { User } from '../users/entities/user.entity';
 import { Warehouse } from '../warehouses/entities/warehouse.entity';
+import { AppSettings } from '../settings/entities/app-settings.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { RepScopeService } from '../users/rep-scope.service';
@@ -50,6 +51,8 @@ export class StockRequestsService {
     private readonly users: Repository<User>,
     @InjectRepository(Warehouse)
     private readonly warehouses: Repository<Warehouse>,
+    @InjectRepository(AppSettings)
+    private readonly settings: Repository<AppSettings>,
     @InjectRepository(ItemCart)
     private readonly items: Repository<ItemCart>,
     @InjectRepository(ItemUnit)
@@ -564,35 +567,63 @@ export class StockRequestsService {
    * on-hand; falls back to the local ledger. `storeNumber` is null because this is
    * an aggregate, not one store; the default source depot is chosen at approval.
    */
+  /**
+   * The MAIN warehouse van loads are requested from. Mirrors MobileService's
+   * resolver so the requesting-inventory picker and the ORDER flow agree on the
+   * same store: the admin-configured `main_store_number` wins, else the store the
+   * ERP flags as main (`is_main`, re-mirrored every sync), else the lowest-numbered
+   * depot. Null only when no depot exists at all.
+   */
+  private async resolveMainStore(): Promise<{ number: string; name: string | null } | null> {
+    const cfg = await this.settings.findOne({ where: { id: 1 } });
+    if (cfg?.mainStoreNumber) {
+      const wh = await this.warehouses.findOne({ where: { whNumber: cfg.mainStoreNumber } });
+      return { number: cfg.mainStoreNumber, name: wh?.whName ?? null };
+    }
+    const flagged = await this.warehouses.findOne({ where: { isMain: true, isVan: false } });
+    if (flagged) return { number: flagged.whNumber, name: flagged.whName ?? null };
+    const depots = await this.warehouses.find({ where: { isVan: false } });
+    if (!depots.length) return null;
+    const first = [...depots].sort((a, b) =>
+      a.whNumber.localeCompare(b.whNumber, undefined, { numeric: true }),
+    )[0];
+    return { number: first.whNumber, name: first.whName ?? null };
+  }
+
   async mainStoreStock(): Promise<{
     storeNumber: string | null;
     storeName: string | null;
     items: Array<{ itemNumber: string; stockUnitCode: string; qty: number }>;
   }> {
-    const depots = await this.depotStoreNumbers();
-    if (depots.length === 0) return { storeNumber: null, storeName: null, items: [] };
-    const depotSet = new Set(depots);
+    // Only the MAIN warehouse — not every depot. The requesting-inventory picker
+    // must show the main store's own on-hand and ONLY the items it actually
+    // carries, so a rep cannot see (or request against) stock sitting in some
+    // other depot. Resolves the same main store the ORDER flow uses.
+    const main = await this.resolveMainStore();
+    if (!main) return { storeNumber: null, storeName: null, items: [] };
     const agg = new Map<string, { itemNumber: string; stockUnitCode: string; qty: number }>();
 
-    // Prefer the ERP's absolute snapshot across all depots (the book of record).
-    const live = await this.erpSync.liveErpStock({}).catch(() => null);
+    // Prefer the ERP's absolute snapshot (the book of record), for the main store.
+    const live = await this.erpSync
+      .liveErpStock({ stockNumber: main.number })
+      .catch(() => null);
     if (live && live.source === 'erp') {
       for (const r of live.rows) {
-        if (!depotSet.has(r.stockNumber)) continue;
+        if (r.stockNumber !== main.number) continue;
         const key = `${r.itemNumber}|${r.stockUnitCode}`;
         const cur = agg.get(key);
         if (cur) cur.qty += r.quantity;
         else agg.set(key, { itemNumber: r.itemNumber, stockUnitCode: r.stockUnitCode, qty: r.quantity });
       }
     } else {
-      // Fallback: the local ledger, summed across depots.
+      // Fallback: the local ledger for the main store only.
       const rows: Array<{ item_number: string; stock_unit_code: string | null; qty: string }> =
         await this.dataSource.query(
           `SELECT item_number, stock_unit_code, SUM(qty) AS qty
              FROM item_balance
-            WHERE stock_number = ANY($1::text[])
+            WHERE stock_number = $1
             GROUP BY item_number, stock_unit_code`,
-          [depots],
+          [main.number],
         );
       for (const r of rows) {
         agg.set(`${r.item_number}|${r.stock_unit_code ?? ''}`, {
@@ -604,8 +635,8 @@ export class StockRequestsService {
     }
 
     return {
-      storeNumber: null,
-      storeName: 'كل المستودعات',
+      storeNumber: main.number,
+      storeName: main.name,
       items: [...agg.values()].filter((i) => i.qty !== 0),
     };
   }
