@@ -66,15 +66,40 @@ describe('mirrorCustomerPriceListAssignments', () => {
     expect(saved[0].priceListId).toBe('local-3');
   });
 
-  it('never overwrites a list the merchant assigned in the dashboard', async () => {
-    // The ERP has no API to receive a local assignment back, so overwriting it
-    // would destroy work that cannot be recovered upstream.
+  it('replaces a locally-chosen list when the ERP names one', async () => {
+    // The reported case: the ERP said "اسعار العقبة" while the customer sat on
+    // "قائمة اسعار الجملة" here. An explicit upstream assignment wins, whatever
+    // the local list was, or the wrong list survives for ever.
     const cust = { id: 'c1', erpPriceListId: 'erp-pl-1', priceListId: 'local-2' };
     const { svc, saved } = makeSvc({ customers: [cust], priceLists: [ERP_LIST, LOCAL_LIST] });
 
     await mirror(svc);
 
+    expect(saved).toHaveLength(1);
+    expect(saved[0].priceListId).toBe('local-1');
+  });
+
+  it('keeps a locally-chosen list when the ERP names none', async () => {
+    // No opinion upstream, so the merchant's own choice stands — the ERP has no
+    // API to receive it back and clearing it would destroy it.
+    const cust = { id: 'c1', erpPriceListId: null, priceListId: 'local-2' };
+    const { svc, saved } = makeSvc({ customers: [cust], priceLists: [ERP_LIST, LOCAL_LIST] });
+
+    await mirror(svc);
+
     expect(saved).toHaveLength(0);
+  });
+
+  it('moves a customer off the wrong mirrored list onto the one the ERP names', async () => {
+    // Two ERP lists, the customer parked on the wrong one — what the screenshots
+    // showed while the assignment step was never running.
+    const wholesale = { id: 'local-9', erpId: 'erp-pl-9', origin: 'erp', code: '2' };
+    const cust = { id: 'c1', erpPriceListId: 'erp-pl-1', priceListId: 'local-9' };
+    const { svc, saved } = makeSvc({ customers: [cust], priceLists: [ERP_LIST, wholesale] });
+
+    await mirror(svc);
+
+    expect(saved[0].priceListId).toBe('local-1');
   });
 
   it('leaves the assignment alone when the named list is not mirrored yet', async () => {

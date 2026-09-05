@@ -1748,9 +1748,14 @@ export class ErpSyncService {
    * here for ever, and the van went on quoting a price list the ERP had already
    * withdrawn. "The same as the ERP" has to include the empty case.
    *
-   * A dashboard-authored (origin 'local') assignment still wins: the ERP has no
-   * API to receive one back, so overwriting it would silently destroy work that
-   * cannot be recovered from upstream.
+   * WHEN THE ERP NAMES A LIST, THE ERP WINS — including over a dashboard-authored
+   * one. A customer sitting on "قائمة اسعار الجملة" here while the ERP says
+   * "اسعار العقبة" is exactly the divergence this is meant to remove, and a rule
+   * that protected the local choice would have kept the wrong list for ever.
+   *
+   * A local assignment is only honoured when the ERP names NO list. There the
+   * ERP has no opinion to overrule, and clearing the merchant's own choice would
+   * destroy something upstream cannot give back.
    *
    * Inactive customers are included. They were skipped, which meant reactivating
    * a customer surfaced whatever list they carried before rather than the one
@@ -1768,16 +1773,20 @@ export class ErpSyncService {
 
     let changed = 0;
     for (const c of await this.customers.find()) {
-      // A local assignment is the merchant's own and outranks the ERP.
-      if (c.priceListId && byId.get(c.priceListId)?.origin === 'local') continue;
-
       let target: string | null = null;
+
       if (c.erpPriceListId) {
-        const local = byErpId.get(c.erpPriceListId);
-        // The list is named but not mirrored yet (a list the item pull skipped,
-        // say). Leave what is there rather than clearing on a half-synced view.
-        if (!local) continue;
-        target = local.id;
+        const mirrored = byErpId.get(c.erpPriceListId);
+        // The list is named but not mirrored yet (one the item pull skipped, say).
+        // Leave what is there rather than acting on a half-synced view.
+        if (!mirrored) continue;
+        // The ERP named a list, so it wins outright — a local choice does not
+        // survive an explicit upstream assignment.
+        target = mirrored.id;
+      } else if (byId.get(c.priceListId ?? '')?.origin === 'local') {
+        // No opinion from the ERP, and the merchant made their own choice here.
+        // Keep it: the ERP has no API to receive it back.
+        continue;
       }
 
       if ((c.priceListId ?? null) !== target) {
