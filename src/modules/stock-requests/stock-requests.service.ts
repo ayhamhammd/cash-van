@@ -601,37 +601,48 @@ export class StockRequestsService {
     // other depot. Resolves the same main store the ORDER flow uses.
     const main = await this.resolveMainStore();
     if (!main) return { storeNumber: null, storeName: null, items: [] };
-    const agg = new Map<string, { itemNumber: string; stockUnitCode: string; qty: number }>();
-
-    // Prefer the ERP's absolute snapshot (the book of record), for the main store.
+    // Live ERP on-hand for the main store — the book of record for QUANTITY. But
+    // its snapshot silently drops any SKU it can't map, and on 94 the ERP's
+    // item_stock has drifted (items with no item_stock row vanish from /van/stock,
+    // others read 0). So it is used for quantity, NOT membership — mirroring
+    // getOrderStock (fix 07e8abf), which had this same missing-items bug.
     const live = await this.erpSync
       .liveErpStock({ stockNumber: main.number })
       .catch(() => null);
+    const liveQty = new Map<string, number>();
     if (live && live.source === 'erp') {
       for (const r of live.rows) {
         if (r.stockNumber !== main.number) continue;
-        const key = `${r.itemNumber}|${r.stockUnitCode}`;
-        const cur = agg.get(key);
-        if (cur) cur.qty += r.quantity;
-        else agg.set(key, { itemNumber: r.itemNumber, stockUnitCode: r.stockUnitCode, qty: r.quantity });
+        const key = `${r.itemNumber}|${r.stockUnitCode ?? ''}`;
+        liveQty.set(key, (liveQty.get(key) ?? 0) + r.quantity);
       }
-    } else {
-      // Fallback: the local ledger for the main store only.
-      const rows: Array<{ item_number: string; stock_unit_code: string | null; qty: string }> =
-        await this.dataSource.query(
-          `SELECT item_number, stock_unit_code, SUM(qty) AS qty
-             FROM item_balance
-            WHERE stock_number = $1
-            GROUP BY item_number, stock_unit_code`,
-          [main.number],
-        );
-      for (const r of rows) {
-        agg.set(`${r.item_number}|${r.stock_unit_code ?? ''}`, {
-          itemNumber: r.item_number,
-          stockUnitCode: r.stock_unit_code ?? '',
-          qty: Number(r.qty) || 0,
-        });
-      }
+    }
+
+    // The local ledger is the COMPLETE membership for the main store — it never
+    // drops an item the live snapshot couldn't map. Base the list on it and
+    // overlay the live quantity where we have it (live wins on quantity, and
+    // contributes any pool not yet booked locally).
+    const ledgerRows: Array<{ item_number: string; stock_unit_code: string | null; qty: string }> =
+      await this.dataSource.query(
+        `SELECT item_number, stock_unit_code, SUM(qty) AS qty
+           FROM item_balance
+          WHERE stock_number = $1
+          GROUP BY item_number, stock_unit_code`,
+        [main.number],
+      );
+
+    const agg = new Map<string, { itemNumber: string; stockUnitCode: string; qty: number }>();
+    for (const r of ledgerRows) {
+      const pool = r.stock_unit_code ?? '';
+      agg.set(`${r.item_number}|${pool}`, {
+        itemNumber: r.item_number,
+        stockUnitCode: pool,
+        qty: Number(r.qty) || 0,
+      });
+    }
+    for (const [key, qty] of liveQty) {
+      const sep = key.indexOf('|');
+      agg.set(key, { itemNumber: key.slice(0, sep), stockUnitCode: key.slice(sep + 1), qty });
     }
 
     return {
