@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { In, IsNull, Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { parse } from 'csv-parse/sync';
 import { Workbook } from 'exceljs';
 
@@ -438,15 +438,19 @@ export class CustomersService {
 
   /**
    * Bulk-assign customers to salesmen from an Excel upload. Each row: customer
-   * number (column 1) + salesman number (column 2). The salesman number matches
-   * the rep code, the linked user's login number, OR the van store number —
-   * whichever the office typed. Rows whose customer or salesman is not found are
-   * reported back, never silently dropped.
+   * NAME (column 1) + salesman number (column 2). The customer name matches on the
+   * customer's name (customerName / name_ar / name_en), trimmed and
+   * case-insensitive; the salesman number matches the rep code, the linked user's
+   * login number, OR the van store number — whichever the office typed. A name that
+   * matches more than one customer is reported as ambiguous and left untouched.
+   * Rows whose customer or salesman is not found are reported back, never silently
+   * dropped.
    */
   async assignSalesmenFromXlsx(buffer: Buffer): Promise<{
     total: number;
     assigned: number;
     unchanged: number;
+    ambiguousCustomers: string[];
     unmatchedCustomers: string[];
     unmatchedSalesmen: string[];
   }> {
@@ -465,8 +469,10 @@ export class CustomersService {
     const ws = wb.worksheets[0];
     if (!ws) throw new BadRequestException('The Excel file has no sheets');
 
-    // (customerNumber, salesmanNumber) per row. A first row whose column 1 has no
-    // digit is treated as a header and skipped.
+    // (customerName, salesmanNumber) per row. Column 1 is now a customer NAME, so
+    // the header is detected from column 2 instead: a salesman number always has a
+    // digit, a header label ("رقم المندوب" / "salesman number") does not, so a
+    // first row whose column 2 has no digit is treated as a header and skipped.
     const pairs: Array<{ cust: string; sales: string }> = [];
     ws.eachRow((row) => {
       const cust = cellText(row.getCell(1).value);
@@ -474,7 +480,7 @@ export class CustomersService {
       if (!cust && !sales) return;
       pairs.push({ cust, sales });
     });
-    if (pairs.length && !/\d/.test(pairs[0].cust)) pairs.shift();
+    if (pairs.length && !/\d/.test(pairs[0].sales)) pairs.shift();
     if (pairs.length === 0) throw new BadRequestException('The file has no data rows');
     if (pairs.length > 20000) throw new BadRequestException('The file exceeds 20000 rows');
 
@@ -499,49 +505,81 @@ export class CustomersService {
       }
     }
 
-    // Customers by number, loaded once.
-    const custNumbers = [...new Set(pairs.map((p) => p.cust).filter(Boolean))];
-    const custRows = custNumbers.length
-      ? await this.customers.find({ where: { customerNumber: In(custNumbers) } })
-      : [];
-    const custByNumber = new Map(custRows.map((c) => [c.customerNumber, c]));
+    // Customers indexed by normalized name, loaded once. Names are NOT unique, so
+    // each normalized name maps to a list of distinct customers; a name that
+    // resolves to more than one customer is ambiguous and left untouched. We index
+    // all three name fields (customerName / name_ar / name_en) so the office can use
+    // whichever spelling it has.
+    const allCustomers = await this.customers.find({
+      select: ['id', 'customerName', 'nameAr', 'nameEn', 'repId'],
+    });
+    const custByName = new Map<string, Array<{ id: string; repId: string | null }>>();
+    const indexName = (
+      name: string | null | undefined,
+      rec: { id: string; repId: string | null },
+    ) => {
+      const key = normalizeName(name);
+      if (!key) return;
+      const list = custByName.get(key);
+      if (!list) custByName.set(key, [rec]);
+      else if (!list.some((x) => x.id === rec.id)) list.push(rec);
+    };
+    for (const c of allCustomers) {
+      const rec = { id: c.id, repId: c.repId ?? null };
+      indexName(c.customerName, rec);
+      indexName(c.nameAr, rec);
+      indexName(c.nameEn, rec);
+    }
 
     const result = {
       total: pairs.length,
       assigned: 0,
       unchanged: 0,
+      ambiguousCustomers: [] as string[],
       unmatchedCustomers: [] as string[],
       unmatchedSalesmen: [] as string[],
     };
 
-    await this.customers.manager.transaction(async (em) => {
-      const repo = em.getRepository(Customer);
-      for (const { cust, sales } of pairs) {
-        const customer = custByNumber.get(cust);
-        if (!customer) {
-          result.unmatchedCustomers.push(cust);
-          continue;
-        }
-        const repId = repByKey.get(sales);
-        if (!repId) {
-          result.unmatchedSalesmen.push(sales);
-          continue;
-        }
-        if (customer.repId === repId) {
-          result.unchanged++;
-          continue;
-        }
-        customer.repId = repId;
-        await repo.save(customer);
-        result.assigned++;
+    // Decide every row first (pure), then apply the assignments in one transaction.
+    const toAssign: Array<{ id: string; repId: string }> = [];
+    for (const { cust, sales } of pairs) {
+      const matches = custByName.get(normalizeName(cust));
+      if (!matches || matches.length === 0) {
+        result.unmatchedCustomers.push(cust);
+        continue;
       }
-    });
+      if (matches.length > 1) {
+        result.ambiguousCustomers.push(cust);
+        continue;
+      }
+      const repId = repByKey.get(sales);
+      if (!repId) {
+        result.unmatchedSalesmen.push(sales);
+        continue;
+      }
+      const customer = matches[0];
+      if (customer.repId === repId) {
+        result.unchanged++;
+        continue;
+      }
+      customer.repId = repId; // reflect the change so a repeated row counts as unchanged
+      toAssign.push({ id: customer.id, repId });
+      result.assigned++;
+    }
+
+    if (toAssign.length > 0) {
+      await this.customers.manager.transaction(async (em) => {
+        const repo = em.getRepository(Customer);
+        for (const a of toAssign) await repo.update({ id: a.id }, { repId: a.repId });
+      });
+    }
 
     // Tell every affected van to re-pull its customer list (old + new owners),
     // exactly as the single-customer reassign does. Broad signal = every van.
     if (result.assigned > 0) {
       this.events.emit('customer.changed', { reason: 'bulk.salesman.assignment' });
     }
+    result.ambiguousCustomers = [...new Set(result.ambiguousCustomers)];
     result.unmatchedCustomers = [...new Set(result.unmatchedCustomers)];
     result.unmatchedSalesmen = [...new Set(result.unmatchedSalesmen)];
     return result;
@@ -850,4 +888,15 @@ function cellText(v: unknown): string {
     return '';
   }
   return String(v).trim();
+}
+
+/**
+ * Normalize a customer name for matching: collapse internal whitespace, trim, and
+ * lowercase. Conservative on purpose — it forgives stray or duplicated spaces and
+ * Latin-letter casing without risking false merges between genuinely different
+ * names (no diacritic/alef folding).
+ */
+function normalizeName(v: string | null | undefined): string {
+  if (v == null) return '';
+  return String(v).replace(/\s+/g, ' ').trim().toLowerCase();
 }

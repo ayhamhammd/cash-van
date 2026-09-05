@@ -313,9 +313,11 @@ export class CustomersController {
   @ApiOperation({
     summary: 'Bulk-assign customers to salesmen (Excel)',
     description:
-      'Excel upload, two columns: customer number + salesman number (matched on rep ' +
-      'code, the salesman login number, or the van store number). Sets each customer\'s ' +
-      'assigned salesman. Returns { assigned, unchanged, unmatchedCustomers, unmatchedSalesmen }. ' +
+      'Excel upload, two columns: customer name + salesman number (the salesman number ' +
+      'matched on rep code, the salesman login number, or the van store number). Matches ' +
+      'each customer by name (case-insensitive) and sets its assigned salesman. Returns ' +
+      '{ assigned, unchanged, ambiguousCustomers, unmatchedCustomers, unmatchedSalesmen }; ' +
+      'a name matching more than one customer is reported as ambiguous, not assigned. ' +
       'Admin/manager only.',
   })
   @ApiCreatedResponse({ description: 'Assignment summary' })
