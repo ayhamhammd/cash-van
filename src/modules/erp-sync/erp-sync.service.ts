@@ -3225,6 +3225,11 @@ export class ErpSyncService {
     let item = await this.items.findOne({ where: { itemNumber }, withDeleted: true });
     const isNew = !item;
     if (!item) item = this.items.create({ itemNumber });
+    // A pruned item the ERP still lists must be RESTORED. Capture the soft-deleted
+    // state BEFORE clearing it and force the write below: when no other field
+    // changed, itemFingerprint sees no diff, the save is skipped, and this
+    // `deletedAt = null` is silently dropped — leaving the item hidden forever.
+    const wasDeleted = !isNew && item.deletedAt != null;
     item.deletedAt = null; // restore if it had been pruned
     // Snapshot BEFORE the assignments, so we can tell a real change from the
     // 99% of sweeps that rewrite a product with identical values. The vans are
@@ -3267,7 +3272,7 @@ export class ErpSyncService {
       item.consumerPriceFils = null;
     }
 
-    const itemChanged = isNew || before !== this.itemFingerprint(item);
+    const itemChanged = isNew || wasDeleted || before !== this.itemFingerprint(item);
     // Skipping the write when nothing moved is not just about the signal: it
     // spares the database a full-catalogue UPDATE storm every five minutes.
     if (itemChanged) item = await this.items.save(item);
