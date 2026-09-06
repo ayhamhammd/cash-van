@@ -108,4 +108,14 @@ export class UpdateAppSettingsDto {
   @IsOptional()
   @IsBoolean()
   tobaccoTaxEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    example: false,
+    description:
+      'Program feature: track DAMAGED/EXPIRED returns as a separate inventory ' +
+      '(damaged-quantities report, EOD & reconciliation). OFF ⇒ returns unchanged.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  damagedReturnsEnabled?: boolean;
 }

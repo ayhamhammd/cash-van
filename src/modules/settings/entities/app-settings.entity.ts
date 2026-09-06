@@ -161,6 +161,16 @@ export class AppSettings {
   tobaccoTaxEnabled!: boolean;
 
   /**
+   * Program feature: track goods returned as DAMAGED/EXPIRED as a separate
+   * (quarantine) inventory instead of re-adding them to sellable van stock, and
+   * surface them in the damaged-quantities report, EOD and reconciliation.
+   * OFF (default) ⇒ returns behave exactly as before. See
+   * docs/SPEC-damaged-expired-returns.md.
+   */
+  @Column({ name: 'damaged_returns_enabled', type: 'boolean', default: false })
+  damagedReturnsEnabled!: boolean;
+
+  /**
    * FastReport-style banded voucher layout (the "Voucher Designer" document).
    * Stored whole; null = use DEFAULT_VOUCHER_REPORT. See voucher-report.dto.ts.
    */

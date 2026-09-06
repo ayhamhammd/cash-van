@@ -40,6 +40,7 @@ export interface AppSettingsView {
   aiChatQuota: number;
   aiInferQuota: number;
   tobaccoTaxEnabled: boolean;
+  damagedReturnsEnabled: boolean;
   accounting: {
     /** The three main settlement accounts (ERP GL refs). null = unset. */
     salesAccount: { id: string | null; code: string | null };
@@ -371,6 +372,7 @@ export class SettingsService {
       aiChatQuota: row.aiChatQuota,
       aiInferQuota: row.aiInferQuota,
       tobaccoTaxEnabled: row.tobaccoTaxEnabled,
+      damagedReturnsEnabled: row.damagedReturnsEnabled,
       accounting: {
         salesAccount: { id: row.erpSalesAccountId ?? null, code: row.erpSalesAccountCode ?? null },
         cashCollectionAccount: { id: row.erpCashCollectionAccountId ?? null, code: row.erpCashCollectionAccountCode ?? null },
