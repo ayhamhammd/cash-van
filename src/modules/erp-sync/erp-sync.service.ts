@@ -2589,49 +2589,30 @@ export class ErpSyncService {
       if (w.whName) storeByName.set(w.whName.trim(), { number: w.whNumber, name: w.whName });
     }
 
+    // Callers that name items (approval availability, transfer, stock report)
+    // get the pools filtered to these AFTER mapping — never by a per-sku ERP
+    // query, which is the part that broke.
+    const itemSet = new Set(opts.itemNumbers?.filter(Boolean) ?? []);
+
     type VanStockRow = { skuCode: string; warehouseName: string; quantity: number };
     const erpRows: VanStockRow[] = [];
     try {
-      const items = opts.itemNumbers?.filter(Boolean) ?? [];
-      if (items.length) {
-        // Targeted: resolve the items' ERP sku codes, pull just those.
-        const units = await this.itemUnits.find({
-          where: { item: { itemNumber: In(items) } },
-          relations: { item: true },
-        });
-        const mappedCodes = units.map((u) => u.erpSkuCode).filter(Boolean) as string[];
-        // Items with NO mapped erp_sku_code fall back to their own number as the
-        // candidate sku code — the ERP sku code is usually the barcode/number, and
-        // item_units.erp_sku_code is not always populated. Without this, a targeted
-        // lookup for an unmapped item returned nothing and read as "0 available"
-        // (the "المتوفر 0" bug on the approval page and availability views).
-        const itemsWithMapping = new Set(
-          units
-            .filter((u) => u.erpSkuCode)
-            .map((u) => u.item?.itemNumber)
-            .filter(Boolean) as string[],
-        );
-        const fallbackCodes = items.filter((n) => !itemsWithMapping.has(n));
-        const codes = [...new Set([...mappedCodes, ...fallbackCodes])] as string[];
-        for (const code of codes) {
-          const { data } = await this.erp.list<VanStockRow>('van/stock', {
-            skuCode: code,
-            page: 1,
-            pageSize: 200,
-          });
-          erpRows.push(...data);
-        }
-      } else {
-        // Broad: the whole snapshot, page by page.
-        const pageSize = 200;
-        let page = 1;
-        for (;;) {
-          const { data, total } = await this.erp.list<VanStockRow>('van/stock', { page, pageSize });
-          erpRows.push(...data);
-          if (page * pageSize >= total || data.length === 0) break;
-          page += 1;
-          if (page > 500) break;
-        }
+      // ALWAYS pull the broad snapshot and map it the way the dashboard and the
+      // drift report do (resolveStockTarget: ERP sku → cash-van item). The old
+      // targeted mode queried van/stock?skuCode=<item_units.erp_sku_code>, and a
+      // stale or blank code there returned NOTHING — the item then read as "0
+      // available", which disabled stock-request approval and blanked the
+      // transfer + stock views even though the stock exists (drift shows
+      // unresolvedSkus:0, i.e. the broad mapping resolves every row). Filtering
+      // the mapped result by itemSet below keeps the one path that resolves.
+      const pageSize = 200;
+      let page = 1;
+      for (;;) {
+        const { data, total } = await this.erp.list<VanStockRow>('van/stock', { page, pageSize });
+        erpRows.push(...data);
+        if (page * pageSize >= total || data.length === 0) break;
+        page += 1;
+        if (page > 500) break;
       }
     } catch {
       return { source: 'unavailable', reason: 'fetch_failed', asOf: null, rows: [] };
@@ -2645,6 +2626,9 @@ export class ErpSyncService {
       if (opts.stockNumber && store.number !== opts.stockNumber) continue;
       const target = await this.resolveStockTarget(r.skuCode);
       if (!target) continue;
+      // Requested-items filter (targeted callers) — applied on the RESOLVED
+      // cash-van item, so it never depends on the ERP sku code matching.
+      if (itemSet.size > 0 && !itemSet.has(target.itemNumber)) continue;
       const key = `${store.number}|${target.itemNumber}|${target.stockUnitCode}`;
       const cur = byPool.get(key);
       if (cur) cur.qty += Number(r.quantity) || 0;
