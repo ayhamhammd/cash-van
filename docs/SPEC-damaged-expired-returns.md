@@ -52,8 +52,25 @@ stock reads; the damaged store is just another warehouse the reports filter on.
 
 ### 3.3 Return reason on the voucher
 Persist the machine reason (`DAMAGED` | `EXPIRED` | …), not just the Arabic
-label, so reports can filter. Add `voucher_headers.return_reason TEXT NULL`
-(app already sends the reason; it is currently flattened into `notes`).
+label, so reports and the posting reroute can act on it.
+
+> **Phase-4 finding (2026-09):** the backend does **not** persist a return's
+> reason at all today — `voucher_headers` has no `notes`/`reason` column and
+> `CreateVoucherDto` has no reason field; the Arabic reason lives only on the
+> *app's* local invoice (its `notes`). So this is not a one-column add — it must
+> be threaded end-to-end:
+> 1. **App** — persist the machine reason on the invoice (**Room DB migration**)
+>    and send it in the upload (`CreateVoucherRequest.returnReason`).
+> 2. **BE** — `CreateVoucherDto.returnReason` → `voucher_headers.return_reason`
+>    (migration) → stored in `vouchers.create()`.
+> 3. **BE** — `damaged_stock` ledger + a **guarded reroute in `post()`** (skip the
+>    sellable van `applyLineToVan('in')` for damaged/expired; write the ledger).
+> 4. **ERP mirror** — the `SALES_RETURN` push must target the damaged bucket, not
+>    the van, or it re-inflates sellable stock ERP-side.
+>
+> This is a stock-critical, two-repo change (incl. a mobile DB migration) that
+> should land as its **own** unit and be exercised on the test DB before 94 —
+> not folded into an unrelated batch.
 
 ---
 
