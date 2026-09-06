@@ -731,22 +731,13 @@ export class StockRequestsService {
     const itemSet = new Set(itemNumbers);
     const out = new Map<string, number>();
 
-    // Use the BROAD ERP snapshot (all stores), filtered to the requested items and
-    // depots. The targeted mode resolves each item's ERP sku code from item_units,
-    // which is not always mapped — a missing mapping there returned an empty result
-    // and wrongly read as "0 available", rejecting a request for stock that exists.
-    // The broad snapshot maps by the ERP's own sku code, the same way the dashboard
-    // and mainStoreStock do, so it agrees with what the UI shows.
-    const live = await this.erpSync.liveErpStock({}).catch(() => null);
-    if (live && live.source === 'erp') {
-      for (const r of live.rows) {
-        if (!depotSet.has(r.stockNumber) || !itemSet.has(r.itemNumber)) continue;
-        const key = `${r.itemNumber}|${r.stockUnitCode}`;
-        out.set(key, (out.get(key) ?? 0) + r.quantity);
-      }
-      return out;
-    }
-
+    // Base on the local ledger summed across the depots — the COMPLETE on-hand,
+    // and the figure the Stock Balances report shows. On a client whose ERP
+    // item_stock has drifted (94), the live ERP OMITS the item and reads 0, which
+    // would reject the CREATE for stock the report plainly shows (the "طلب N /
+    // المتوفر 0" rejection). Overlay the live ERP on top where it actually reports
+    // the item (a mapped item wins, even at 0), mirroring warehouseQtyByPool and
+    // mainStoreStock so create, approve and the report all agree.
     const rows: Array<{ item_number: string; stock_unit_code: string | null; qty: string }> =
       await this.dataSource.query(
         `SELECT item_number, stock_unit_code, SUM(qty) AS qty
@@ -757,6 +748,19 @@ export class StockRequestsService {
       );
     for (const r of rows) {
       out.set(`${r.item_number}|${r.stock_unit_code ?? ''}`, Number(r.qty) || 0);
+    }
+
+    const live = await this.erpSync.liveErpStock({}).catch(() => null);
+    if (live && live.source === 'erp') {
+      const erp = new Map<string, number>();
+      for (const r of live.rows) {
+        if (!depotSet.has(r.stockNumber) || !itemSet.has(r.itemNumber)) continue;
+        const key = `${r.itemNumber}|${r.stockUnitCode}`;
+        erp.set(key, (erp.get(key) ?? 0) + r.quantity);
+      }
+      // ERP wins per (item, pool) it reports — a healthy ERP still overrides the
+      // ledger; a drifted one simply omits the key and the ledger figure stands.
+      for (const [key, qty] of erp) out.set(key, qty);
     }
     return out;
   }
