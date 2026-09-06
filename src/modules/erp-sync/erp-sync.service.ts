@@ -453,11 +453,18 @@ export class ErpSyncService {
     // reports (total); each pass returns a different arbitrary slice, so the union
     // converges on the full set. Capped so a genuinely short list still ends.
     const bySkuId = new Map<string, { skuId: string; skuCode: string }>();
-    const pageSize = 100;
     try {
       let reportedTotal = 0;
-      for (let pass = 0; pass < 8; pass++) {
-        for (let page = 1; page <= 200; page++) {
+      // Each sweep uses a DIFFERENT page size on purpose. The ERP's allowed-items
+      // query has no ORDER BY, so its LIMIT/OFFSET windows overlap the same way on
+      // every request: a row that falls in the gap between page 1 and page 2 at
+      // pageSize=100 is skipped on EVERY identical re-page (observed on van 102 —
+      // the endpoint reports total=203 but returns the same 200 rows forever, so
+      // items 213/270/312 never reached the salesman). Changing the page size moves
+      // the boundaries, so a row lost in one sweep's gap sits inside another
+      // sweep's window. Stop as soon as we hold every row the endpoint reports.
+      for (const pageSize of [100, 97, 89, 79, 71, 61, 53, 47]) {
+        for (let page = 1; page <= 500; page++) {
           const res = await this.erp.list<{ skuId: string; skuCode: string }>(
             'inventory/allowed-items',
             { warehouseId: whMap.erpId, page, pageSize },
