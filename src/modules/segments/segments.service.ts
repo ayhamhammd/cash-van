@@ -299,9 +299,22 @@ export class SegmentsService {
         )
         .orIgnore()
         .execute();
+    }
+
+    // Count what LANDED, not what we meant to write. `.orIgnore()` swallows any
+    // unique violation, so a silently-dropped insert was indistinguishable from
+    // success: the caller was told "added" while no row existed. A customer may
+    // belong to MANY segments (the only unique key is the segment+customer pair),
+    // and when a stray key blocked that, this method still reported success and
+    // the customer simply never appeared. Now the number is measured.
+    const present = await this.members.count({
+      where: { segmentId: id, customerId: In(wanted) },
+    });
+    const added = Math.max(0, present - have.size);
+    if (added > 0) {
       this.events.emit('segment.changed', { segmentId: id, reason: 'members.added' });
     }
-    return { added: toAdd.length, total: await this.count(id) };
+    return { added, total: await this.count(id) };
   }
 
   async removeMember(id: string, customerId: string): Promise<{ total: number }> {
