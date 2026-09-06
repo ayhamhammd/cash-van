@@ -362,6 +362,12 @@ export class CustomersService {
       .createQueryBuilder('c')
       .where('c.deleted_at IS NULL')
       .orderBy('c.created_at', 'DESC')
+      // Unique tiebreaker: created_at is NOT unique (a bulk import stamps many rows
+      // the same instant), and LIMIT/OFFSET over a non-unique sort lets Postgres
+      // order ties differently per page, silently SKIPPING a tied row at a page
+      // boundary — it then syncs to no page and never reaches the app. The PK makes
+      // the order deterministic so every offset window is exact.
+      .addOrderBy('c.id', 'ASC')
       .take(query.limit ?? 25)
       .skip(query.offset ?? 0);
 

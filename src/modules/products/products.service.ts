@@ -51,6 +51,13 @@ export class ProductsService {
       .createQueryBuilder('p')
       .where('p.deleted_at IS NULL')
       .orderBy('p.name_ar', 'ASC')
+      // Unique tiebreaker: name_ar is NOT unique (many variants share a name), and
+      // LIMIT/OFFSET over a non-unique sort lets Postgres order ties differently on
+      // each page request, so a tied row near a page boundary is silently SKIPPED —
+      // it syncs to no page and vanishes from the app catalogue (the 213/270/312
+      // "item has stock but never shows on mobile" bug). The PK makes the total
+      // order deterministic so every offset window is exact.
+      .addOrderBy('p.id', 'ASC')
       .take(query.limit ?? 50)
       .skip(query.offset ?? 0);
 
