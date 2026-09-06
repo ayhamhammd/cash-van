@@ -445,16 +445,28 @@ export class ErpSyncService {
     if (!whMap?.erpId) return new Set();
 
     // Page through the allowlist (the endpoint caps pageSize at 100).
-    const skus: Array<{ skuId: string; skuCode: string }> = [];
+    // The ERP allowed-items endpoint pages WITHOUT a stable ORDER BY (and caps
+    // pageSize at 100), so one offset pass can return a different row order per
+    // request and silently SKIP a SKU at a 100-row boundary — that item then
+    // vanishes from the salesman's catalogue even though it IS in sku_warehouses.
+    // Re-page and MERGE (dedup by skuId) until we hold every row the endpoint
+    // reports (total); each pass returns a different arbitrary slice, so the union
+    // converges on the full set. Capped so a genuinely short list still ends.
+    const bySkuId = new Map<string, { skuId: string; skuCode: string }>();
     const pageSize = 100;
     try {
-      for (let page = 1; page <= 200; page++) {
-        const res = await this.erp.list<{ skuId: string; skuCode: string }>(
-          'inventory/allowed-items',
-          { warehouseId: whMap.erpId, page, pageSize },
-        );
-        skus.push(...res.data);
-        if (res.data.length < pageSize) break;
+      let reportedTotal = 0;
+      for (let pass = 0; pass < 8; pass++) {
+        for (let page = 1; page <= 200; page++) {
+          const res = await this.erp.list<{ skuId: string; skuCode: string }>(
+            'inventory/allowed-items',
+            { warehouseId: whMap.erpId, page, pageSize },
+          );
+          if (res.total) reportedTotal = res.total;
+          for (const s of res.data) if (s.skuId) bySkuId.set(s.skuId, s);
+          if (res.data.length < pageSize) break;
+        }
+        if (!reportedTotal || bySkuId.size >= reportedTotal) break;
       }
     } catch (e) {
       // The per-warehouse allowlist endpoint is optional/newer on the ERP. If it
@@ -467,6 +479,7 @@ export class ErpSyncService {
       );
       return new Set();
     }
+    const skus = [...bySkuId.values()];
     if (skus.length === 0) return new Set();
 
     // Map ERP sku uuid → cash-van itemNumber through the id map (authoritative);
