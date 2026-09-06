@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, LessThanOrEqual, Repository } from 'typeorm';
+import { In, IsNull, LessThanOrEqual, Not, Repository } from 'typeorm';
 
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
@@ -28,6 +28,8 @@ const MAX_ATTEMPTS = 6;
 // class is defined, before DI exists. Validated in validation.schema.ts.
 const DRAIN_INTERVAL_MS = parseInt(process.env.ERP_OUTBOX_DRAIN_MS ?? '30000', 10);
 const BATCH = 20;
+// How often to poll the ERP for the async JoFotara QR of already-pushed sales.
+const QR_RECONCILE_INTERVAL_MS = parseInt(process.env.ERP_QR_RECONCILE_MS ?? '30000', 10);
 // A 429 is transient (the ERP per-key window resets in 60s), so we reschedule past
 // the window WITHOUT consuming a dead-letter attempt — rate limiting must never
 // permanently fail a document.
@@ -57,6 +59,7 @@ export class TerminalPayloadError extends Error {}
 export class ErpOutboxService {
   private readonly logger = new Logger(ErpOutboxService.name);
   private draining = false;
+  private reconcilingQr = false;
 
   constructor(
     private readonly erp: ErpHttpClient,
@@ -162,6 +165,85 @@ export class ErpOutboxService {
       for (const row of due) await this.pushOne(row);
     } finally {
       this.draining = false;
+    }
+  }
+
+  /**
+   * Fill in each posted SALE voucher's JoFotara QR from the ERP.
+   *
+   * The government returns the QR only after the ERP submits the invoice, so it
+   * arrives AFTER the sale was already pushed. This polls the ERP by invoice
+   * number for posted sales that still lack a QR and are not in a terminal
+   * JoFotara state, and mirrors the QR + status onto the voucher. The dashboard
+   * and the mobile receipt read them from the voucher.
+   */
+  @Interval(QR_RECONCILE_INTERVAL_MS)
+  async reconcileJofotaraQr(): Promise<void> {
+    if (this.reconcilingQr) return;
+    let cfg: Awaited<ReturnType<SettingsService['getErpConfig']>> | null = null;
+    try {
+      cfg = await this.settings.getErpConfig();
+    } catch {
+      return;
+    }
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return;
+
+    this.reconcilingQr = true;
+    try {
+      // Posted sales that still have no QR and are not in a terminal JoFotara
+      // state — REJECTED/ERROR never produce a QR, so polling them is waste.
+      const headers = await this.headers.find({
+        where: [
+          { isPosted: true, transKind: 'SALE', jofotaraQrCode: IsNull(), jofotaraStatus: IsNull() },
+          {
+            isPosted: true,
+            transKind: 'SALE',
+            jofotaraQrCode: IsNull(),
+            jofotaraStatus: Not(In(['REJECTED', 'ERROR'])),
+          },
+        ],
+        order: { inDate: 'DESC' },
+        take: BATCH,
+      });
+
+      for (const h of headers) {
+        // The ERP invoice number was recorded when the sale pushed. No mapping =
+        // not pushed yet; the drain pushes it, then a later tick fills the QR.
+        const map = await this.idmap.findOne({
+          where: { entity: 'voucher', erpId: h.voucherNumber },
+        });
+        const invoiceNumber = map?.erpCode ?? undefined;
+        if (!invoiceNumber) continue;
+
+        try {
+          const res = await this.erp.list<{
+            invoiceNumber: string;
+            jofotaraStatus?: string | null;
+            jofotaraQrCode?: string | null;
+          }>('sales-invoices', { number: invoiceNumber, pageSize: 5 });
+          const row = res.data.find((r) => r.invoiceNumber === invoiceNumber) ?? res.data[0];
+          if (!row) continue;
+
+          const patch: { jofotaraStatus?: string; jofotaraQrCode?: string } = {};
+          if (row.jofotaraStatus && row.jofotaraStatus !== h.jofotaraStatus) {
+            patch.jofotaraStatus = row.jofotaraStatus;
+          }
+          if (row.jofotaraQrCode && row.jofotaraQrCode !== h.jofotaraQrCode) {
+            patch.jofotaraQrCode = row.jofotaraQrCode;
+          }
+          if (Object.keys(patch).length > 0) {
+            await this.headers.update({ id: h.id }, patch);
+          }
+        } catch (e) {
+          this.logger.warn(
+            `JoFotara QR reconcile failed for voucher ${h.voucherNumber} (invoice ${invoiceNumber}): ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        }
+      }
+    } finally {
+      this.reconcilingQr = false;
     }
   }
 

@@ -133,6 +133,16 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'tax_exemption_applied_at', type: 'timestamptz', nullable: true })
   taxExemptionAppliedAt?: Date | null;
 
+  // ── JoFotara e-invoice ────────────────────────────────────────────────────
+  // The government QR string + submission status, mirrored from the ERP invoice
+  // by the outbox reconciler once the document is submitted and validated. Null
+  // until then (the print layer shows "pending"). See VoucherJofotaraQr migration.
+  @Column({ name: 'jofotara_qr_code', type: 'text', nullable: true })
+  jofotaraQrCode?: string | null;
+
+  @Column({ name: 'jofotara_status', type: 'text', nullable: true })
+  jofotaraStatus?: string | null;
+
   @OneToMany(() => VoucherTransaction, (t) => t.header, { cascade: true })
   transactions?: VoucherTransaction[];
 
