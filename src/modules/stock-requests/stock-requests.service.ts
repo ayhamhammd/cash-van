@@ -687,24 +687,26 @@ export class StockRequestsService {
     itemNumbers: string[],
   ): Promise<Map<string, number>> {
     if (!itemNumbers.length) return new Map();
+    // Base on the local ledger — the COMPLETE on-hand for the store, and the exact
+    // figure the dashboard's Stock Balances report shows. On a client whose ERP
+    // item_stock has drifted (94: opening stock is booked as movements but
+    // item_stock was never rebuilt), the live ERP OMITS the item and reads 0,
+    // which would block an approval for stock the report plainly shows. Overlay
+    // the live ERP on top where it actually reports the item (a mapped item wins,
+    // even at 0), mirroring mainStoreStock (49dc6a7). NEVER read live for a van
+    // store — its own sales lag the ERP, which is the overselling trap.
+    const ledger = await this.vanQtyByPool(storeNumber, itemNumbers);
     const vans = await this.erpSync.vanStoreNumbers().catch(() => new Set<string>());
-    if (!vans.has(storeNumber)) {
-      // Broad snapshot filtered to this store + items — the targeted mode depends
-      // on item_units.erp_sku_code, which is not always mapped and then reads as
-      // "0 available", wrongly blocking an approval for stock that exists.
-      const itemSet = new Set(itemNumbers);
-      const live = await this.erpSync.liveErpStock({}).catch(() => null);
-      if (live && live.source === 'erp') {
-        const m = new Map<string, number>();
-        for (const r of live.rows) {
-          if (r.stockNumber !== storeNumber || !itemSet.has(r.itemNumber)) continue;
-          m.set(`${r.itemNumber}|${r.stockUnitCode}`, r.quantity);
-        }
-        return m;
+    if (vans.has(storeNumber)) return ledger;
+    const itemSet = new Set(itemNumbers);
+    const live = await this.erpSync.liveErpStock({}).catch(() => null);
+    if (live && live.source === 'erp') {
+      for (const r of live.rows) {
+        if (r.stockNumber !== storeNumber || !itemSet.has(r.itemNumber)) continue;
+        ledger.set(`${r.itemNumber}|${r.stockUnitCode}`, r.quantity);
       }
     }
-    // Van store, or ERP unavailable → the local ledger.
-    return this.vanQtyByPool(storeNumber, itemNumbers);
+    return ledger;
   }
 
   /** Every non-van depot's store number — the stores a van load may be sourced from. */
