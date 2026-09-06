@@ -191,6 +191,49 @@ export class ReportsService {
   // ── End-of-Day cash reconciliation ─────────────────────────────────────────
 
   /** Raw per-salesman aggregates for [from, to]. Money in fils. */
+  /**
+   * Damaged/expired quarantine inventory per rep (the goods returned as damaged or
+   * expired, kept out of sellable van stock). Rep-scoped. Feeds the
+   * "Damaged Quantities Report for Sales Representatives".
+   */
+  async damagedQuantities(
+    repId: string | undefined,
+    visibleRepIds?: string[] | null,
+  ): Promise<
+    Array<{
+      repId: string;
+      repName: string | null;
+      itemNumber: string;
+      itemName: string | null;
+      stockUnitCode: string;
+      quantity: number;
+    }>
+  > {
+    const rows: Array<Record<string, string | number | null>> = await this.ds.query(
+      `
+      SELECT r.id AS "repId", COALESCE(r.name_ar, r.name_en) AS "repName",
+             ic.item_number AS "itemNumber", ic.name_ar AS "itemName",
+             d.stock_unit_code AS "stockUnitCode", d.quantity AS "quantity"
+        FROM damaged_stock d
+        JOIN reps r ON r.id = d.rep_id
+        JOIN item_cart ic ON ic.id = d.product_id
+       WHERE d.quantity <> 0
+         AND ($1::uuid IS NULL OR r.id = $1::uuid)
+         AND ($2::uuid[] IS NULL OR r.id = ANY($2::uuid[]))
+       ORDER BY r.name_ar, ic.name_ar
+      `,
+      [repId ?? null, visibleRepIds ?? null],
+    );
+    return rows.map((r) => ({
+      repId: String(r.repId),
+      repName: (r.repName as string | null) ?? null,
+      itemNumber: String(r.itemNumber),
+      itemName: (r.itemName as string | null) ?? null,
+      stockUnitCode: String(r.stockUnitCode ?? ''),
+      quantity: Number(r.quantity ?? 0),
+    }));
+  }
+
   private async eodRows(
     from: string,
     to: string,

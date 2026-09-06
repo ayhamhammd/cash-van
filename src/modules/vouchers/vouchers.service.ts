@@ -17,6 +17,7 @@ import { Payment } from './entities/payment.entity';
 import { PaymentCheque } from './entities/payment-cheque.entity';
 import { TransactionKind } from './entities/transaction-kind.entity';
 import { VanStock } from '../products/entities/van-stock.entity';
+import { DamagedStock } from '../products/entities/damaged-stock.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
@@ -1010,8 +1011,21 @@ export class VouchersService implements OnModuleInit {
       header.isPosted = true;
       await em.getRepository(VoucherHeader).save(header);
 
+      // Damaged/expired returns are quarantined — they do NOT re-enter sellable
+      // van stock. When the feature is on, EVERY return is damaged/expired (the app
+      // limits the reason), so a RETURN routes to the damaged ledger instead of the
+      // van's sellable 'in'. See docs/SPEC-damaged-expired-returns.md.
+      const toDamaged =
+        header.transKind === 'RETURN' && (await this.settings.damagedReturnsEnabled());
       const effect = VAN_EFFECT[header.transKind];
-      if (effect) {
+      if (toDamaged) {
+        const rep = await this.resolveRep(em, header.userCode);
+        if (rep) {
+          for (const line of header.transactions ?? []) {
+            await this.applyLineToDamaged(em, rep.id, line);
+          }
+        }
+      } else if (effect) {
         const rep = await this.resolveRep(em, header.userCode);
         if (rep) {
           for (const line of header.transactions ?? []) {
@@ -1175,6 +1189,29 @@ export class VouchersService implements OnModuleInit {
     vs.snapshotAt = new Date();
     if (effect === 'in') vs.loadedAt = new Date();
     await repo.save(vs);
+  }
+
+  /** Accrue a returned line into the rep's damaged (quarantine) inventory. */
+  private async applyLineToDamaged(
+    em: EntityManager,
+    repId: string,
+    line: VoucherTransaction,
+  ): Promise<void> {
+    const product = await em
+      .getRepository(ItemCart)
+      .findOne({ where: { itemNumber: line.itemNumber } });
+    if (!product) return;
+    const qty = Math.round(Number(line.itemQty) || 0);
+    if (qty <= 0) return;
+
+    const stockUnitCode = line.stockUnitCode ?? '';
+    const repo = em.getRepository(DamagedStock);
+    const ds =
+      (await repo.findOne({ where: { repId, productId: product.id, stockUnitCode } })) ??
+      repo.create({ repId, productId: product.id, stockUnitCode, quantity: 0 });
+    ds.quantity += qty;
+    ds.updatedAt = new Date();
+    await repo.save(ds);
   }
 
   async update(

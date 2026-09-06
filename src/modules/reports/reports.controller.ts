@@ -101,6 +101,21 @@ export class ReportsController {
     );
   }
 
+  @Get('damaged-quantities')
+  @ApiOperation({
+    summary: 'Damaged / expired quarantine inventory per rep',
+    description:
+      'The goods reps returned as damaged/expired, held out of sellable van stock. ' +
+      'Rep-scoped. Pass repId to focus one salesman.',
+  })
+  @ApiQuery({ name: 'repId', required: false })
+  async damagedQuantities(
+    @Query('repId') repId: string | undefined,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.reports.damagedQuantities(repId, await this.repScope.visibleRepIds(user));
+  }
+
   @Get('rep-trips')
   @ApiOperation({
     summary: 'Salesman trips for a day',

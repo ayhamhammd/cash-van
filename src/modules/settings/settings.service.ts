@@ -159,6 +159,15 @@ export class SettingsService {
     return row?.salesmanActivationEnabled === true;
   }
 
+  /** Program feature: route damaged/expired returns to quarantine, not sellable van stock. */
+  async damagedReturnsEnabled(): Promise<boolean> {
+    const row = await this.repo.findOne({
+      where: { id: 1 },
+      select: { id: true, damagedReturnsEnabled: true },
+    });
+    return row?.damagedReturnsEnabled === true;
+  }
+
   async update(dto: UpdateAppSettingsDto): Promise<AppSettingsView> {
     const row = await this.requireRow();
     // Main settlement accounts are ERP chart-of-accounts refs (validated ERP-side on post).
