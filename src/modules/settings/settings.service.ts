@@ -264,6 +264,7 @@ export class SettingsService {
     taxCalcMethod: TaxCalcMethod;
     timezone: string;
     locale: string;
+    damagedReturnsEnabled: boolean;
   }> {
     const row = await this.requireRow();
     return {
@@ -277,6 +278,8 @@ export class SettingsService {
       taxCalcMethod: row.taxCalcMethod,
       timezone: row.timezone,
       locale: row.locale,
+      // Lets the app limit return reasons to damaged/expired when the feature is on.
+      damagedReturnsEnabled: row.damagedReturnsEnabled,
     };
   }
 
