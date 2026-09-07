@@ -196,6 +196,13 @@ interface ErpCategory {
   parentId?: string | null;
 }
 
+/** One substitute pair from the ERP `GET /api/v1/inventory/item-alternatives`. */
+interface ErpItemAlternative {
+  originalSkuCode: string;
+  alternativeSkuCode: string;
+  allowInSales?: boolean;
+}
+
 /** A unit row from the ERP `GET /api/v1/units` (deduped master). */
 interface ErpUnit {
   name: string;
@@ -1189,6 +1196,7 @@ export class ErpSyncService {
       { entity: 'unit',            tier: 'fast',  run: () => this.pullUnits() },
       { entity: 'tobacco_profile', tier: 'fast',  run: () => this.pullTobaccoProfiles() },
       { entity: 'item',            tier: 'fast',  run: () => this.pullItems() },
+      { entity: 'item_alternative', tier: 'fast', run: () => this.pullItemAlternatives() },
       { entity: 'customer',        tier: 'fast',  run: () => this.pullCustomers() },
       { entity: 'price_list',      tier: 'fast',  run: () => this.pullPriceLists() },
       { entity: 'customer_price',  tier: 'heavy', run: () => this.pullCustomerPrices() },
@@ -1463,6 +1471,140 @@ export class ErpSyncService {
       n += 1;
     }
     return n;
+  }
+
+  /**
+   * Mirror the ERP's Item Alternatives onto `item_cart.alt_group`.
+   *
+   * The ERP stores substitutes as PAIRS ("191 may stand in for 193"), but the only
+   * question anything downstream asks is "are these two the same thing for this
+   * purpose?", so the pairs are collapsed here into one key per mutually
+   * substitutable SET: 130↔131↔132 becomes three rows all carrying `alt_group` 130.
+   * A chain (a↔b, b↔c) is one set, which is why this is a union-find and not a
+   * lookup of one row's direct partners. The key is the lowest item number in the
+   * set — stable across syncs regardless of which pair happens to arrive first, and
+   * legible when someone reads the column.
+   *
+   * `allowInSales = false` pairs are dropped: a van sells, and a substitution the
+   * ERP has disabled for sales must not merge two lines on a customer's receipt.
+   *
+   * WIPE GUARD, same reasoning as pruneVanished: if the pull yields no pairs at all
+   * (outage, auth blip, a scope the key lacks) that is not "the client deleted every
+   * alternative" — the existing groups are left alone rather than cleared.
+   */
+  private async pullItemAlternatives(): Promise<EntityRunOutcome> {
+    const pairs: Array<[string, string]> = [];
+    // The ERP CLAMPS pageSize to 100 and says nothing about it. So the loop ends on
+    // the reported total or an empty page — never on "the page came back smaller
+    // than I asked for", which here would silently stop after the first 100 of 719
+    // pairs and split every group beyond it.
+    const pageSize = 100;
+    let page = 1;
+    let fetched = 0;
+    let total = Number.POSITIVE_INFINITY;
+    let skipped = 0;
+    while (page <= 500) {
+      const { data, total: t } = await this.erp.list<ErpItemAlternative>(
+        'inventory/item-alternatives',
+        { page, pageSize },
+      );
+      if (t) total = t;
+      if (data.length === 0) break;
+      fetched += data.length;
+      for (const r of data) {
+        const a = String(r.originalSkuCode ?? '').trim();
+        const b = String(r.alternativeSkuCode ?? '').trim();
+        if (!a || !b || a === b) continue;
+        if (r.allowInSales === false) {
+          skipped += 1;
+          continue;
+        }
+        pairs.push([a, b]);
+      }
+      if (fetched >= total) break;
+      page += 1;
+    }
+
+    // Union-find: each pair welds two items into the same set.
+    const parent = new Map<string, string>();
+    const find = (x: string): string => {
+      let root = parent.get(x) ?? x;
+      if (root !== x) {
+        root = find(root);
+        parent.set(x, root);
+      }
+      return root;
+    };
+    const union = (a: string, b: string): void => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent.set(ra, rb);
+    };
+    for (const [a, b] of pairs) {
+      if (!parent.has(a)) parent.set(a, a);
+      if (!parent.has(b)) parent.set(b, b);
+      union(a, b);
+    }
+
+    // Set → its lowest item number, numeric-aware so "9" sorts before "130".
+    const members = new Map<string, string[]>();
+    for (const item of parent.keys()) {
+      const root = find(item);
+      const list = members.get(root) ?? [];
+      list.push(item);
+      members.set(root, list);
+    }
+    const groupOf = new Map<string, string>();
+    for (const list of members.values()) {
+      // A set of one is not a set: a pair both of whose sides were filtered out
+      // leaves a lone member, and an item alone in its group must never merge.
+      if (list.length < 2) continue;
+      const key = [...list].sort((x, y) =>
+        x.localeCompare(y, undefined, { numeric: true }),
+      )[0];
+      for (const item of list) groupOf.set(item, key);
+    }
+
+    if (groupOf.size === 0) {
+      const existing: Array<{ n: string }> = await this.dataSource.query(
+        `SELECT count(*)::text AS n FROM item_cart WHERE alt_group IS NOT NULL`,
+      );
+      if (Number(existing[0]?.n ?? 0) > 0) {
+        this.logger.warn(
+          'item_alternative: skipped — ERP returned no usable pairs (wipe guard)',
+        );
+        return { count: 0, skipped };
+      }
+      return { count: 0, skipped };
+    }
+
+    const itemNumbers = [...groupOf.keys()];
+    const groups = itemNumbers.map((n) => groupOf.get(n) as string);
+    // One statement for the whole catalogue: unnest the two parallel arrays into a
+    // (item_number, group) table and join. `IS DISTINCT FROM` keeps the write to
+    // rows that actually changed, so a no-op sync touches nothing.
+    const stamped: [unknown[], number] = await this.dataSource.query(
+      `UPDATE item_cart AS i
+          SET alt_group = v.g
+         FROM (SELECT unnest($1::text[]) AS n, unnest($2::text[]) AS g) AS v
+        WHERE i.item_number = v.n
+          AND i.alt_group IS DISTINCT FROM v.g`,
+      [itemNumbers, groups],
+    );
+    // …and drop the group from any item the ERP no longer lists as an alternative.
+    const cleared: [unknown[], number] = await this.dataSource.query(
+      `UPDATE item_cart
+          SET alt_group = NULL
+        WHERE alt_group IS NOT NULL
+          AND item_number <> ALL($1::text[])`,
+      [itemNumbers],
+    );
+    const changed = (stamped[1] ?? 0) + (cleared[1] ?? 0);
+    this.logger.log(
+      `item_alternative: ${pairs.length} pairs → ${new Set(groupOf.values()).size} groups; ` +
+        `${itemNumbers.length} items grouped, ${changed} row(s) updated`,
+    );
+    return { count: itemNumbers.length, skipped };
   }
 
   /** Pull ERP customers → upsert cash-van customers (keyed by code == customer_number). */

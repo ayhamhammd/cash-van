@@ -103,6 +103,17 @@ export class ItemCart extends BaseEntity {
   @Column({ name: 'consumer_price_fils', type: 'integer', nullable: true })
   consumerPriceFils?: number | null;
 
+  /**
+   * The ERP "Item Alternatives" group this item belongs to — every mutually
+   * substitutable item shares one key (the lowest item number in the set).
+   * NULL when the ERP declares no alternative for it, and an item with no group
+   * is never treated as a substitute for anything. Mirrored by erp-sync; the
+   * receipt's line merge is the consumer.
+   */
+  @Index('idx_item_cart_alt_group')
+  @Column({ name: 'alt_group', type: 'text', nullable: true })
+  altGroup?: string | null;
+
   @OneToMany(() => ExpiryItem, (ex) => ex.item)
   expiries?: ExpiryItem[];
 }
