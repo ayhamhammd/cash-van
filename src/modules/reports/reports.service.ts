@@ -23,6 +23,7 @@ export interface EodRow {
   totalDueFils: number; // expectedCash + previousBalance
   visitCount: number; // customer visits in range
   noActionVisitCount: number; // visits with no voucher AND no collection that day
+  damagedQty: number; // damaged/expired units returned in the period (0 when the feature is off)
   lastSettledTo: string | null;
 }
 
@@ -300,6 +301,19 @@ export class ReportsService {
         FROM customer_visits v
         WHERE v.visited_at >= $1::date AND v.visited_at < ($2::date + 1)
         GROUP BY v.rep_id
+      ),
+      dmg AS (
+        -- Damaged/expired units returned in the period per rep. When the feature is
+        -- on, every RETURN is damaged/expired (the app limits the reason), so this
+        -- is the RETURN line quantity; gated to 0 in the SELECT when the feature is off.
+        SELECT r.id AS rep_id, ROUND(COALESCE(SUM(t.item_qty), 0))::int AS damaged_qty
+        FROM voucher_headers h
+        JOIN voucher_transactions t ON t.voucher_number = h.voucher_number
+        JOIN users u ON u.user_number = h.user_code
+        JOIN reps  r ON r.user_id = u.id
+        WHERE h.is_posted = true AND h.trans_kind = 'RETURN'
+          AND h.in_date >= $1::date AND h.in_date < ($2::date + 1)
+        GROUP BY r.id
       )
       SELECT r.id AS "repId", r.code AS "repCode", r.name_ar AS "repName",
         COALESCE(coll.collected_cash,0)::bigint   AS "collectedCashFils",
@@ -311,6 +325,8 @@ export class ReportsService {
         COALESCE(bal.new_balance_fils,0)::bigint  AS "previousBalanceFils",
         COALESCE(vis.visit_count,0)::int          AS "visitCount",
         COALESCE(vis.no_action_count,0)::int      AS "noActionVisitCount",
+        CASE WHEN (SELECT damaged_returns_enabled FROM app_settings WHERE id = 1)
+             THEN COALESCE(dmg.damaged_qty, 0) ELSE 0 END::int AS "damagedQty",
         to_char(bal.period_to,'YYYY-MM-DD')       AS "lastSettledTo"
       FROM reps r
       LEFT JOIN coll ON coll.rep_id = r.id
@@ -318,13 +334,15 @@ export class ReportsService {
       LEFT JOIN disc ON disc.rep_id = r.id
       LEFT JOIN bal  ON bal.rep_id  = r.id
       LEFT JOIN vis  ON vis.rep_id  = r.id
+      LEFT JOIN dmg  ON dmg.rep_id  = r.id
       WHERE r.deleted_at IS NULL
         AND ($3::uuid IS NULL OR r.id = $3::uuid)
         -- Scope: null = unrestricted. An EMPTY array yields no rows, which is
         -- the correct answer for a supervisor with no salesmen assigned.
         AND ($4::uuid[] IS NULL OR r.id = ANY($4::uuid[]))
         AND (coll.rep_id IS NOT NULL OR vp.rep_id IS NOT NULL
-             OR vis.rep_id IS NOT NULL OR COALESCE(bal.new_balance_fils,0) <> 0)
+             OR vis.rep_id IS NOT NULL OR dmg.rep_id IS NOT NULL
+             OR COALESCE(bal.new_balance_fils,0) <> 0)
       ORDER BY r.name_ar
       `,
       [from, to, repId ?? null, visibleRepIds ?? null],
@@ -349,6 +367,7 @@ export class ReportsService {
         totalDueFils: expectedCashFils + previousBalanceFils,
         visitCount: n('visitCount'),
         noActionVisitCount: n('noActionVisitCount'),
+        damagedQty: n('damagedQty'),
         lastSettledTo: r.lastSettledTo,
       };
     });
@@ -380,6 +399,7 @@ export class ReportsService {
         totalDueFils: sum('totalDueFils'),
         visitCount: sum('visitCount'),
         noActionVisitCount: sum('noActionVisitCount'),
+        damagedQty: sum('damagedQty'),
       },
     };
   }
