@@ -878,13 +878,20 @@ export class ErpOutboxService {
     const originalInvoiceNumber = map?.erpCode ?? ref;
     const lines = await this.lines.find({ where: { voucherNumber } });
     const skuOf = await this.erpSkuResolver(lines);
+    // Damaged/expired returns are quarantined: push the stock to the configured
+    // damaged warehouse, not the van, so the ERP does not re-add it to sellable
+    // van stock. Null (feature off / unset) → the van, as before. See
+    // docs/SPEC-damaged-expired-returns.md §8b.
+    const damagedWh = await this.settings.damagedReturnWarehouseCode();
+    const warehouseCode = damagedWh ?? this.vanStoreOf(lines, header.userCode);
     return {
       path: 'sales-returns',
       body: {
         externalId: voucherNumber,
         deviceId: header.userCode,
         ...(await this.customerRef(header.customerNumber)),
-        warehouseCode: this.vanStoreOf(lines, header.userCode), // physical return to the van
+        warehouseCode, // van, or the damaged warehouse for a damaged/expired return
+        ...(damagedWh ? { reason: 'Damaged/expired return (quarantine)' } : {}),
         originalInvoiceNumber,
         lines: lines.map((l) => ({
           skuCode: skuOf(l), // red goes back to the red SKU, not the base one

@@ -41,6 +41,7 @@ export interface AppSettingsView {
   aiInferQuota: number;
   tobaccoTaxEnabled: boolean;
   damagedReturnsEnabled: boolean;
+  damagedWarehouseCode: string | null;
   accounting: {
     /** The three main settlement accounts (ERP GL refs). null = unset. */
     salesAccount: { id: string | null; code: string | null };
@@ -166,6 +167,20 @@ export class SettingsService {
       select: { id: true, damagedReturnsEnabled: true },
     });
     return row?.damagedReturnsEnabled === true;
+  }
+
+  /**
+   * The ERP warehouse code damaged/expired returns push to (instead of the van),
+   * or null when the feature is off / unset → the return falls back to the van.
+   */
+  async damagedReturnWarehouseCode(): Promise<string | null> {
+    const row = await this.repo.findOne({
+      where: { id: 1 },
+      select: { id: true, damagedReturnsEnabled: true, damagedWarehouseCode: true },
+    });
+    if (!row?.damagedReturnsEnabled) return null;
+    const code = row.damagedWarehouseCode?.trim();
+    return code ? code : null;
   }
 
   async update(dto: UpdateAppSettingsDto): Promise<AppSettingsView> {
@@ -385,6 +400,7 @@ export class SettingsService {
       aiInferQuota: row.aiInferQuota,
       tobaccoTaxEnabled: row.tobaccoTaxEnabled,
       damagedReturnsEnabled: row.damagedReturnsEnabled,
+      damagedWarehouseCode: row.damagedWarehouseCode ?? null,
       accounting: {
         salesAccount: { id: row.erpSalesAccountId ?? null, code: row.erpSalesAccountCode ?? null },
         cashCollectionAccount: { id: row.erpCashCollectionAccountId ?? null, code: row.erpCashCollectionAccountCode ?? null },

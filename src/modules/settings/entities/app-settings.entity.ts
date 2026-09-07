@@ -171,6 +171,14 @@ export class AppSettings {
   damagedReturnsEnabled!: boolean;
 
   /**
+   * ERP warehouse code a damaged/expired return is pushed to (instead of the van),
+   * so the ERP quarantines the goods. Null → fall back to the van. See
+   * docs/SPEC-damaged-expired-returns.md §8b.
+   */
+  @Column({ name: 'damaged_warehouse_code', type: 'text', nullable: true })
+  damagedWarehouseCode?: string | null;
+
+  /**
    * FastReport-style banded voucher layout (the "Voucher Designer" document).
    * Stored whole; null = use DEFAULT_VOUCHER_REPORT. See voucher-report.dto.ts.
    */

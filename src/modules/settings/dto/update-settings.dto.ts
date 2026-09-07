@@ -118,4 +118,15 @@ export class UpdateAppSettingsDto {
   @IsOptional()
   @IsBoolean()
   damagedReturnsEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    example: 'DMG',
+    nullable: true,
+    description: 'ERP warehouse code damaged/expired returns are pushed to (instead of the van).',
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  @MaxLength(64)
+  damagedWarehouseCode?: string | null;
 }
