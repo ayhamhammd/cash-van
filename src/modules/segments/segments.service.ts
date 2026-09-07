@@ -611,6 +611,21 @@ export class SegmentsService {
       }
     });
 
+    // A customer belongs to ONE segment, so a rule match already held by another
+    // segment is refused by the unique index — and `.orIgnore()` above swallows it.
+    // Say how many, or a dynamic segment quietly materialises smaller than its own
+    // rules claim and nobody can tell why.
+    const landed = ids.length
+      ? await this.members.count({ where: { segmentId, customerId: In(ids) } })
+      : 0;
+    const skipped = ids.length - landed;
+    if (skipped > 0) {
+      this.logger.warn(
+        `segment ${segmentId}: ${skipped} of ${ids.length} matching customers were ` +
+          `NOT added — each already belongs to another segment`,
+      );
+    }
+
     this.events.emit('segment.changed', { segmentId, reason: 'refreshed' });
     return { matched: ids.length, total: await this.count(segmentId) };
   }
