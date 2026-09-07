@@ -266,6 +266,25 @@ export class SegmentsService {
     const wanted = [...ids];
     if (!wanted.length) return { added: 0, total: await this.count(id) };
 
+    // A customer belongs to ONE segment. Refuse an add that would put them in a
+    // second one, and name the segment holding them so the answer is actionable.
+    // This used to fail SILENTLY: the insert below runs `.orIgnore()`, so the
+    // unique violation was swallowed, the caller was told "added", and nothing
+    // was written — leaving no way to discover why the customer never appeared.
+    const clash = await this.members
+      .createQueryBuilder('m')
+      .innerJoin(CustomerSegment, 's', 's.id = m.segment_id AND s.deleted_at IS NULL')
+      .where('m.customer_id IN (:...ids)', { ids: wanted })
+      .andWhere('m.segment_id != :id', { id })
+      .select(['s.name_ar AS "segmentName"'])
+      .limit(1)
+      .getRawOne<{ segmentName: string }>();
+    if (clash) {
+      throw new BadRequestException(
+        `العميل مضاف على شريحة أخرى (${clash.segmentName})`,
+      );
+    }
+
     // Pin any of these that a rule had auto-added (source='RULE') as MANUAL, so a
     // later refresh — which prunes only RULE rows — can never silently drop a
     // customer an admin explicitly added.
