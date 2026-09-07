@@ -3,26 +3,15 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 
 import { InvoiceTemplate } from './entities/invoice-template.entity';
+import { Warehouse } from '../warehouses/entities/warehouse.entity';
 import {
   CreateInvoiceTemplateDto,
+  DOCUMENT_TYPES,
   UpdateInvoiceTemplateDto,
   type DocumentType,
   type PaperSize,
 } from './dto/invoice-template.dto';
-import {
-  BUILTIN_BARCODE_LABEL,
-  BUILTIN_INVOICE,
-  BUILTIN_SCALE_LABEL,
-} from './builtin-layouts';
-
-const SPECIAL_LABEL_LAYOUTS: Partial<Record<DocumentType, Record<string, unknown>>> = {
-  SCALE_LABEL: BUILTIN_SCALE_LABEL,
-  BARCODE_LABEL: BUILTIN_BARCODE_LABEL,
-};
-const SPECIAL_LABEL_PAPER: Partial<Record<DocumentType, PaperSize>> = {
-  SCALE_LABEL: 'THERMAL_80',
-  BARCODE_LABEL: 'A4',
-};
+import { builtinFor, type BuiltinLayout } from './builtin-layouts';
 
 /** What `resolve` returns when nothing is saved: a template with no row behind it. */
 export interface BuiltinTemplate {
@@ -32,20 +21,34 @@ export interface BuiltinTemplate {
   paperSize: PaperSize;
   isDefault: true;
   branchId: null;
-  layout: Record<string, unknown>;
+  layout: BuiltinLayout;
   createdAt: null;
   updatedAt: null;
 }
 
-export function toBuiltin(documentType: DocumentType, paperSize: PaperSize = 'A4'): BuiltinTemplate {
+export type ResolvedTemplate = InvoiceTemplate | BuiltinTemplate;
+
+/** Which store is printing: the warehouse id, or its whNumber to look up. */
+export interface ResolveScope {
+  branchId?: string;
+  storeNumber?: string;
+}
+
+export interface ResolveAllResult {
+  templates: Record<DocumentType, ResolvedTemplate>;
+  /** Newest `updatedAt` among saved templates (ISO), or "builtin" when none is saved. */
+  version: string;
+}
+
+export function toBuiltin(documentType: DocumentType): BuiltinTemplate {
   return {
     id: null,
-    name: 'Built-in Default',
+    name: 'Built-in default',
     documentType,
-    paperSize: SPECIAL_LABEL_PAPER[documentType] ?? paperSize,
+    paperSize: 'THERMAL_80',
     isDefault: true,
     branchId: null,
-    layout: SPECIAL_LABEL_LAYOUTS[documentType] ?? BUILTIN_INVOICE,
+    layout: builtinFor(documentType),
     createdAt: null,
     updatedAt: null,
   };
@@ -71,6 +74,8 @@ export class InvoiceTemplatesService {
   constructor(
     @InjectRepository(InvoiceTemplate)
     private readonly templates: Repository<InvoiceTemplate>,
+    @InjectRepository(Warehouse)
+    private readonly warehouses: Repository<Warehouse>,
   ) {}
 
   list(branchId?: string): Promise<InvoiceTemplate[]> {
@@ -88,11 +93,13 @@ export class InvoiceTemplatesService {
 
   /**
    * Fallback chain:
-   *   1. branch-specific template for this documentType
+   *   1. template pinned to this store for this documentType
    *   2. global default (branchId null, isDefault true)
    *   3. built-in layout
+   * An unknown storeNumber pins nothing, so the chain starts at the global default.
    */
-  async resolve(documentType: DocumentType, branchId?: string): Promise<InvoiceTemplate | BuiltinTemplate> {
+  async resolve(documentType: DocumentType, scope: ResolveScope = {}): Promise<ResolvedTemplate> {
+    const branchId = await this.branchIdFor(scope);
     if (branchId) {
       const pinned = await this.templates.findOne({ where: { documentType, branchId } });
       if (pinned) return pinned;
@@ -101,6 +108,27 @@ export class InvoiceTemplatesService {
       where: { documentType, isDefault: true, branchId: IsNull() },
     });
     if (def) return def;
+    return toBuiltin(documentType);
+  }
+
+  /**
+   * Every kind at once, for a device to cache. Same chain as `resolve`, run
+   * over one read of the table. `version` moves whenever any saved template
+   * changes, so a device comparing it knows to refresh.
+   */
+  async resolveAll(scope: ResolveScope = {}): Promise<ResolveAllResult> {
+    const branchId = await this.branchIdFor(scope);
+    const rows = await this.templates.find();
+    const templates = {} as Record<DocumentType, ResolvedTemplate>;
+    for (const kind of DOCUMENT_TYPES) {
+      const pinned = branchId ? rows.find((r) => r.documentType === kind && r.branchId === branchId) : undefined;
+      const def = rows.find((r) => r.documentType === kind && r.isDefault && r.branchId == null);
+      templates[kind] = pinned ?? def ?? toBuiltin(kind);
+    }
+    return { templates, version: versionOf(rows) };
+  }
+
+  builtin(documentType: DocumentType): BuiltinTemplate {
     return toBuiltin(documentType);
   }
 
@@ -151,4 +179,23 @@ export class InvoiceTemplatesService {
       { isDefault: false },
     );
   }
+
+  /** `branchId` wins; otherwise a storeNumber is looked up. Unknown store → undefined. */
+  private async branchIdFor({ branchId, storeNumber }: ResolveScope): Promise<string | undefined> {
+    if (branchId) return branchId;
+    if (!storeNumber) return undefined;
+    const wh = await this.warehouses.findOne({ where: { whNumber: storeNumber } });
+    return wh?.id;
+  }
+}
+
+/** Newest updatedAt as ISO, or "builtin" when no template is saved. */
+export function versionOf(rows: ReadonlyArray<Pick<InvoiceTemplate, 'updatedAt'>>): string {
+  let newest: Date | null = null;
+  for (const r of rows) {
+    const at = r.updatedAt instanceof Date ? r.updatedAt : new Date(r.updatedAt);
+    if (Number.isNaN(at.getTime())) continue;
+    if (!newest || at > newest) newest = at;
+  }
+  return newest ? newest.toISOString() : 'builtin';
 }

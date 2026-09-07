@@ -27,7 +27,7 @@ export class InvoiceTemplate {
   @Column({ type: 'text' })
   name!: string;
 
-  /** SALE_INVOICE | RETURN_INVOICE | … — see DOCUMENT_TYPES in the DTO. */
+  /** The voucher kind: SALE | RETURN | TRANSFER | … — see DOCUMENT_TYPES in the DTO. */
   @Column({ name: 'document_type', type: 'text' })
   documentType!: string;
 
