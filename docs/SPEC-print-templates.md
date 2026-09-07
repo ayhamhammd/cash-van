@@ -110,6 +110,11 @@ interface Element {
 - `width` is the box width in mm; text wraps inside it; overflow is clipped.
 - Font size is points: 1 pt = 25.4/72 mm.
 - A renderer may ignore `color` on a monochrome device.
+- **Convention for authored layouts:** a zone's height is only a *minimum*, and
+  fixed elements do not push flow elements down. So put fixed elements (text,
+  logo, dividers) in the header and footer, and flow elements (tables, totals)
+  in the body; size the header/footer `minHeight` to cover their children. The
+  built-ins follow this and the designer should nudge authors the same way.
 
 ## 4. Placeholder tokens
 
