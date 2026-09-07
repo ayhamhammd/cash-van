@@ -142,6 +142,42 @@ label, so reports and the posting reroute can act on it.
 
 ---
 
+## 8b. ERP integration plan (the "damaged on the ERP" piece)
+
+**Finding (checked the ERP repo):** there is **no dedicated damaged-warehouse
+feature** — `warehouses` has only `is_van`/`code`/`name`; no `is_damaged`. BUT the
+ERP already has all the primitives:
+
+- Warehouses are freely creatable with a `code` (`settings/warehouses` → `WarehouseFormSheet`).
+- `POST /api/v1/sales-returns` takes an optional **`warehouseCode`** and moves the
+  returned stock into that warehouse (not hard-wired to the van).
+- `return_reason_codes` ships **`DAMAGED`** already; returns carry `reasonCodeId`.
+- `POST /api/v1/stock-adjustments` (IN/OUT + reason) and a **`SCRAPPED`** settlement
+  status exist for write-offs.
+
+### Recommended — Option 1 (no ERP code change)
+1. **ERP data:** create a warehouse named "تالف/Damaged" (non-van) with a code, e.g. `DMG`.
+2. **cash-van:** add a setting `damaged_warehouse_code` (app_settings). In
+   `erp-outbox.buildReturn`, when `damagedReturnsEnabled` and the voucher is a
+   return, send `warehouseCode = damaged_warehouse_code` (and the `DAMAGED`
+   reason code) instead of `vanStoreOf(...)`. Gated by the flag → no change when off.
+3. **Result:** the ERP still credits the customer (sales-return) but puts the goods
+   in the Damaged warehouse, mirroring cash-van's `damaged_stock`. ERP and cash-van agree.
+
+Effort: one cash-van change + one data step; **no ERP deploy**.
+
+### Optional — Option E2 (ERP-native visibility, separate ERP release)
+Only if the office wants damaged inventory surfaced *inside* the ERP:
+- `warehouses.is_damaged` flag (migration) + mark the Damaged warehouse.
+- A "Damaged Inventory" report in the ERP dashboard (filter `item_stock` to
+  `is_damaged` warehouses).
+- Exclude `is_damaged` warehouses from `van/stock` availability so damaged units
+  never read as sellable in any downstream picker.
+
+Effort: ERP migration + one report + a filter; its own ERP release.
+
+---
+
 ## 8. Rules to get right
 - **Off by default** — `damagedReturnsEnabled=false` changes nothing; every branch checks it.
 - **Damaged units never re-enter sellable stock** — that is the whole point (§3.2).
