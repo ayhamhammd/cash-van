@@ -53,6 +53,7 @@ export class UsersService {
       canPrintLineDiscount: dto.canPrintLineDiscount ?? false,
       canRequestStock: dto.canRequestStock ?? false,
       canApproveStockRequest: dto.canApproveStockRequest ?? false,
+      canCollectOnSale: dto.canCollectOnSale ?? false,
       canFindCustomers: dto.canFindCustomers ?? false,
       routesOnly: dto.routesOnly ?? false,
       canEditCustomerCredit: dto.canEditCustomerCredit ?? false,

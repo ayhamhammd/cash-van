@@ -196,6 +196,7 @@ export class AuthService {
       // step with assertCan (which bypasses for those roles).
       canApproveStockRequest:
         user.canApproveStockRequest || user.role === 'admin' || user.role === 'manager',
+      canCollectOnSale: user.canCollectOnSale,
       canFindCustomers: user.canFindCustomers,
       routesOnly: user.routesOnly,
       canEditCustomerCredit: user.canEditCustomerCredit,

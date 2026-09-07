@@ -649,10 +649,15 @@ export class StockRequestsService {
       agg.set(key, { itemNumber: key.slice(0, sep), stockUnitCode: key.slice(sep + 1), qty });
     }
 
+    // Zero-qty rows are KEPT. A ledger row for the main store means the store
+    // carries the item — it is simply out of it right now, and the picker shows it
+    // with a red "بالمستودع: 0" badge so a rep can still raise a request for it.
+    // Dropping them made those items indistinguishable from items the main store
+    // does not carry at all, which is the only membership signal the picker has.
     return {
       storeNumber: main.number,
       storeName: main.name,
-      items: [...agg.values()].filter((i) => i.qty !== 0),
+      items: [...agg.values()],
     };
   }
 

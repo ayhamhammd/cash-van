@@ -40,6 +40,16 @@
       ],
       "port": 3005,
       "autoPort": false
+    },
+    {
+      "name": "erp-webpack",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd ../ERP && npx next dev -p 3005"
+      ],
+      "port": 3005,
+      "autoPort": false
     }
   ]
 }

@@ -133,6 +133,14 @@ export class User extends BaseEntity {
   canApproveStockRequest!: boolean;
 
   /**
+   * May this salesman take a partial payment on a CREDIT sale from the cart
+   * (the "amount paid" field), producing a collection receipt against the
+   * invoice? Per-rep permission. See docs/SPEC-pay-on-credit-sale.md.
+   */
+  @Column({ name: 'can_collect_on_sale', type: 'boolean', default: false })
+  canCollectOnSale!: boolean;
+
+  /**
    * Reveals the "find customers" screen on the salesman app — GPS prospecting
    * around the rep's own position.
    *

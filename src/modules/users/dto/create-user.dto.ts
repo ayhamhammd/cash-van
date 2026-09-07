@@ -121,6 +121,8 @@ export class CreateUserDto {
   @ApiPropertyOptional({ description: "May approve or reject someone else's stock request." })
   @IsOptional() @IsBoolean() canApproveStockRequest?: boolean;
 
+  @IsOptional() @IsBoolean() canCollectOnSale?: boolean;
+
   @ApiPropertyOptional({
     description:
       'Reveals the Find Customers screen on the salesman app. Visibility only — ' +
