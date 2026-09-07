@@ -31,6 +31,12 @@ returns, in order: the template pinned to that store → the global default for
 the kind → the built-in layout (`id: null`). `branchId` is the warehouse **id**;
 `storeNumber=<whNumber>` is accepted as an alternative and looked up.
 
+When **neither** `branchId` nor `storeNumber` is given, the API falls back to
+the **caller's own van store**: the signed-in user's rep row names a store, and
+a salesman printing from the app therefore gets the templates pinned to their
+van without the device having to know its store number. An office user with no
+rep row falls through to the global chain.
+
 `GET /invoice-templates/resolve-all?storeNumber=VAN1` returns every kind at
 once, for a device to cache:
 
@@ -143,9 +149,37 @@ as an empty string. Money tokens are formatted with the company decimals
 | invoice.taxExemptionNumber | |
 | invoice.qrData | tax QR payload/image when present |
 
-Items table column keys: `name`, `sku`, `barcode`, `qty`, `unit`, `price`,
-`taxPct`, `discount`, `tax`, `total`. A gift line (100 % discounted) prints
-`name` with the suffix " (هدية)".
+### Items table columns
+
+| key | meaning |
+|---|---|
+| name | item name (Arabic); a gift line gets the suffix " (هدية)" |
+| sku | item number |
+| barcode | item barcode |
+| qty | quantity in the sold unit |
+| unit | unit name |
+| price | unit price |
+| taxPct | the line's tax rate as a whole percent, e.g. "16%" |
+| discount | discount amount on the line |
+| tax | tax amount on the line |
+| gross | qty × price, before discount and tax |
+| total | **net of discount, including tax** — what the line costs the customer |
+
+`total` and `gross` are deliberately separate: a receipt that already shows
+`price` and `discount` columns needs the *net* in the last column, while a
+stock document that shows neither wants the plain extended amount. A gift line
+prints price 0, discount = its gross, total 0.
+
+**Money inside a table cell is a bare number** — no currency — because an 80 mm
+row has no width to repeat it. The currency appears in the totals block, the
+header and any `{{invoice.*}}` money token.
+
+### Money and currency
+
+Amounts use the company's `amountDecimals` and `currency` from
+`GET /voucher-template` (3 and "د.أ" for Jordan). Both renderers read that same
+endpoint, so a figure printed by the dashboard and by the salesman's app is
+formatted identically. Digits are always Latin, even in Arabic.
 
 ## 5. Built-in layouts
 

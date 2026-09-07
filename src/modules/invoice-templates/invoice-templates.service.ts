@@ -3,6 +3,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 
 import { InvoiceTemplate } from './entities/invoice-template.entity';
+import { Rep } from '../reps/entities/rep.entity';
+import { UserContextService } from '../../common/context/user-context.service';
 import { Warehouse } from '../warehouses/entities/warehouse.entity';
 import {
   CreateInvoiceTemplateDto,
@@ -76,6 +78,9 @@ export class InvoiceTemplatesService {
     private readonly templates: Repository<InvoiceTemplate>,
     @InjectRepository(Warehouse)
     private readonly warehouses: Repository<Warehouse>,
+    @InjectRepository(Rep)
+    private readonly reps: Repository<Rep>,
+    private readonly userCtx: UserContextService,
   ) {}
 
   list(branchId?: string): Promise<InvoiceTemplate[]> {
@@ -142,7 +147,7 @@ export class InvoiceTemplatesService {
       this.templates.create({
         name: dto.name,
         documentType: dto.documentType,
-        paperSize: dto.paperSize ?? 'A4',
+        paperSize: dto.paperSize ?? 'THERMAL_80',
         isDefault: Boolean(dto.isDefault),
         branchId,
         layout: dto.layout,
@@ -181,11 +186,30 @@ export class InvoiceTemplatesService {
   }
 
   /** `branchId` wins; otherwise a storeNumber is looked up. Unknown store → undefined. */
+  /**
+   * The store whose pinned templates apply, most explicit first:
+   *   1. an explicit branchId (a warehouse id)
+   *   2. an explicit storeNumber (a warehouse whNumber)
+   *   3. **the caller's own van** — a salesman's rep row names one (`rep.vanId`
+   *      IS the warehouse id), so the app gets its van's templates without the
+   *      device having to know its store number. An office user has no rep row
+   *      and falls through to the global chain.
+   */
   private async branchIdFor({ branchId, storeNumber }: ResolveScope): Promise<string | undefined> {
     if (branchId) return branchId;
-    if (!storeNumber) return undefined;
-    const wh = await this.warehouses.findOne({ where: { whNumber: storeNumber } });
-    return wh?.id;
+    if (storeNumber) {
+      const wh = await this.warehouses.findOne({ where: { whNumber: storeNumber } });
+      return wh?.id;
+    }
+    return (await this.callerVanId()) ?? undefined;
+  }
+
+  /** The signed-in salesman's van warehouse id, or null for anyone without one. */
+  private async callerVanId(): Promise<string | null> {
+    const repId = this.userCtx.getRepId();
+    if (!repId) return null;
+    const rep = await this.reps.findOne({ where: { id: repId }, select: { id: true, vanId: true } });
+    return rep?.vanId ?? null;
   }
 }
 

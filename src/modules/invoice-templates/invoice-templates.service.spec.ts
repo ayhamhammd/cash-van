@@ -27,6 +27,7 @@ describe('InvoiceTemplatesService', () => {
   function build(
     rows: Array<Record<string, unknown>> = [],
     warehouses: Array<{ id: string; whNumber: string }> = [],
+    caller: { repId?: string | null; reps?: Array<{ id: string; vanId: string | null }> } = {},
   ) {
     const findOne = jest.fn(async ({ where }: { where: Record<string, unknown> }) => rows.find((r) => matches(r, where)) ?? null);
     const find = jest.fn(async () => rows);
@@ -38,7 +39,16 @@ describe('InvoiceTemplatesService', () => {
     const whRepo = {
       findOne: jest.fn(async ({ where }: { where: { whNumber: string } }) => warehouses.find((w) => w.whNumber === where.whNumber) ?? null),
     };
-    return { svc: new InvoiceTemplatesService(repo as never, whRepo as never), repo, whRepo };
+    const repRepo = {
+      findOne: jest.fn(async ({ where }: { where: { id: string } }) => (caller.reps ?? []).find((r) => r.id === where.id) ?? null),
+    };
+    const userCtx = { getRepId: () => caller.repId ?? null };
+    return {
+      svc: new InvoiceTemplatesService(repo as never, whRepo as never, repRepo as never, userCtx as never),
+      repo,
+      whRepo,
+      repRepo,
+    };
   }
 
   const global = { id: 'g', documentType: 'SALE', branchId: null, isDefault: true, updatedAt: new Date('2026-09-01T00:00:00Z') };
@@ -258,7 +268,42 @@ describe('InvoiceTemplatesService', () => {
       await expect(svc.create({ name: 'x', documentType: 'SALE', layout: { elements: [] } })).rejects.toBeInstanceOf(BadRequestException);
     });
 
-    it('404s on a missing delete', async () => {
+    it('falls back to the calling salesman own van store', async () => {
+    const vanPinned = { id: 'v', documentType: 'SALE', branchId: 'wh-van', isDefault: false };
+    const { svc } = build([global, vanPinned], [], { repId: 'rep-1', reps: [{ id: 'rep-1', vanId: 'wh-van' }] });
+    expect((await svc.resolve('SALE')).id).toBe('v');
+  });
+
+  it('uses the global default for a caller with no rep row', async () => {
+    const vanPinned = { id: 'v', documentType: 'SALE', branchId: 'wh-van', isDefault: false };
+    const { svc } = build([global, vanPinned], [], { repId: null });
+    expect((await svc.resolve('SALE')).id).toBe('g');
+  });
+
+  it('prefers an explicit store over the caller own van', async () => {
+    const vanPinned = { id: 'v', documentType: 'SALE', branchId: 'wh-van', isDefault: false };
+    const { svc } = build([global, pinned, vanPinned], [{ id: 'wh-1', whNumber: 'MAIN' }], {
+      repId: 'rep-1',
+      reps: [{ id: 'rep-1', vanId: 'wh-van' }],
+    });
+    expect((await svc.resolve('SALE', { storeNumber: 'MAIN' })).id).toBe('p');
+  });
+
+  it('resolves every kind against the caller own van', async () => {
+    const vanPinned = { id: 'v', documentType: 'TRANSFER', branchId: 'wh-van', isDefault: false };
+    const { svc } = build([vanPinned], [], { repId: 'rep-1', reps: [{ id: 'rep-1', vanId: 'wh-van' }] });
+    const all = await svc.resolveAll();
+    expect(all.templates.TRANSFER.id).toBe('v');
+    expect(all.templates.SALE.id).toBeNull();
+  });
+
+  it('defaults a new template to the 80 mm thermal the field printers use', async () => {
+    const { svc } = build([]);
+    const saved = await svc.create({ name: 'x', documentType: 'SALE', layout: LAYOUT });
+    expect(saved.paperSize).toBe('THERMAL_80');
+  });
+
+  it('404s on a missing delete', async () => {
       const { svc } = build([]);
       await expect(svc.remove('nope')).rejects.toBeInstanceOf(NotFoundException);
     });
