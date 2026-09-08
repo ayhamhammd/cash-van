@@ -643,7 +643,31 @@ export class ErpOutboxService {
         discountPercent: Number(l.discountPercentage) || 0,
       });
     }
-    return { path: 'sales-orders', body: { customerId: cust.erpId, lines: orderLines } };
+    // WHICH VAN THE ORDER WAS TAKEN FROM.
+    //
+    // The van store, the salesman code and the ERP warehouse code are one shared
+    // identity, so the code is the whole of what the ERP needs to attach the
+    // order to the right warehouse — this side holds no warehouse UUID to send.
+    //
+    // A code rather than `warehouseId` on purpose: the id-map that would resolve
+    // one is filled by the warehouse sync, and an order must not have to wait on
+    // that to be raised.
+    //
+    // NOT YET READ ON THE OTHER SIDE. The ERP's sales-orders schema does not
+    // declare this field, and its validator DROPS undeclared keys rather than
+    // rejecting them — so today this travels and is discarded, and the order is
+    // stored with no warehouse exactly as before. Sending it is harmless and
+    // makes the ERP-side change a one-file job; until that lands, do not read
+    // `warehouseId` back off a van order and expect it to be set.
+    const vanWarehouseCode = this.vanStoreOf(lines, header.userCode);
+    return {
+      path: 'sales-orders',
+      body: {
+        customerId: cust.erpId,
+        ...(vanWarehouseCode ? { vanWarehouseCode } : {}),
+        lines: orderLines,
+      },
+    };
   }
 
   /**

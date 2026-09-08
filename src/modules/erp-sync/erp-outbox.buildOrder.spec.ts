@@ -23,6 +23,7 @@ type Line = {
   itemQty: string;
   unitPrice: string;
   discountPercentage: string;
+  storeNumber?: string | null;
 };
 
 const line = (
@@ -30,7 +31,8 @@ const line = (
   itemQty: string,
   unitPrice: string,
   discountPercentage = '0',
-): Line => ({ itemNumber, itemQty, unitPrice, discountPercentage });
+  storeNumber?: string | null,
+): Line => ({ itemNumber, itemQty, unitPrice, discountPercentage, storeNumber });
 
 function build(opts: {
   header?: unknown;
@@ -65,6 +67,72 @@ function build(opts: {
 }
 
 describe('ErpOutboxService.buildOrder (ORDER → ERP sales order)', () => {
+  /**
+   * Which van took the order.
+   *
+   * The van store, the salesman code and the ERP warehouse code are one shared
+   * identity, so the code is the whole of what the other side needs to attribute
+   * the order — and it is the only form this side holds. An order that reaches
+   * the ERP without it belongs to no van, and every van order used to.
+   */
+  describe('vanWarehouseCode', () => {
+    const body = async (opts: Parameters<typeof build>[0]) =>
+      ((await build(opts)) as { body: Record<string, unknown> }).body;
+
+    it("carries the store the order's own lines were taken from", async () => {
+      expect(
+        await body({
+          lines: [line('A', '1', '1', '0', 'VAN-07')],
+          items: { A: 'sku-a' },
+        }),
+      ).toMatchObject({ vanWarehouseCode: 'VAN-07' });
+    });
+
+    it('falls back to the salesman who raised it when a line names no store', async () => {
+      // The van store IS the salesman code, so this is the same van either way —
+      // it is a fallback in shape only.
+      expect(
+        await body({
+          header: { voucherNumber: 'ORD-1', customerNumber: 'C-1', userCode: 'SM-42' },
+          lines: [line('A', '1', '1')],
+          items: { A: 'sku-a' },
+        }),
+      ).toMatchObject({ vanWarehouseCode: 'SM-42' });
+    });
+
+    it("prefers the line's own store over the salesman's code", async () => {
+      expect(
+        await body({
+          header: { voucherNumber: 'ORD-1', customerNumber: 'C-1', userCode: 'SM-42' },
+          lines: [line('A', '1', '1', '0', 'VAN-07')],
+          items: { A: 'sku-a' },
+        }),
+      ).toMatchObject({ vanWarehouseCode: 'VAN-07' });
+    });
+
+    it('is left out entirely when no van can be named', async () => {
+      // Absent, not blank. A key holding "" would have to be handled by the far
+      // side, and an order with no van is exactly the body that was sent before
+      // this field existed.
+      const b = await body({ lines: [line('A', '1', '1')], items: { A: 'sku-a' } });
+      expect('vanWarehouseCode' in b).toBe(false);
+    });
+
+    it('leaves the rest of the order untouched', async () => {
+      expect(
+        await body({
+          header: { voucherNumber: 'ORD-1', customerNumber: 'C-1', userCode: 'SM-42' },
+          lines: [line('A', '2.5', '3.25', '5', 'VAN-07')],
+          items: { A: 'sku-a' },
+        }),
+      ).toEqual({
+        customerId: 'cust-uuid',
+        vanWarehouseCode: 'VAN-07',
+        lines: [{ skuId: 'sku-a', quantity: 2.5, sellingPrice: 3.25, discountPercent: 5 }],
+      });
+    });
+  });
+
   it('sends the EXACT decimal quantity, never rounded to an integer', async () => {
     const call = await build({
       lines: [line('ITM-1', '2.5', '12.5', '5')],
