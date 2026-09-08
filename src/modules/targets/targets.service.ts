@@ -13,7 +13,17 @@ export interface TargetRow {
   metric: TargetMetric | null;
   targetValue: number | null; // fils (AMOUNT) or units (QTY)
   notes: string | null;
-  actualAmount: number; // fils
+  actualAmount: number; // fils — van sales PLUS ERP-raised invoices
+  /** The van's own posted sales. */
+  actualVanAmount: number; // fils
+  /**
+   * Invoices the office raised in the ERP for this rep's customers.
+   *
+   * Split out rather than folded away so a rep can see WHERE their figure came
+   * from. "My target says 8,000 and I only sold 5,000" has an answer when the
+   * other 3,000 is named.
+   */
+  actualErpAmount: number; // fils
   actualQty: number; // units
   progressPct: number | null; // actual-vs-target on the target's metric
   remaining: number | null; // target − actual on the target's metric (≥ 0); null if no target
@@ -26,9 +36,26 @@ export interface TargetHistoryRow extends TargetRow {
 }
 
 /**
- * The two LEFT JOIN subqueries that tally a rep's posted SALE actuals for the
- * period ($1 = month start, $2 = next-month start). `sa` = amount in fils,
- * `sq` = item qty. Both key on users.user_number == voucher_headers.user_code.
+ * The LEFT JOIN subqueries that tally a rep's actuals for the period
+ * ($1 = month start, $2 = next-month start).
+ *
+ * `sa` = van sale amount in fils, `sq` = van item qty. Both key on
+ * users.user_number == voucher_headers.user_code.
+ *
+ * `ea` = invoices the OFFICE raised in the ERP for customers this rep services.
+ * A shop invoiced in the ERP produces no voucher here, so without this a rep
+ * could serve a customer all month and show zero against their target. It keys
+ * on the rep stored on the mirrored invoice, resolved when it was synced — not
+ * on the customer's assignment today, which would rewrite last month's figure
+ * the moment a customer changed hands.
+ *
+ * DOUBLE COUNTING IS PREVENTED UPSTREAM, NOT HERE. Invoices cash-van pushed to
+ * the ERP come back marked VAN_SALES and are never mirrored, so `sa` and `ea`
+ * cannot describe the same sale. See ErpSyncService.applyErpInvoice.
+ *
+ * ONLY THE AMOUNT METRIC IS AFFECTED. `sq` counts item quantities from voucher
+ * lines; the mirror holds invoice headers, not lines, so a QTY target still
+ * measures what the van itself moved.
  */
 const ACTUALS_JOINS = `
   LEFT JOIN (
@@ -46,6 +73,13 @@ const ACTUALS_JOINS = `
       AND h.in_date >= $1::date AND h.in_date < $2::date
     GROUP BY h.user_code
   ) sq ON sq.user_code = u.user_number
+  LEFT JOIN (
+    SELECT ei.rep_id, COALESCE(SUM(ei.total_fils), 0)::bigint AS amount_fils
+    FROM erp_invoices ei
+    WHERE ei.deleted_at IS NULL
+      AND ei.issued_at >= $1::date AND ei.issued_at < $2::date
+    GROUP BY ei.rep_id
+  ) ea ON ea.rep_id = r.id
 `;
 
 const SELECT_COLS = `
@@ -56,7 +90,9 @@ const SELECT_COLS = `
   t.metric                          AS "metric",
   t.target_value                    AS "targetValue",
   t.notes                           AS "notes",
-  COALESCE(sa.amount_fils, 0)       AS "actualAmount",
+  (COALESCE(sa.amount_fils, 0) + COALESCE(ea.amount_fils, 0)) AS "actualAmount",
+  COALESCE(sa.amount_fils, 0)       AS "actualVanAmount",
+  COALESCE(ea.amount_fils, 0)       AS "actualErpAmount",
   COALESCE(sq.qty, 0)               AS "actualQty"
 `;
 
@@ -174,6 +210,8 @@ function mapRow(r: Record<string, string | null>): TargetRow {
   const metric = (r.metric as TargetMetric | null) ?? null;
   const targetValue = r.targetValue != null ? Number(r.targetValue) : null;
   const actualAmount = Number(r.actualAmount ?? 0);
+  const actualVanAmount = Number(r.actualVanAmount ?? 0);
+  const actualErpAmount = Number(r.actualErpAmount ?? 0);
   const actualQty = Number(r.actualQty ?? 0);
   const actualForMetric = metric === 'QTY' ? actualQty : actualAmount;
   const progressPct =
@@ -191,6 +229,8 @@ function mapRow(r: Record<string, string | null>): TargetRow {
     targetValue,
     notes: r.notes ?? null,
     actualAmount,
+    actualVanAmount,
+    actualErpAmount,
     actualQty,
     progressPct,
     remaining,

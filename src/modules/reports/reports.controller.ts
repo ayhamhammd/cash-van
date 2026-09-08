@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiParam,
   ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
@@ -26,6 +27,40 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { RepCommissionQueryDto } from './dto/rep-commission.query';
 import { RepScopeService } from '../users/rep-scope.service';
+
+/** How far back a single salesman report may be asked to scan. */
+const MAX_RANGE_DAYS = 366;
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * The reporting window, defaulted and bounded.
+ *
+ * Defaults to the current calendar month, which is the period a target is set
+ * for — asking for "this month" should not require typing two dates.
+ *
+ * Bounded because an unbounded report is a table scan that gets slower every day
+ * it exists, and refuses rather than silently clamping: a report that quietly
+ * answers a different question than the one asked is worse than one that says no.
+ */
+function resolveRange(from?: string, to?: string): { from: string; to: string } {
+  const today = new Date();
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  const start = from?.trim() || iso(new Date(today.getFullYear(), today.getMonth(), 1));
+  const end = to?.trim() || iso(today);
+
+  if (!ISO_DATE.test(start) || !ISO_DATE.test(end)) {
+    throw new BadRequestException('Dates must be YYYY-MM-DD');
+  }
+  if (end < start) {
+    throw new BadRequestException('The end date is before the start date');
+  }
+  const days = (Date.parse(end) - Date.parse(start)) / 86_400_000;
+  if (days > MAX_RANGE_DAYS) {
+    throw new BadRequestException(`The range may not exceed ${MAX_RANGE_DAYS} days`);
+  }
+  return { from: start, to: end };
+}
 
 @ApiTags('reports')
 @ApiBearerAuth()
@@ -78,6 +113,48 @@ export class ReportsController {
   @ApiOkResponse({ description: 'Ranked reps' })
   async repLeaderboard(@Query() q: ReportsRangeQueryDto, @CurrentUser() user: AuthenticatedUser) {
     return this.reports.repLeaderboard(q.days ?? 30, q.limit ?? 10, await this.repScope.visibleRepIds(user));
+  }
+
+  @Get('salesman-sales')
+  @ApiOperation({
+    summary: 'Salesman sales',
+    description:
+      'What each salesman sold between two dates: their own van sales AND the ' +
+      'invoices the office raised in the ERP for customers they service, kept in ' +
+      'separate columns so the total can be explained. Every active salesman is ' +
+      'returned, including those who sold nothing.',
+  })
+  @ApiOkResponse({ description: 'One row per active salesman' })
+  async salesmanSales(
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    const range = resolveRange(from, to);
+    return this.reports.salesmanSales(range.from, range.to, await this.repScope.visibleRepIds(user));
+  }
+
+  @Get('salesman-sales/:repId/documents')
+  @ApiOperation({
+    summary: 'The documents behind a salesman figure',
+    description:
+      'Van vouchers and ERP invoices for one salesman in the period, newest ' +
+      'first, each labelled with the system it came from.',
+  })
+  @ApiParam({ name: 'repId', format: 'uuid', description: 'Salesman id' })
+  @ApiOkResponse({ description: 'The documents' })
+  async salesmanDocuments(
+    @Param('repId', ParseUUIDPipe) repId: string,
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // Scoped like the report above it: a supervisor must not reach a salesman
+    // they cannot see by asking for their documents directly.
+    const visible = await this.repScope.visibleRepIds(user);
+    if (visible !== null && !visible.includes(repId)) return [];
+    const range = resolveRange(from, to);
+    return this.reports.salesmanDocuments(repId, range.from, range.to);
   }
 
   @Get('rep-commission')

@@ -26,6 +26,7 @@ import { ErpOutboxService } from './erp-outbox.service';
 import { ErpSyncController } from './erp-sync.controller';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
+import { ErpInvoice } from './entities/erp-invoice.entity';
 import { ErpOutbox } from './entities/erp-outbox.entity';
 import { StockRequest } from '../stock-requests/entities/stock-request.entity';
 
@@ -47,6 +48,7 @@ import { StockRequest } from '../stock-requests/entities/stock-request.entity';
       Collection,
       ErpIdMap,
       ErpSyncCursor,
+      ErpInvoice,
       ErpOutbox,
       StockRequest,
       VoucherHeader,

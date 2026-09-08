@@ -34,6 +34,7 @@ import { ErpOutboxService } from './erp-outbox.service';
 import { ErpOutbox } from './entities/erp-outbox.entity';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
+import { ErpInvoice } from './entities/erp-invoice.entity';
 import { ErpOutboxKind } from './entities/erp-outbox.entity';
 
 /** cash-van voucher kind → ERP outbox kind (per-kind outbound, same kind preserved). */
@@ -276,6 +277,35 @@ function chunked<T>(xs: T[], size: number): T[][] {
   return out;
 }
 
+/**
+ * ERP major units → fils, the unit every amount in this database is kept in.
+ *
+ * Rounded, not truncated: 12.345 is 12345 fils and must not become 12344 because
+ * a float landed a hair below. A missing or unparseable amount is zero — an
+ * invoice with no total credits nobody rather than poisoning a sum with NaN.
+ */
+function toFils(v: number | string | null | undefined): number {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) ? Math.round(n * 1000) : 0;
+}
+
+/** One row of the ERP's `GET /api/v1/sales-invoices`. Money in major units. */
+interface ErpInvoiceDto {
+  id: string;
+  invoiceNumber?: string | null;
+  customerId?: string | null;
+  status?: string | null;
+  totalAmount?: number | string | null;
+  totalTax?: number | string | null;
+  amountPaid?: number | string | null;
+  issuedAt?: string | null;
+  updatedAt?: string | null;
+  salesmanName?: string | null;
+  /** "VAN_SALES" when cash-van pushed it there; "ERP" when the office raised it. */
+  origin?: string | null;
+  externalId?: string | null;
+}
+
 /** One row of the ERP's `GET /api/v1/customer-prices` — a raw contract price. */
 interface ErpCustomerPrice {
   id?: string | null;
@@ -427,6 +457,10 @@ export class ErpSyncService {
     private readonly outbox: ErpOutboxService,
     @InjectRepository(ErpOutbox) private readonly outboxRepo: Repository<ErpOutbox>,
     private readonly events: EventEmitter2,
+    // APPENDED, deliberately. The specs in this folder build the service with
+    // positional arguments, so inserting a dependency in the middle silently
+    // re-points every mock after it.
+    @InjectRepository(ErpInvoice) private readonly erpInvoices: Repository<ErpInvoice>,
   ) {}
 
   /**
@@ -1200,6 +1234,7 @@ export class ErpSyncService {
       { entity: 'customer',        tier: 'fast',  run: () => this.pullCustomers() },
       { entity: 'price_list',      tier: 'fast',  run: () => this.pullPriceLists() },
       { entity: 'customer_price',  tier: 'heavy', run: () => this.pullCustomerPrices() },
+      { entity: 'erp_invoice',     tier: 'fast',  run: () => this.pullErpInvoices() },
       { entity: 'receipts',        tier: 'fast',  run: () => this.pullReceipts() },
     ];
   }
@@ -2294,6 +2329,124 @@ export class ErpSyncService {
       if (!keptSkus.has(e.erpSku)) await this.customerPrices.delete(e.id);
     }
     return processed;
+  }
+
+  /**
+   * Mirror the invoices the OFFICE raised in the ERP, and credit the rep.
+   *
+   * A shop invoiced in the ERP produces no cash-van voucher, so the rep who
+   * services it saw none of that money: not on the customer's statement, and
+   * not on their target, which counts voucher_headers and nothing else. A rep
+   * could serve a customer all month and show zero.
+   *
+   * WHAT IS SKIPPED, AND WHY IT MATTERS MOST
+   * An invoice cash-van itself pushed comes back over this same endpoint marked
+   * `origin: VAN_SALES`. Storing it would count one van sale TWICE — once as the
+   * voucher this database already holds, and again as the ERP invoice that
+   * voucher created — and a target inflated to double is worse than one that
+   * misses, because nobody questions a number that flatters them.
+   *
+   * A voided invoice is removed rather than skipped: it may already be here from
+   * before it was voided, and leaving it would keep crediting a sale the ERP has
+   * cancelled.
+   *
+   * The rep is resolved from the customer's assignment and STORED. Reassigning a
+   * customer tomorrow must not rewrite last month's achieved figure for the rep
+   * who actually did the work.
+   *
+   * Incremental on `updatedSince`, so a re-sync reads only what changed.
+   */
+  private async pullErpInvoices(): Promise<number> {
+    const cursor = await this.cursors.findOne({ where: { entity: 'erp_invoice' } });
+    const since = cursor?.updatedSince ? cursor.updatedSince.toISOString() : undefined;
+
+    let processed = 0;
+    let maxTs: Date | null = cursor?.updatedSince ?? null;
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+
+    while (processed < total) {
+      const { data, total: t } = await this.erp.list<ErpInvoiceDto>('sales-invoices', {
+        page,
+        pageSize: 200,
+        ...(since ? { updatedSince: since } : {}),
+      });
+      total = t;
+      if (data.length === 0) break;
+
+      for (const inv of data) {
+        processed += 1;
+        const updated = inv.updatedAt ? new Date(inv.updatedAt) : null;
+        if (updated && !Number.isNaN(updated.getTime())) {
+          if (!maxTs || updated > maxTs) maxTs = updated;
+        }
+        await this.applyErpInvoice(inv);
+      }
+
+      page += 1;
+      if (page > 500) break; // safety cap
+    }
+
+    if (maxTs) {
+      const c = cursor ?? this.cursors.create({ entity: 'erp_invoice' });
+      c.updatedSince = maxTs;
+      await this.cursors.save(c);
+    }
+    return processed;
+  }
+
+  /** Store, update or remove one mirrored ERP invoice. */
+  private async applyErpInvoice(inv: ErpInvoiceDto): Promise<void> {
+    if (!inv.id) return;
+    const existing = await this.erpInvoices.findOne({ where: { erpId: String(inv.id) } });
+
+    // Ours already, or cancelled upstream — either way it must not be counted.
+    // Delete rather than skip: it may already be here from before it was voided
+    // or before this rule existed.
+    const isOurs = (inv.origin ?? '').toUpperCase() === 'VAN_SALES' || Boolean(inv.externalId);
+    const isVoid = (inv.status ?? '').toLowerCase() === 'voided';
+    if (isOurs || isVoid) {
+      if (existing) await this.erpInvoices.delete(existing.id);
+      return;
+    }
+
+    const issued = inv.issuedAt ? new Date(inv.issuedAt) : null;
+    // A document with no date has no period, so it can belong to no month's
+    // target. Storing it would make the figures depend on when it was synced.
+    if (!issued || Number.isNaN(issued.getTime())) return;
+
+    // The ERP customer id → the local customer → the rep who services them.
+    let customerId: string | null = null;
+    let repId: string | null = null;
+    if (inv.customerId) {
+      const map = await this.idmap.findOne({
+        where: { entity: 'customer', erpId: String(inv.customerId) },
+      });
+      if (map?.localId) {
+        const cust = await this.customers.findOne({
+          where: { customerNumber: map.localId },
+        });
+        customerId = cust?.id ?? null;
+        repId = cust?.repId ?? null;
+      }
+    }
+
+    const row = existing ?? this.erpInvoices.create({ erpId: String(inv.id) });
+    row.invoiceNumber = inv.invoiceNumber ?? null;
+    row.issuedAt = issued;
+    row.erpCustomerId = inv.customerId ? String(inv.customerId) : null;
+    row.customerId = customerId;
+    // An invoice already credited to a rep keeps that rep even if the customer
+    // has since been reassigned; only an UNcredited one may adopt one now.
+    if (!existing || !existing.repId) row.repId = repId;
+    row.salesmanName = inv.salesmanName ?? null;
+    row.status = inv.status ?? null;
+    row.origin = 'ERP';
+    row.totalFils = String(toFils(inv.totalAmount));
+    row.taxFils = String(toFils(inv.totalTax));
+    row.paidFils = String(toFils(inv.amountPaid));
+    row.syncedAt = new Date();
+    await this.erpInvoices.save(row);
   }
 
   /**

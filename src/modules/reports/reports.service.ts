@@ -130,6 +130,46 @@ export interface TopCustomerRow {
   totalDebt: number;
 }
 
+/**
+ * One salesman's sales for a period, with the two sources kept apart.
+ *
+ * MONEY IS FILS, AND TAX-INCLUSIVE ON BOTH SIDES.
+ *
+ * That basis is not a preference — it is the one a target is measured on
+ * (TargetsService sums voucher_headers.total, not net_total). A report that
+ * explains a target and then states it on a different basis is worse than no
+ * report: the rep reads two numbers for the same month and neither is wrong.
+ * Mixing the two within one row would be worse still, because `totalFils` would
+ * then add net-of-tax van money to tax-inclusive ERP money.
+ */
+export interface SalesmanSalesRow {
+  repId: string;
+  repCode: string | null;
+  repName: string;
+  /** Posted SALE vouchers this rep's own login raised. */
+  vanTotalFils: number;
+  vanVouchers: number;
+  vanCustomers: number;
+  /** Invoices the office raised in the ERP for customers this rep services. */
+  erpTotalFils: number;
+  erpInvoices: number;
+  totalFils: number;
+}
+
+/** One document behind a salesman's figure — a van voucher or an ERP invoice. */
+export interface SalesmanDocumentRow {
+  /** VAN | ERP — which system produced it. */
+  source: string;
+  number: string;
+  /** YYYY-MM-DD. A calendar date, so ordering never shifts with the timezone. */
+  docDate: string;
+  customerName: string;
+  netFils: number;
+  totalFils: number;
+  /** The ERP's own status. Null on a van voucher, which has no equivalent. */
+  status: string | null;
+}
+
 export interface RepLeaderboardRow {
   userCode: string;
   repName: string;
@@ -1007,6 +1047,116 @@ export class ReportsService {
   }
 
   /** Rep performance leaderboard (sales, vouchers, distinct customers, visits) over N days. */
+/**
+   * What each salesman sold in a period — van sales AND the office's own invoices.
+   *
+   * The leaderboard above ranks by voucher_headers alone, which is what the VAN
+   * did. A shop invoiced in the ERP produces no voucher here, so a rep who
+   * services that shop showed nothing for it. Both sources are reported, and
+   * kept in SEPARATE columns rather than added into one: a rep asking "where did
+   * that number come from" is asking a fair question, and a single blended
+   * figure cannot answer it.
+   *
+   * The two cannot overlap. A van sale pushed to the ERP comes back marked
+   * VAN_SALES and is never mirrored (see ErpSyncService.applyErpInvoice), so no
+   * sale is counted on both sides.
+   *
+   * Returns every ACTIVE rep, including those who sold nothing — a salesman with
+   * a blank row is the point of a report like this, and omitting them makes the
+   * quiet ones invisible.
+   */
+  async salesmanSales(
+    from: string,
+    to: string,
+    visibleRepIds: string[] | null = null,
+  ): Promise<SalesmanSalesRow[]> {
+    return this.ds.query(
+      `SELECT r.id                              AS "repId",
+              r.code                            AS "repCode",
+              COALESCE(r.name_ar, r.name_en, '')AS "repName",
+              COALESCE(v.total_fils, 0)::float8 AS "vanTotalFils",
+              COALESCE(v.vouchers, 0)::int      AS "vanVouchers",
+              COALESCE(v.customers, 0)::int     AS "vanCustomers",
+              COALESCE(e.total_fils, 0)::float8 AS "erpTotalFils",
+              COALESCE(e.invoices, 0)::int      AS "erpInvoices",
+              (COALESCE(v.total_fils, 0) + COALESCE(e.total_fils, 0))::float8 AS "totalFils"
+         FROM reps r
+         LEFT JOIN users u ON u.id = r.user_id
+         LEFT JOIN (
+           SELECT h.user_code,
+                  SUM(ROUND(h.total::numeric * 1000))::bigint     AS total_fils,
+                  COUNT(*)::int                                    AS vouchers,
+                  COUNT(DISTINCT h.customer_number)::int           AS customers
+             FROM voucher_headers h
+            WHERE h.is_posted = true AND h.deleted_at IS NULL
+              AND h.trans_kind = 'SALE'
+              AND h.in_date >= $1::date AND h.in_date < ($2::date + 1)
+            GROUP BY h.user_code
+         ) v ON v.user_code = u.user_number
+         LEFT JOIN (
+           SELECT ei.rep_id,
+                  SUM(ei.total_fils)::bigint AS total_fils,
+                  COUNT(*)::int              AS invoices
+             FROM erp_invoices ei
+            WHERE ei.deleted_at IS NULL
+              AND ei.issued_at >= $1::date AND ei.issued_at < ($2::date + 1)
+            GROUP BY ei.rep_id
+         ) e ON e.rep_id = r.id
+        WHERE r.deleted_at IS NULL AND r.is_active = true
+          AND ($3::uuid[] IS NULL OR r.id = ANY($3::uuid[]))
+        ORDER BY (COALESCE(v.total_fils, 0) + COALESCE(e.total_fils, 0)) DESC,
+                 COALESCE(r.name_ar, r.name_en, '') ASC`,
+      [from, to, visibleRepIds ?? null],
+    );
+  }
+
+  /**
+   * The documents behind one salesman's figure.
+   *
+   * Van vouchers and ERP invoices in one list, each labelled with where it came
+   * from, newest first — a total nobody can open is a total nobody can argue
+   * with. `source` is what tells the two apart on screen; the numbers are fils
+   * on both sides so a reader is never comparing different units.
+   */
+  async salesmanDocuments(
+    repId: string,
+    from: string,
+    to: string,
+  ): Promise<SalesmanDocumentRow[]> {
+    return this.ds.query(
+      `SELECT 'VAN'                                       AS "source",
+              h.voucher_number                            AS "number",
+              h.in_date::text                             AS "docDate",
+              COALESCE(c.customer_name, h.customer_number, '—') AS "customerName",
+              ROUND(h.net_total::numeric * 1000)::float8  AS "netFils",
+              ROUND(h.total::numeric * 1000)::float8      AS "totalFils",
+              NULL::text                                  AS "status"
+         FROM voucher_headers h
+         JOIN users u ON u.user_number = h.user_code
+         JOIN reps r ON r.user_id = u.id AND r.deleted_at IS NULL
+         LEFT JOIN customers c ON c.customer_number = h.customer_number
+        WHERE r.id = $1::uuid
+          AND h.is_posted = true AND h.deleted_at IS NULL
+          AND h.trans_kind = 'SALE'
+          AND h.in_date >= $2::date AND h.in_date < ($3::date + 1)
+        UNION ALL
+       SELECT 'ERP'                                       AS "source",
+              COALESCE(ei.invoice_number, '—')            AS "number",
+              ei.issued_at::date::text                    AS "docDate",
+              COALESCE(c.customer_name, '—')              AS "customerName",
+              (ei.total_fils - ei.tax_fils)::float8       AS "netFils",
+              ei.total_fils::float8                       AS "totalFils",
+              ei.status                                   AS "status"
+         FROM erp_invoices ei
+         LEFT JOIN customers c ON c.id = ei.customer_id
+        WHERE ei.rep_id = $1::uuid
+          AND ei.deleted_at IS NULL
+          AND ei.issued_at >= $2::date AND ei.issued_at < ($3::date + 1)
+        ORDER BY "docDate" DESC, "number" DESC`,
+      [repId, from, to],
+    );
+  }
+
   async repLeaderboard(
     days = 30,
     limit = 10,
