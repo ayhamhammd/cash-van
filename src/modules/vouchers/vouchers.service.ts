@@ -368,7 +368,7 @@ export class VouchersService implements OnModuleInit {
   }
 
   /**
-   * Server-authoritative offer application (SALE only). Re-evaluates active offers
+   * Server-authoritative offer application (SALE and ORDER). Re-evaluates active offers
    * against the cart and bakes the result into the dto BEFORE the voucher is
    * built: per-line discounts (added to discountValue), the invoice discount
    * (added to the header discount), and free lines (appended as 100%-discount
@@ -377,6 +377,13 @@ export class VouchersService implements OnModuleInit {
    * failure leaves the sale exactly as the client sent it (offers never block a
    * sale). Returns the evaluation when something applied, else null.
    *
+   * ORDER is included because a customer order becomes the sale: quoting a rep's
+   * order at list price and then discounting it on delivery means the figure the
+   * customer agreed to is not the figure they are invoiced, and the difference is
+   * discovered at the door. Evaluating here makes the order state its real price.
+   * The engine itself has never been kind-aware — only this gate was — so the
+   * same offers, conditions and priorities apply to both.
+   *
    * Money: the engine works in integer fils off each item's DB price; vouchers
    * use major-unit decimal strings — we translate fils → JOD (÷1000) so the
    * posted voucher matches exactly what /offers/evaluate previewed.
@@ -384,7 +391,8 @@ export class VouchersService implements OnModuleInit {
   private async applyOffers(
     dto: CreateVoucherDto,
   ): Promise<EvaluationResult | null> {
-    if (dto.transKind !== 'SALE' || !dto.transactions?.length) return null;
+    if (dto.transKind !== 'SALE' && dto.transKind !== 'ORDER') return null;
+    if (!dto.transactions?.length) return null;
     try {
       const cart = dto.transactions.map((l) => ({
         itemNumber: l.itemNumber,
@@ -491,11 +499,18 @@ export class VouchersService implements OnModuleInit {
    * Best-effort redemption recording from the server's own evaluation. Runs
    * AFTER the sale committed and is fully guarded — a failure is logged and
    * swallowed so it can never roll back or block a sale.
+   *
+   * SALE only, even though ORDER now evaluates offers too. A redemption is what
+   * the engine counts against `totalRedemptionLimit` and `perCustomerLimit`, so
+   * recording one for an order would spend the offer on a document that has
+   * delivered nothing — and then refuse it to the very sale that order becomes.
+   * The order quotes the offer; the sale consumes it.
    */
   private async recordOfferRedemptions(
     header: VoucherHeader,
     result: EvaluationResult | null,
   ): Promise<void> {
+    if (header.transKind !== 'SALE') return;
     if (!result || !result.appliedOffers.length) return;
     try {
       await this.offers.recordApplied({
