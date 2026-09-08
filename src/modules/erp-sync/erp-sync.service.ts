@@ -692,6 +692,29 @@ export class ErpSyncService {
     );
   }
 
+  /**
+   * One ERP invoice with its lines, read live.
+   *
+   * The mirror holds invoice HEADERS only — enough to credit a salesman and to
+   * total a period, but not enough to answer "what was on it". Rather than
+   * mirroring every line of every invoice for the rare occasion someone opens
+   * one, the document is fetched from the ERP at the moment it is asked for.
+   *
+   * Returns null when the ERP is off or does not have it, so the caller can say
+   * "not available" instead of failing the screen around it.
+   */
+  async erpInvoiceDetail(erpId: string): Promise<unknown | null> {
+    if (!(await this.erpConfigReady())) return null;
+    try {
+      return await this.erp.getOne(`sales-invoices/${encodeURIComponent(erpId)}`);
+    } catch (e) {
+      this.logger.warn(
+        `ERP invoice ${erpId} fetch failed: ${e instanceof Error ? e.message : e}`,
+      );
+      return null;
+    }
+  }
+
   /** A customer's live account statement from the ERP (invoices + receipts, running balance). */
   async getErpCustomerStatement(
     code: string,

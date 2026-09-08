@@ -160,6 +160,13 @@ export interface SalesmanSalesRow {
 export interface SalesmanDocumentRow {
   /** VAN | ERP — which system produced it. */
   source: string;
+  /**
+   * What to ask for to open it: the voucher number for a van sale, the ERP's own
+   * invoice id for an office one. The two systems identify a document
+   * differently, and passing the wrong one back returns nothing rather than an
+   * error, so they are kept apart from the human-readable `number`.
+   */
+  docId: string;
   number: string;
   /** YYYY-MM-DD. A calendar date, so ordering never shifts with the timezone. */
   docDate: string;
@@ -1125,6 +1132,7 @@ export class ReportsService {
   ): Promise<SalesmanDocumentRow[]> {
     return this.ds.query(
       `SELECT 'VAN'                                       AS "source",
+              h.voucher_number                            AS "docId",
               h.voucher_number                            AS "number",
               h.in_date::text                             AS "docDate",
               COALESCE(c.customer_name, h.customer_number, '—') AS "customerName",
@@ -1141,6 +1149,7 @@ export class ReportsService {
           AND h.in_date >= $2::date AND h.in_date < ($3::date + 1)
         UNION ALL
        SELECT 'ERP'                                       AS "source",
+              ei.erp_id                                   AS "docId",
               COALESCE(ei.invoice_number, '—')            AS "number",
               ei.issued_at::date::text                    AS "docDate",
               COALESCE(c.customer_name, '—')              AS "customerName",

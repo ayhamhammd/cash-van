@@ -299,6 +299,19 @@ run('salesman sales (real DB)', () => {
     expect(await reports.salesmanDocuments(quietRepId, FROM, TO)).toEqual([]);
   });
 
+  it('carries the id each system needs to open the document', async () => {
+    // The two systems identify a document differently — a voucher NUMBER here, the
+    // ERP's own invoice id there — and asking one with the other's identifier
+    // returns nothing rather than an error, which is how a detail view ends up
+    // silently blank.
+    const docs = await reports.salesmanDocuments(samiRepId, FROM, TO);
+    const van = docs.find((d) => d.source === 'VAN')!;
+    const erp = docs.find((d) => d.source === 'ERP')!;
+    expect(van.docId).toBe(van.number);
+    expect(erp.docId).toBe(`${P}-E1`);
+    expect(docs.every((d) => Boolean(d.docId))).toBe(true);
+  });
+
   it('orders documents newest first', async () => {
     const docs = await reports.salesmanDocuments(samiRepId, FROM, TO);
     const dates = docs.map((d) => d.docDate);

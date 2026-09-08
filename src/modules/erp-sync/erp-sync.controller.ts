@@ -1,6 +1,7 @@
 import {
   Controller,
   ForbiddenException,
+  NotFoundException,
   Get,
   Headers,
   HttpCode,
@@ -15,6 +16,7 @@ import {
   ApiAcceptedResponse,
   ApiBearerAuth,
   ApiOkResponse,
+  ApiParam,
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
@@ -159,6 +161,22 @@ export class ErpSyncController {
       apply: confirm === 'true',
       includeWithHistory: includeWithHistory === 'true',
     });
+  }
+
+  @Get('invoices/:erpId')
+  @ApiOperation({
+    summary: 'One ERP invoice, with its lines',
+    description:
+      'Reads the document live from the ERP. The local mirror holds headers only ' +
+      '— enough to credit a salesman and total a period, not to show what was on ' +
+      'the invoice. Returns 404 when the ERP is off or does not have it.',
+  })
+  @ApiParam({ name: 'erpId', description: "The ERP's invoice id" })
+  @ApiOkResponse({ description: 'The invoice and its lines' })
+  async erpInvoice(@Param('erpId') erpId: string) {
+    const doc = await this.sync.erpInvoiceDetail(erpId);
+    if (!doc) throw new NotFoundException('That invoice is not available from the ERP right now');
+    return doc;
   }
 
   @Get('sync/status')
