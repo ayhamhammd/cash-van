@@ -26,6 +26,7 @@ dist-windows-update/
 # Linux-client (94.142.51.91 / 77.245.5.113) image bundles from
 # scripts/build-94-images.sh — large docker image tarballs, build artifacts.
 dist-94/
+dist-94-client/
 dist-77/
 
 # Local Claude Code skill/agent tooling (higgsfield etc.) — not product source.
