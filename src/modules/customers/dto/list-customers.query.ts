@@ -34,6 +34,17 @@ export class ListCustomersQuery {
   @IsBoolean()
   unassigned?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Only customers who belong to NO segment. A customer may sit in exactly one ' +
+      'segment, so this is the set that can still be added to one — what the ' +
+      "segment screen's add-customer picker offers.",
+  })
+  @IsOptional()
+  @Type(() => Boolean)
+  @IsBoolean()
+  unsegmented?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @Type(() => Boolean)

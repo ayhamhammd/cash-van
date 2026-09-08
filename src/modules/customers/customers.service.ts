@@ -383,6 +383,18 @@ export class CustomersService {
           : ['00000000-0000-0000-0000-000000000000'],
       });
     }
+    // Customers free to join a segment. One segment per customer is enforced in
+    // the schema, so anyone already in one can only be REFUSED by the add flow —
+    // offering them at all just invites the error. NOT EXISTS rather than a join:
+    // this must not multiply rows or disturb the LIMIT/OFFSET window.
+    if (query.unsegmented) {
+      qb.andWhere(
+        `NOT EXISTS (
+           SELECT 1 FROM segment_customers sc
+            WHERE sc.customer_id = c.id
+         )`,
+      );
+    }
     if (query.regionId) qb.andWhere('c.region_id = :regionId', { regionId: query.regionId });
     if (query.isActive !== undefined) qb.andWhere('c.is_active = :a', { a: query.isActive });
 

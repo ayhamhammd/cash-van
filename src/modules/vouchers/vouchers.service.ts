@@ -973,14 +973,40 @@ export class VouchersService implements OnModuleInit {
       });
       await em.getRepository(VoucherTransaction).save(txEntities);
 
-      if (dto.payments?.length) {
-        const payments = dto.payments.map((p) =>
+      // An ORDER settles on account unless the caller says otherwise.
+      //
+      // A customer order is a promise to deliver, not a counter sale — nobody
+      // hands over money when it is taken, so CREDIT is what it actually is.
+      // Until now an order was stored with no payment row at all, and every
+      // reader had to infer the type from that absence: the cash-flow report
+      // reads "no method" as credit, the receipt prints a blank, and the two
+      // agree only by coincidence. Recording it makes the answer explicit and
+      // identical everywhere, and it is a DEFAULT, not a rule — an order that
+      // arrives with its own payment lines keeps them.
+      //
+      // Safe against the credit machinery on purpose: enforceCreditLimit and
+      // applyCreditVoucherToDebt both act on SALE (and RETURN for the debt), so
+      // this neither consumes the customer's limit nor moves their balance. An
+      // order reserves stock; the receivable is born when it becomes a sale.
+      const paymentRows =
+        dto.payments?.length
+          ? dto.payments
+          : dto.transKind === 'ORDER'
+            ? // netTotal, not total: a payment row carries what the customer owes
+              // (grand total WITH tax), which is what every existing sale row does.
+              // `total` is the tax base and would under-state the receivable.
+              [{ amount: String(header.netTotal ?? 0), paymentType: 'CREDIT' as const }]
+            : [];
+
+      if (paymentRows.length) {
+        const payments = paymentRows.map((p) =>
           em.getRepository(Payment).create({
             voucherNumber: dto.voucherNumber,
             amount: p.amount,
-            paymentDate: p.paymentDate ? new Date(p.paymentDate) : new Date(),
-            fromAcc: p.fromAcc ?? null,
-            toAcc: p.toAcc ?? null,
+            paymentDate:
+              'paymentDate' in p && p.paymentDate ? new Date(p.paymentDate) : new Date(),
+            fromAcc: 'fromAcc' in p ? (p.fromAcc ?? null) : null,
+            toAcc: 'toAcc' in p ? (p.toAcc ?? null) : null,
             paymentType: p.paymentType,
           }),
         );
