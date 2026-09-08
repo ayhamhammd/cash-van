@@ -27,6 +27,37 @@ export interface TargetRow {
   actualQty: number; // units
   progressPct: number | null; // actual-vs-target on the target's metric
   remaining: number | null; // target − actual on the target's metric (≥ 0); null if no target
+
+  // ── What the salesman is measured against, and paid on ────────────────────
+  /** What they should SELL this month, fils. Null = no sales target set. */
+  salesTargetFils: number | null;
+  /** What they should COLLECT this month, fils. Null = no collection target. */
+  collectionTargetFils: number | null;
+  /** Commission rates as percentages (0–100). */
+  cashPct: number;
+  creditPct: number;
+  collectionPct: number;
+
+  // ── What they actually did ────────────────────────────────────────────────
+  /** Sales paid for at the time — van cash/cheque/transfer plus ERP cash. */
+  cashSalesFils: number;
+  /** Sales left on account — van CREDIT plus every ERP invoice not marked CASH. */
+  creditSalesFils: number;
+  /** cash + credit. What the sales target is measured against. */
+  totalSalesFils: number;
+  /** Confirmed collections. What the collection target is measured against. */
+  collectedFils: number;
+
+  // ── What that earns ───────────────────────────────────────────────────────
+  commissionOnCashFils: number;
+  commissionOnCreditFils: number;
+  commissionOnCollectionFils: number;
+  /** The three added together — what is actually owed for the month. */
+  commissionTotalFils: number;
+
+  /** Achieved-vs-target on each, 0–∞. Null when that target is not set. */
+  salesProgressPct: number | null;
+  collectionProgressPct: number | null;
 }
 
 /** A target row for a specific month — used by the salesman's target history. */
@@ -74,12 +105,48 @@ const ACTUALS_JOINS = `
     GROUP BY h.user_code
   ) sq ON sq.user_code = u.user_number
   LEFT JOIN (
-    SELECT ei.rep_id, COALESCE(SUM(ei.total_fils), 0)::bigint AS amount_fils
+    SELECT ei.rep_id,
+           COALESCE(SUM(ei.total_fils), 0)::bigint AS amount_fils,
+           COALESCE(SUM(CASE WHEN ei.payment_type = 'CASH' THEN ei.total_fils ELSE 0 END), 0)::bigint AS cash_fils,
+           COALESCE(SUM(CASE WHEN ei.payment_type = 'CASH' THEN 0 ELSE ei.total_fils END), 0)::bigint AS credit_fils
     FROM erp_invoices ei
     WHERE ei.deleted_at IS NULL
       AND ei.issued_at >= $1::date AND ei.issued_at < $2::date
     GROUP BY ei.rep_id
   ) ea ON ea.rep_id = r.id
+  LEFT JOIN (
+    -- Van sales split by how they were PAID FOR, because cash and credit earn
+    -- different rates. A voucher's payment rows say which: anything booked
+    -- CREDIT is the credit part, everything else (cash, cheque, transfer, card)
+    -- is money that arrived at the time of sale.
+    --
+    -- Split on the PAYMENTS, not the voucher, because one sale can be part cash
+    -- and part on account — paying the whole of a half-paid sale at the cash
+    -- rate is a real overpayment, and it is invisible in a monthly total.
+    SELECT h.user_code,
+           SUM(CASE WHEN p.payment_type = 'CREDIT' THEN 0 ELSE ROUND(p.amount::numeric * 1000) END)::bigint AS cash_fils,
+           SUM(CASE WHEN p.payment_type = 'CREDIT' THEN ROUND(p.amount::numeric * 1000) ELSE 0 END)::bigint AS credit_fils
+      FROM voucher_headers h
+      JOIN payments p ON p.voucher_number = h.voucher_number
+     WHERE h.trans_kind = 'SALE' AND h.is_posted = true AND h.deleted_at IS NULL
+       AND h.in_date >= $1::date AND h.in_date < $2::date
+     GROUP BY h.user_code
+  ) sp ON sp.user_code = u.user_number
+  LEFT JOIN (
+    -- What the salesman actually COLLECTED.
+    --
+    -- 'confirmed' and 'deposited' only, and the vocabulary is LOWERCASE — the
+    -- table's own check constraint says so, and comparing against 'CONFIRMED'
+    -- matches nothing at all, which reads as a salesman who collected zero.
+    --
+    -- 'pending' is money that has not arrived and 'bounced' is money that came
+    -- back; paying commission on either is paying for money not received.
+    SELECT c.rep_id, COALESCE(SUM(ROUND(c.amount::numeric * 1000)), 0)::bigint AS amount_fils
+      FROM collections c
+     WHERE c.status IN ('confirmed', 'deposited')
+       AND c.collected_at >= $1::date AND c.collected_at < $2::date
+     GROUP BY c.rep_id
+  ) co ON co.rep_id = r.id
 `;
 
 const SELECT_COLS = `
@@ -93,7 +160,18 @@ const SELECT_COLS = `
   (COALESCE(sa.amount_fils, 0) + COALESCE(ea.amount_fils, 0)) AS "actualAmount",
   COALESCE(sa.amount_fils, 0)       AS "actualVanAmount",
   COALESCE(ea.amount_fils, 0)       AS "actualErpAmount",
-  COALESCE(sq.qty, 0)               AS "actualQty"
+  COALESCE(sq.qty, 0)               AS "actualQty",
+  t.sales_target_fils               AS "salesTargetFils",
+  t.collection_target_fils          AS "collectionTargetFils",
+  COALESCE(t.cash_pct, 0)           AS "cashPct",
+  COALESCE(t.credit_pct, 0)         AS "creditPct",
+  COALESCE(t.collection_pct, 0)     AS "collectionPct",
+  COALESCE(sp.cash_fils, 0)         AS "cashSalesFils",
+  -- An ERP invoice with no payment type counts as CREDIT: the lower rate.
+  -- Guessing in the salesman's favour is how commission gets overpaid quietly.
+  (COALESCE(sp.credit_fils, 0) + COALESCE(ea.credit_fils, 0)) AS "creditSalesFils",
+  COALESCE(ea.cash_fils, 0)         AS "erpCashFils",
+  COALESCE(co.amount_fils, 0)       AS "collectedFils"
 `;
 
 @Injectable()
@@ -181,9 +259,25 @@ export class TargetsService {
       where: { repId: dto.repId, year: dto.year, month: dto.month },
     });
     const row = existing ?? this.repo.create({ repId: dto.repId, year: dto.year, month: dto.month });
-    row.metric = dto.metric as TargetMetric;
-    row.targetValue = String(dto.targetValue);
-    row.notes = dto.notes ?? null;
+
+    // Every field is optional and applied only when SENT, so a caller editing
+    // one rate does not silently clear a target it never mentioned. `null` is
+    // meaningful and distinct from absent: it clears the target.
+    if (dto.metric !== undefined) row.metric = (dto.metric as TargetMetric) ?? null;
+    if (dto.targetValue !== undefined) {
+      row.targetValue = dto.targetValue == null ? null : String(dto.targetValue);
+    }
+    if (dto.salesTargetFils !== undefined) {
+      row.salesTargetFils = dto.salesTargetFils == null ? null : String(dto.salesTargetFils);
+    }
+    if (dto.collectionTargetFils !== undefined) {
+      row.collectionTargetFils =
+        dto.collectionTargetFils == null ? null : String(dto.collectionTargetFils);
+    }
+    if (dto.cashPct !== undefined) row.cashPct = String(dto.cashPct);
+    if (dto.creditPct !== undefined) row.creditPct = String(dto.creditPct);
+    if (dto.collectionPct !== undefined) row.collectionPct = String(dto.collectionPct);
+    if (dto.notes !== undefined) row.notes = dto.notes ?? null;
     return this.repo.save(row);
   }
 
@@ -234,5 +328,62 @@ function mapRow(r: Record<string, string | null>): TargetRow {
     actualQty,
     progressPct,
     remaining,
+    ...commission(r),
+  };
+}
+
+/**
+ * What the salesman sold, collected, and is owed for it.
+ *
+ * Commission is computed from the rates ON THE TARGET ROW, not from the rep — a
+ * rate that changes in March must not retrospectively re-price January, and a
+ * month's row is the record of what was agreed for that month.
+ *
+ * Rounded once per component rather than on the sum: each is a separate line on
+ * a commission sheet and has to add up to the total printed beside it.
+ */
+function commission(r: Record<string, string | null>) {
+  const n = (k: string) => Number(r[k] ?? 0) || 0;
+
+  const cashSalesFils = n('cashSalesFils') + n('erpCashFils');
+  const creditSalesFils = n('creditSalesFils');
+  const totalSalesFils = cashSalesFils + creditSalesFils;
+  const collectedFils = n('collectedFils');
+
+  const cashPct = n('cashPct');
+  const creditPct = n('creditPct');
+  const collectionPct = n('collectionPct');
+
+  const pctOf = (amount: number, pct: number) => Math.round((amount * pct) / 100);
+  const commissionOnCashFils = pctOf(cashSalesFils, cashPct);
+  const commissionOnCreditFils = pctOf(creditSalesFils, creditPct);
+  const commissionOnCollectionFils = pctOf(collectedFils, collectionPct);
+
+  const salesTargetFils = r.salesTargetFils != null ? Number(r.salesTargetFils) : null;
+  const collectionTargetFils =
+    r.collectionTargetFils != null ? Number(r.collectionTargetFils) : null;
+
+  // A zero target is "not set", not "already achieved": dividing by it would
+  // report either infinity or a triumphant 100% for a salesman who sold nothing.
+  const progress = (actual: number, target: number | null) =>
+    target && target > 0 ? Math.round((actual / target) * 100) : null;
+
+  return {
+    salesTargetFils,
+    collectionTargetFils,
+    cashPct,
+    creditPct,
+    collectionPct,
+    cashSalesFils,
+    creditSalesFils,
+    totalSalesFils,
+    collectedFils,
+    commissionOnCashFils,
+    commissionOnCreditFils,
+    commissionOnCollectionFils,
+    commissionTotalFils:
+      commissionOnCashFils + commissionOnCreditFils + commissionOnCollectionFils,
+    salesProgressPct: progress(totalSalesFils, salesTargetFils),
+    collectionProgressPct: progress(collectedFils, collectionTargetFils),
   };
 }

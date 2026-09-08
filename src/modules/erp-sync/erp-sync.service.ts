@@ -301,6 +301,8 @@ interface ErpInvoiceDto {
   issuedAt?: string | null;
   updatedAt?: string | null;
   salesmanName?: string | null;
+  /** CASH | CREDIT — which commission rate this invoice earns. */
+  paymentType?: string | null;
   /** "VAN_SALES" when cash-van pushed it there; "ERP" when the office raised it. */
   origin?: string | null;
   externalId?: string | null;
@@ -2463,6 +2465,7 @@ export class ErpSyncService {
     // has since been reassigned; only an UNcredited one may adopt one now.
     if (!existing || !existing.repId) row.repId = repId;
     row.salesmanName = inv.salesmanName ?? null;
+    row.paymentType = inv.paymentType ?? null;
     row.status = inv.status ?? null;
     row.origin = 'ERP';
     row.totalFils = String(toFils(inv.totalAmount));

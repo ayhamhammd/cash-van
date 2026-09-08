@@ -45,6 +45,17 @@ export class ErpInvoice extends BaseEntity {
   @Column({ name: 'salesman_name', type: 'text', nullable: true })
   salesmanName?: string | null;
 
+  /**
+   * CASH or CREDIT, as the ERP recorded it.
+   *
+   * Commission is paid at different rates for the two, so this decides which
+   * rate a mirrored invoice earns. Null when an older ERP did not report it —
+   * treated as CREDIT (the lower rate), because guessing in the salesman's
+   * favour is how commission gets overpaid without anyone noticing.
+   */
+  @Column({ name: 'payment_type', type: 'text', nullable: true })
+  paymentType?: string | null;
+
   /** issued | partially_paid | paid | voided — the ERP's own vocabulary. */
   @Column({ type: 'text', nullable: true })
   status?: string | null;
