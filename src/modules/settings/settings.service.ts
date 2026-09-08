@@ -21,6 +21,7 @@ import {
   VoucherReportDto,
 } from './dto/voucher-report.dto';
 import { decryptSecret, encryptSecret, maskSecret } from '../../common/crypto/secret.util';
+import { readStoredSecret } from '../../common/crypto/read-stored-secret';
 import { UserContextService } from '../../common/context/user-context.service';
 
 export interface AppSettingsView {
@@ -128,10 +129,10 @@ export class SettingsService {
       .where('s.id = 1')
       .getOne();
     if (!row) throw new NotFoundException('app_settings row missing — re-run migrations');
-    let secretKey: string | null = null;
-    if (row.jofotaraSecretKeyEncrypted) {
-      secretKey = decryptSecret(row.jofotaraSecretKeyEncrypted);
-    }
+    // Undecryptable reads as unset — see readStoredSecret. A restored database
+    // carries another install's ciphertext, and crashing the settings screen
+    // over it helps nobody.
+    const secretKey = readStoredSecret(row.jofotaraSecretKeyEncrypted, 'JoFotara secret key');
     return {
       clientId: row.jofotaraClientId ?? null,
       secretKey,
@@ -497,7 +498,16 @@ export class SettingsService {
     return {
       enabled: row.erpSyncEnabled,
       baseUrl: row.erpBaseUrl ?? null,
-      apiKey: row.erpApiKeyEncrypted ? decryptSecret(row.erpApiKeyEncrypted) : null,
+      // A stored key that cannot be decrypted reads as NO key, not as a crash.
+      //
+      // The secret is sealed with JOFOTARA_KMS_KEY (or a key derived from
+      // JWT_SECRET), so a database restored onto another machine carries
+      // ciphertext this server cannot open — AES-GCM fails its auth tag and
+      // throws. That happens on every restore of a customer database onto dev,
+      // and it used to surface as a bare 500 from `POST /settings/erp/test`,
+      // which tells whoever is looking nothing at all. Reported as "no key
+      // configured" instead, which is both true here and actionable: re-enter it.
+      apiKey: readStoredSecret(row.erpApiKeyEncrypted, 'ERP API key'),
       vanStore: row.erpVanStore ?? null,
       defaultCategoryId: row.erpDefaultCategoryId ?? null,
       defaultTaxRateId: row.erpDefaultTaxRateId ?? null,
@@ -557,7 +567,7 @@ export class SettingsService {
       enabled: row.aiEnabled,
       provider: row.aiProvider ?? 'anthropic',
       model: row.aiModel ?? null,
-      apiKey: row.aiApiKeyEncrypted ? decryptSecret(row.aiApiKeyEncrypted) : null,
+      apiKey: readStoredSecret(row.aiApiKeyEncrypted, 'AI API key'),
       confidenceThreshold: row.aiConfidenceThreshold ?? 75,
       language: row.aiLanguage ?? 'auto',
       capabilities: row.aiCapabilities ?? {},
