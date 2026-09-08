@@ -177,6 +177,29 @@ export interface SalesmanDocumentRow {
   status: string | null;
 }
 
+/** One salesman and the slice of the customer book they carry. */
+export interface CustomersByRepRow {
+  repId: string;
+  repCode: string | null;
+  repName: string;
+  repActive: boolean;
+  customers: number;
+  activeCustomers: number;
+  /** What their customers owe, in fils. */
+  totalDebtFils: number;
+}
+
+/** One customer under a salesman — or under nobody. */
+export interface CustomerOfRepRow {
+  customerId: string;
+  customerNumber: string;
+  customerName: string;
+  phone: string | null;
+  isActive: boolean;
+  debtFils: number;
+  creditLimitFils: number;
+}
+
 export interface RepLeaderboardRow {
   userCode: string;
   repName: string;
@@ -1163,6 +1186,103 @@ export class ReportsService {
           AND ei.issued_at >= $2::date AND ei.issued_at < ($3::date + 1)
         ORDER BY "docDate" DESC, "number" DESC`,
       [repId, from, to],
+    );
+  }
+
+/**
+   * How the customer book is divided between the salesmen.
+   *
+   * Answers two questions on one screen: who is carrying how much of the book,
+   * and — the one that costs money — who is carrying customers nobody can serve.
+   *
+   * A customer whose rep_id points at a salesman who has been DELETED is
+   * reported separately from one with no salesman at all. Both are unserved, but
+   * they are different mistakes with different fixes: the first is a deletion
+   * that left its customers behind, the second is a customer nobody has been
+   * given yet. Rolled together they look like one problem and get one wrong fix.
+   *
+   * Both also matter beyond tidiness: the salesman report and the commission
+   * target key on rep_id, so every customer in either bucket contributes to
+   * nobody's figures.
+   */
+  async customersByRep(
+    visibleRepIds: string[] | null = null,
+  ): Promise<CustomersByRepRow[]> {
+    return this.ds.query(
+      `SELECT r.id                                   AS "repId",
+              r.code                                 AS "repCode",
+              COALESCE(r.name_ar, r.name_en, '')     AS "repName",
+              r.is_active                            AS "repActive",
+              COUNT(c.id)::int                       AS "customers",
+              COUNT(c.id) FILTER (WHERE c.is_active)::int AS "activeCustomers",
+              COALESCE(SUM(c.total_debt), 0)::float8 AS "totalDebtFils"
+         FROM reps r
+         LEFT JOIN customers c
+                ON c.rep_id = r.id AND c.deleted_at IS NULL
+        WHERE r.deleted_at IS NULL
+          AND ($1::uuid[] IS NULL OR r.id = ANY($1::uuid[]))
+        GROUP BY r.id, r.code, r.name_ar, r.name_en, r.is_active
+        ORDER BY COUNT(c.id) DESC, COALESCE(r.name_ar, r.name_en, '') ASC`,
+      [visibleRepIds ?? null],
+    );
+  }
+
+  /**
+   * The customers nobody can serve: no salesman, or one that no longer exists.
+   *
+   * Only for an unrestricted viewer. A scoped supervisor sees their own team's
+   * customers; an unassigned customer belongs to no team, so showing them to one
+   * supervisor and not another would be arbitrary.
+   */
+  async unassignedCustomerCounts(): Promise<{
+    noRep: number;
+    orphanedRep: number;
+    noRepDebtFils: number;
+    orphanedDebtFils: number;
+  }> {
+    const [row] = await this.ds.query(
+      `SELECT COUNT(*) FILTER (WHERE c.rep_id IS NULL)::int                AS "noRep",
+              COUNT(*) FILTER (WHERE c.rep_id IS NOT NULL AND r.id IS NULL)::int AS "orphanedRep",
+              COALESCE(SUM(c.total_debt) FILTER (WHERE c.rep_id IS NULL), 0)::float8 AS "noRepDebtFils",
+              COALESCE(SUM(c.total_debt) FILTER (WHERE c.rep_id IS NOT NULL AND r.id IS NULL), 0)::float8 AS "orphanedDebtFils"
+         FROM customers c
+         LEFT JOIN reps r ON r.id = c.rep_id AND r.deleted_at IS NULL
+        WHERE c.deleted_at IS NULL`,
+    );
+    return row;
+  }
+
+  /**
+   * The customers behind one row.
+   *
+   * `repId` names a salesman; the two words name the buckets instead — 'none'
+   * for customers with no salesman, 'orphaned' for customers pointing at one who
+   * has been deleted. They are words rather than a null because a null in a
+   * query string is indistinguishable from a parameter somebody forgot to send,
+   * and that difference decides whether this returns a few rows or the lot.
+   */
+  async customersForRep(repId: string): Promise<CustomerOfRepRow[]> {
+    const where =
+      repId === 'none'
+        ? `c.rep_id IS NULL`
+        : repId === 'orphaned'
+          ? `c.rep_id IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM reps r WHERE r.id = c.rep_id AND r.deleted_at IS NULL)`
+          : `c.rep_id = $1::uuid`;
+
+    return this.ds.query(
+      `SELECT c.id                                   AS "customerId",
+              c.customer_number                      AS "customerNumber",
+              COALESCE(c.customer_name, c.name_ar, '') AS "customerName",
+              c.phone                                AS "phone",
+              c.is_active                            AS "isActive",
+              COALESCE(c.total_debt, 0)::float8      AS "debtFils",
+              COALESCE(c.credit_limit, 0)::float8    AS "creditLimitFils"
+         FROM customers c
+        WHERE c.deleted_at IS NULL AND ${where}
+        ORDER BY COALESCE(c.customer_name, c.name_ar, '') ASC
+        LIMIT 2000`,
+      repId === 'none' || repId === 'orphaned' ? [] : [repId],
     );
   }
 

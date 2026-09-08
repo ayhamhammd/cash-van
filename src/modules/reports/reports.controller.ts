@@ -157,6 +157,47 @@ export class ReportsController {
     return this.reports.salesmanDocuments(repId, range.from, range.to);
   }
 
+  @Get('customers-by-rep')
+  @ApiOperation({
+    summary: 'How the customer book is divided between the salesmen',
+    description:
+      'Every salesman with the number of customers assigned to them and what those ' +
+      'customers owe. An unrestricted viewer also gets the two unserved buckets: ' +
+      'customers with no salesman, and customers pointing at a salesman who has ' +
+      'been deleted.',
+  })
+  @ApiOkResponse({ description: 'One row per salesman, plus unassigned counts' })
+  async customersByRep(@CurrentUser() user: AuthenticatedUser) {
+    const visible = await this.repScope.visibleRepIds(user);
+    const rows = await this.reports.customersByRep(visible);
+    // A scoped supervisor sees their own team. An unassigned customer belongs to
+    // no team, so showing them to one supervisor and not another would be
+    // arbitrary — they are the office's problem, and only the office is told.
+    const unassigned = visible === null ? await this.reports.unassignedCustomerCounts() : null;
+    return { rows, unassigned };
+  }
+
+  @Get('customers-by-rep/:repId/customers')
+  @ApiOperation({
+    summary: 'The customers behind one row',
+    description:
+      "A salesman's id, or the word 'none' for customers with no salesman, or " +
+      "'orphaned' for customers pointing at a salesman who has been deleted.",
+  })
+  @ApiParam({ name: 'repId', description: "A salesman id, or 'none' / 'orphaned'" })
+  @ApiOkResponse({ description: 'The customers' })
+  async customersForRep(
+    @Param('repId') repId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    const visible = await this.repScope.visibleRepIds(user);
+    const bucket = repId === 'none' || repId === 'orphaned';
+    // Scoped viewers get their own salesmen only, and never the unserved
+    // buckets — same reasoning as the summary above.
+    if (visible !== null && (bucket || !visible.includes(repId))) return [];
+    return this.reports.customersForRep(repId);
+  }
+
   @Get('rep-commission')
   @ApiOperation({
     summary: 'One salesman\'s commission for a date range',
