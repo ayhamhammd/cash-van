@@ -11,6 +11,10 @@ import {
 import * as ExcelJS from 'exceljs';
 
 import { TaxLedgerService } from './tax-ledger.service';
+import {
+  JoFotaraExportService,
+  type JoFotaraState,
+} from './jofotara-export.service';
 import { LedgerEntryType } from './entities/tax-ledger-entry.entity';
 import { RepScopeService } from '../users/rep-scope.service';
 import {
@@ -30,6 +34,7 @@ export class TaxReportController {
   constructor(
     private readonly ledger: TaxLedgerService,
     private readonly repScope: RepScopeService,
+    private readonly jofotaraExport: JoFotaraExportService,
   ) {}
 
   @Get('report')
@@ -69,6 +74,70 @@ export class TaxReportController {
     @Query('entryType') entryType?: LedgerEntryType,
   ) {
     return this.ledger.list(from, to, entryType, await this.repScope.visibleRepIds(user));
+  }
+
+  @Get('jofotara/summary')
+  @ApiOperation({
+    summary: 'JoFotara export status — counts',
+    description:
+      'How many POSTED SALES in the period reached the government and how many did ' +
+      'not: exported (the QR came back), failed (REJECTED/ERROR — terminal, it will ' +
+      'never gain a QR by waiting) and pending (everything else, including a sale ' +
+      'that was never submitted). Only sales are filed, so transfers and van loads ' +
+      'are excluded rather than counted as unexported.',
+  })
+  @ApiQuery({ name: 'from', required: false, example: '2026-05-01' })
+  @ApiQuery({ name: 'to', required: false, example: '2026-05-31' })
+  @ApiOkResponse({ description: '{ total, exported, pending, failed }' })
+  async jofotaraSummary(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const codes = await this.jofotaraExport.userCodesForReps(
+      await this.repScope.visibleRepIds(user),
+    );
+    return this.jofotaraExport.summary(from, to, codes);
+  }
+
+  @Get('jofotara/vouchers')
+  @ApiOperation({
+    summary: 'JoFotara export status — the vouchers',
+    description:
+      'The posted sales behind the summary, newest first, with the salesman and ' +
+      'customer on each. Filter with `state` to get exactly the list the office ' +
+      'needs: PENDING and FAILED are the ones that did NOT reach the authority.',
+  })
+  @ApiQuery({ name: 'from', required: false, example: '2026-05-01' })
+  @ApiQuery({ name: 'to', required: false, example: '2026-05-31' })
+  @ApiQuery({
+    name: 'state',
+    required: false,
+    enum: ['EXPORTED', 'PENDING', 'FAILED'],
+    description: 'Omit for all three',
+  })
+  @ApiQuery({ name: 'limit', required: false, example: 100 })
+  @ApiQuery({ name: 'offset', required: false, example: 0 })
+  @ApiOkResponse({ description: '{ items, total }' })
+  async jofotaraVouchers(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('state') state?: JoFotaraState,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    const codes = await this.jofotaraExport.userCodesForReps(
+      await this.repScope.visibleRepIds(user),
+    );
+    return this.jofotaraExport.list(
+      from,
+      to,
+      state,
+      codes,
+      Math.min(Number(limit) || 100, 500),
+      Number(offset) || 0,
+    );
   }
 
   @Get('report/export')

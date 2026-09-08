@@ -15,6 +15,7 @@ import { JoFotaraApiService } from './jofotara-api.service';
 import { TaxLedgerService } from './tax-ledger.service';
 import { JoFotaraSubmissionService } from './jofotara-submission.service';
 import { CreditNotesService } from './credit-notes.service';
+import { JoFotaraExportService } from './jofotara-export.service';
 
 import { CreditNotesController } from './credit-notes.controller';
 import { JoFotaraController } from './jofotara.controller';
@@ -45,6 +46,7 @@ import { UsersModule } from '../users/users.module';
     TaxLedgerService,
     JoFotaraSubmissionService,
     CreditNotesService,
+    JoFotaraExportService,
   ],
   exports: [TaxLedgerService, JoFotaraSubmissionService],
 })

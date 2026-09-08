@@ -57,7 +57,50 @@ export class InvoicesService {
       take: q.limit ?? 25,
       skip: q.offset ?? 0,
     });
+    await this.attachParties(items);
     return { items, total };
+  }
+
+  /**
+   * Attach the salesman and customer NAMES to each row.
+   *
+   * The list carried only `repId` and `customerId`, so the orders screen could
+   * show a column of UUIDs or nothing — and it showed nothing, which left the
+   * office reading a list of orders with no way to tell whose they were. Two
+   * queries for the whole page, never per row.
+   *
+   * Written onto the entity as extra props: the invoice is serialized to JSON
+   * as-is, exactly how products attach their category name.
+   */
+  private async attachParties(items: Invoice[]): Promise<void> {
+    if (items.length === 0) return;
+    const repIds = [...new Set(items.map((i) => i.repId).filter(Boolean))];
+    const custIds = [...new Set(items.map((i) => i.customerId).filter(Boolean))];
+    const [reps, customers] = await Promise.all([
+      repIds.length ? this.reps.find({ where: { id: In(repIds) } }) : Promise.resolve([]),
+      custIds.length
+        ? this.customers.find({ where: { id: In(custIds) } })
+        : Promise.resolve([]),
+    ]);
+    const repById = new Map(reps.map((r) => [r.id, r]));
+    const custById = new Map(customers.map((c) => [c.id, c]));
+    for (const inv of items) {
+      const rep = repById.get(inv.repId);
+      const cust = custById.get(inv.customerId);
+      const row = inv as Invoice & {
+        repName: string | null;
+        repCode: string | null;
+        customerName: string | null;
+        customerNumber: string | null;
+      };
+      // Null rather than a placeholder: a deleted rep or customer is a real
+      // state, and the screen says so in its own language rather than printing
+      // an English dash the Arabic UI would then have to special-case.
+      row.repName = rep?.nameAr ?? null;
+      row.repCode = rep?.code ?? null;
+      row.customerName = cust?.nameAr ?? null;
+      row.customerNumber = cust?.customerNumber ?? null;
+    }
   }
 
   async findOne(id: string): Promise<Invoice> {
