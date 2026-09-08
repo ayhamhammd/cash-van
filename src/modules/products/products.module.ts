@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ErpSyncModule } from '../erp-sync/erp-sync.module';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { ItemImage } from '../items/entities/item-image.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { CustomerAiProfile } from '../customers/entities/customer-ai-profile.entity';
@@ -35,6 +36,7 @@ import { PriceListsController } from './price-lists.controller';
   imports: [
     TypeOrmModule.forFeature([
       ItemCart,
+      ItemImage,
       ItemUnit,
       ProductCategory,
       VanStock,

@@ -91,15 +91,28 @@ export class ProductsController {
   @Public()
   @Get('image/:itemNumber')
   @ApiOperation({
-    summary: 'Item image (proxy)',
+    summary: 'Item image',
     description:
-      "Streams the item's image from wherever it's hosted (the ERP), via this host, so devices that can't reach the ERP directly still load it. Public (Coil/<img> send no auth).",
+      "The item's photo, served from this server's own cache of it. Devices talk only to this host — the URL stored on the item points at the ERP, which a phone generally cannot reach. `?thumb=1` returns the small square for list rows. Public: Coil and <img> send no auth.",
   })
   @ApiParam({ name: 'itemNumber' })
-  async image(@Param('itemNumber') itemNumber: string, @Res() res: Response) {
-    const img = await this.products.imageBytes(itemNumber);
+  async image(
+    @Param('itemNumber') itemNumber: string,
+    @Query('thumb') thumb: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const img = await this.products.imageBytes(itemNumber, { thumb: thumb === '1' });
     if (!img) {
       res.status(HttpStatus.NOT_FOUND).end();
+      return;
+    }
+    // A van reopens the same catalogue all day. Answering "you already have it"
+    // costs one small request instead of the whole picture, on a connection that
+    // is usually someone's phone signal in a shop.
+    res.setHeader('ETag', img.etag);
+    if (req.headers['if-none-match'] === img.etag) {
+      res.status(HttpStatus.NOT_MODIFIED).end();
       return;
     }
     res.setHeader('Content-Type', img.contentType);

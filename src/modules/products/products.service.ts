@@ -4,6 +4,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Brackets, In, IsNull, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { ItemImage } from '../items/entities/item-image.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { ProductCategory } from './entities/product-category.entity';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -40,6 +41,8 @@ export class ProductsService {
     private readonly itemUnits: Repository<ItemUnit>,
     @InjectRepository(ProductCategory)
     private readonly categories: Repository<ProductCategory>,
+    @InjectRepository(ItemImage)
+    private readonly itemImages: Repository<ItemImage>,
     private readonly events: EventEmitter2,
   ) {}
 
@@ -147,22 +150,136 @@ export class ProductsService {
   }
 
   /**
-   * Fetch an item's image bytes from wherever it's hosted (the ERP), server-side.
-   * Lets the app load images via the cash-van host it already reaches, instead of
-   * the ERP's host (which is often unreachable from a device, e.g. 127.0.0.1).
+   * An item's photo, served from this server's own database.
+   *
+   * The bytes are CACHED HERE, and that is the whole point of this method. Two
+   * separate failures put a hole in a van's catalogue, and both end here:
+   *
+   *  - The ERP used to keep photos on its container's filesystem with no volume
+   *    behind it, so a deploy deleted every one of them while the product rows
+   *    went on pointing at the gaps. Photos live in its database now, but every
+   *    copy already cached here survives even that going wrong again.
+   *  - The stored URL is built from the ERP's CONFIGURED base, which is chosen
+   *    to make the server-to-server sync work and is routinely an address only
+   *    reachable inside the docker network. Fetching it is this server's job,
+   *    never the handset's — which is why the proxy exists at all.
+   *
+   * The old version fetched upstream on EVERY request, which made each photo as
+   * available as the ERP happened to be at that second, and no more. Now upstream
+   * is touched once per photo: on a miss, or when the office replaces the picture
+   * and the item's URL changes with it.
+   *
+   * A failed fetch falls back to whatever is already cached, stale source and
+   * all. A rep in a shop is far better served by last week's picture of a product
+   * than by an empty square, and the URL only changes when someone deliberately
+   * replaces the photo — so the stale copy is still a picture of the right thing.
    */
   async imageBytes(
     itemNumber: string,
-  ): Promise<{ buffer: Buffer; contentType: string } | null> {
-    const row = await this.products.findOne({ where: { itemNumber } });
-    if (!row?.imageUrl) return null;
+    opts: { thumb?: boolean } = {},
+  ): Promise<{ buffer: Buffer; contentType: string; etag: string } | null> {
+    const row = await this.products.findOne({
+      where: { itemNumber },
+      select: { id: true, imageUrl: true },
+    });
+    if (!row) return null;
+
+    const cached = await this.itemImages.findOne({ where: { itemId: row.id } });
+    const source = row.imageUrl?.trim() || null;
+
+    // Fresh: the cached copy was taken from the URL the item carries right now.
+    if (cached && source && cached.sourceUrl === source) return this.served(cached, opts.thumb);
+
+    // The item has no photo at all. Anything cached is a leftover from one that
+    // was removed, and serving it would resurrect a deleted picture.
+    if (!source) {
+      if (cached) await this.itemImages.delete({ itemId: row.id });
+      return null;
+    }
+
+    const fetched = await this.fetchUpstream(source);
+    if (!fetched) {
+      // Upstream is unreachable or has lost the file. Serve the old copy if there
+      // is one — see above — and only give up when there is nothing at all.
+      return cached ? this.served(cached, opts.thumb) : null;
+    }
+
+    const saved = this.itemImages.create({
+      ...(cached ? { id: cached.id } : {}),
+      itemId: row.id,
+      sourceUrl: source,
+      data: fetched.data,
+      thumb: fetched.thumb,
+      mime: fetched.mime,
+      byteSize: fetched.data.length,
+      fetchedAt: new Date(),
+    });
+    // A concurrent request for the same cold photo would otherwise collide on
+    // uq_item_images_item. Losing that race is harmless — the winner cached the
+    // very same bytes — so the response is served either way.
+    await this.itemImages.save(saved).catch(() => undefined);
+    return this.served(saved, opts.thumb);
+  }
+
+  /** The stored copy as a response: the small square when asked for and present. */
+  private served(
+    img: ItemImage,
+    thumb?: boolean,
+  ): { buffer: Buffer; contentType: string; etag: string } {
+    const useThumb = Boolean(thumb && img.thumb && img.thumb.length > 0);
+    const buffer = useThumb ? (img.thumb as Buffer) : img.data;
+    return {
+      buffer,
+      contentType: img.mime,
+      // Identifies these exact bytes: the row, which variant, and which fetch
+      // produced it. A replaced photo re-fetches and moves fetchedAt, so a
+      // handset holding the old one is told to take the new.
+      etag: `"${img.id}-${useThumb ? 't' : 'f'}-${img.fetchedAt.getTime()}"`,
+    };
+  }
+
+  /**
+   * Pull one photo from wherever it is hosted, server-to-server.
+   *
+   * Bounded on purpose. An unreachable ERP must cost this request a few seconds
+   * and no more, because a van app waiting on a picture is a van app that looks
+   * broken; and an upstream that answers with something enormous must not be
+   * copied into this database row by row.
+   */
+  private async fetchUpstream(
+    url: string,
+  ): Promise<{ data: Buffer; thumb: Buffer | null; mime: string } | null> {
+    const main = await this.getBytes(url);
+    if (!main) return null;
+    // The ERP renders a 200px square for every photo it stores. Taking it now
+    // costs one more server-to-server call, once, and saves every list on every
+    // handset from downloading the full picture to draw a 40dp thumbnail.
+    const thumb = this.isErpImageUrl(url) ? await this.getBytes(`${url}?thumb=1`) : null;
+    return { data: main.bytes, thumb: thumb?.bytes ?? null, mime: main.mime };
+  }
+
+  /** ERP-served photo — `/api/images/<uuid>`, the only source with a thumb variant. */
+  private isErpImageUrl(url: string): boolean {
+    return /\/api\/images\/[0-9a-f-]{36}$/i.test(url);
+  }
+
+  private async getBytes(url: string): Promise<{ bytes: Buffer; mime: string } | null> {
+    const MAX_BYTES = 8 * 1024 * 1024;
+    const TIMEOUT_MS = 8000;
+    const abort = AbortSignal.timeout(TIMEOUT_MS);
     try {
-      const upstream = await fetch(row.imageUrl);
-      if (!upstream.ok) return null;
-      return {
-        buffer: Buffer.from(await upstream.arrayBuffer()),
-        contentType: upstream.headers.get('content-type') ?? 'image/jpeg',
-      };
+      const res = await fetch(url, { signal: abort });
+      if (!res.ok) return null;
+      const declared = Number(res.headers.get('content-length'));
+      if (Number.isFinite(declared) && declared > MAX_BYTES) return null;
+      const bytes = Buffer.from(await res.arrayBuffer());
+      // Checked again after reading: content-length is a claim, not a promise.
+      if (bytes.length === 0 || bytes.length > MAX_BYTES) return null;
+      const mime = res.headers.get('content-type')?.split(';')[0]?.trim();
+      // A misconfigured upstream answering an HTML error page with 200 must not
+      // be stored as though it were a picture.
+      if (mime && !mime.startsWith('image/')) return null;
+      return { bytes, mime: mime || 'image/jpeg' };
     } catch {
       return null;
     }
