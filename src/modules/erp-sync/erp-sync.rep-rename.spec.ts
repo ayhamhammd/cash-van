@@ -25,7 +25,13 @@ function makeSvc(opts: {
   const savedUsers: any[] = [];
 
   const args: any[] = new Array(23).fill(null);
-  args[0] = { list: jest.fn().mockResolvedValue({ data: opts.warehouses, total: opts.warehouses.length }) };
+  // Both, because the warehouse pull now uses listAll — one page at a time is
+  // not enough when a client has more warehouses than the ERP returns per call.
+  const page = { data: opts.warehouses, total: opts.warehouses.length };
+  args[0] = {
+    list: jest.fn().mockResolvedValue(page),
+    listAll: jest.fn().mockResolvedValue(page),
+  };
   args[1] = { salesmanActivationEnabled: jest.fn().mockResolvedValue(false) };
   args[2] = {
     transaction: jest.fn(),

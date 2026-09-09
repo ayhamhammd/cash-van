@@ -215,6 +215,8 @@ export interface StockReconcileResult {
   dryRun: boolean;
   checkedAt: string;
   erpRowsFetched: number;
+  /** Rows the ERP said existed. Equal to erpRowsFetched, or this refuses to run. */
+  erpRowsReported: number;
   poolsCompared: number;
   poolsDrifted: number;
   /** ERP SKUs with no cash-van item — their stock cannot be compared or fixed. */
@@ -2672,7 +2674,10 @@ export class ErpSyncService {
         warehouseCode: store,
         since,
         page,
-        pageSize: 200,
+        // The ERP's real ceiling. Asking for 200 got 100 and the loop below then
+        // read a FULL page as the last one, so a store never mirrored more than
+        // one page per run.
+        pageSize: 100,
       });
       if (data.length === 0) break;
       for (const mv of data) {
@@ -2697,9 +2702,9 @@ export class ErpSyncService {
           );
         }
       }
-      if (data.length < 200) break;
+      if (data.length < 100) break;
       page += 1;
-      if (page > 50) break; // safety cap (10k movements / run)
+      if (page > 100) break; // safety cap (10k movements / run)
     }
     if (maxTs) {
       const c = cursor ?? this.cursors.create({ entity });
@@ -2743,6 +2748,10 @@ export class ErpSyncService {
   async computeStockDrift(): Promise<{
     checkedAt: string;
     erpRowsFetched: number;
+    /** Rows the ERP reported as existing. Short of erpRowsFetched → partial read. */
+    erpRowsReported: number;
+    /** True when every row the ERP reported was actually fetched. */
+    complete: boolean;
     poolsCompared: number;
     driftedPools: number;
     absTotalDrift: number;
@@ -2780,16 +2789,12 @@ export class ErpSyncService {
     let erpRowsFetched = 0;
     let unresolvedSkus = 0;
     const unmatchedWarehouses = new Set<string>();
-    const pageSize = 200;
-    let page = 1;
-    for (;;) {
+    let erpTotalReported = 0;
+    {
       let data: VanStockRow[];
       let total: number;
       try {
-        ({ data, total } = await this.erp.list<VanStockRow>('van/stock', {
-          page,
-          pageSize,
-        }));
+        ({ data, total } = await this.erp.listAll<VanStockRow>('van/stock'));
       } catch (e) {
         // Unreachable/misconfigured ERP, or /van/stock not exposed — a clear
         // operator message beats a raw 500. This is read-only, so nothing is
@@ -2800,6 +2805,7 @@ export class ErpSyncService {
           }`,
         );
       }
+      erpTotalReported = total;
       for (const r of data) {
         erpRowsFetched += 1;
         const store = r.warehouseName ? storeByName.get(r.warehouseName.trim()) : undefined;
@@ -2815,9 +2821,6 @@ export class ErpSyncService {
         const key = `${store.number}|${target.itemNumber}|${target.stockUnitCode}`;
         erpByPool.set(key, (erpByPool.get(key) ?? 0) + (Number(r.quantity) || 0));
       }
-      if (page * pageSize >= total || data.length === 0) break;
-      page += 1;
-      if (page > 500) break; // safety cap (100k rows)
     }
 
     // 3. cash-van's computed on-hand per pool, from the item_balance view.
@@ -2891,6 +2894,17 @@ export class ErpSyncService {
       absTotalDrift: Math.round(absTotalDrift * 1000) / 1000,
       unresolvedSkus,
       unmatchedWarehouses: [...unmatchedWarehouses],
+      /**
+       * Whether the snapshot that produced this is the WHOLE snapshot.
+       *
+       * Everything here reads an absent pool as "the ERP holds none", which is
+       * only true if every row was actually fetched. It was not: the pager asked
+       * for 200 rows against a server that caps at 100 and stopped halfway, so
+       * half the ERP's stock looked like zero. Anything that WRITES off the back
+       * of this must refuse when it is false.
+       */
+      complete: erpRowsFetched >= erpTotalReported,
+      erpRowsReported: erpTotalReported,
       rows,
     };
   }
@@ -2957,12 +2971,26 @@ export class ErpSyncService {
     //    never describe different numbers.
     const drift = await this.computeStockDrift();
 
-    // 3. A snapshot with nothing in it is a broken read, not an empty company.
-    //    Believing it would zero every van at once.
+    // 3. The snapshot has to be WHOLE, because every pool missing from it is
+    //    about to be read as "the ERP holds none of this" and corrected to zero.
+    //
+    //    An empty snapshot is the obvious case — believing it would empty every
+    //    van at once. A PARTIAL one is the dangerous case, because it looks
+    //    entirely healthy: the pager asked for 200 rows from a server that caps
+    //    at 100 and stopped at half, so half the catalogue read as zero and was
+    //    duly zeroed. Half right, half zero. The pager is fixed; this makes sure
+    //    that a short read can never again be mistaken for an empty warehouse.
     if (drift.erpRowsFetched === 0) {
       throw new ServiceUnavailableException(
         'The ERP returned an empty stock snapshot. Refusing to reconcile — ' +
           'treating that as "everything is zero" would empty every van.',
+      );
+    }
+    if (!drift.complete) {
+      throw new ServiceUnavailableException(
+        `The ERP stock snapshot came back short — ${drift.erpRowsFetched} of ` +
+          `${drift.erpRowsReported} rows. Refusing to reconcile: every item in the ` +
+          'missing part would be read as zero stock and emptied.',
       );
     }
 
@@ -3029,6 +3057,7 @@ export class ErpSyncService {
       dryRun: Boolean(opts.dryRun),
       checkedAt: drift.checkedAt,
       erpRowsFetched: drift.erpRowsFetched,
+      erpRowsReported: drift.erpRowsReported,
       poolsCompared: drift.poolsCompared,
       poolsDrifted: drift.driftedPools,
       unresolvedSkus: drift.unresolvedSkus,
@@ -3282,15 +3311,12 @@ export class ErpSyncService {
       // transfer + stock views even though the stock exists (drift shows
       // unresolvedSkus:0, i.e. the broad mapping resolves every row). Filtering
       // the mapped result by itemSet below keeps the one path that resolves.
-      const pageSize = 200;
-      let page = 1;
-      for (;;) {
-        const { data, total } = await this.erp.list<VanStockRow>('van/stock', { page, pageSize });
-        erpRows.push(...data);
-        if (page * pageSize >= total || data.length === 0) break;
-        page += 1;
-        if (page > 500) break;
-      }
+      // Every page, counted by rows RECEIVED — see ErpHttpClient.listAll. The
+      // loop here asked for 200 against a server that caps at 100 and then
+      // stopped at `page * 200 >= total`, so it saw about half the snapshot and
+      // every pool in the other half kept its stale local figure.
+      const all = await this.erp.listAll<VanStockRow>('van/stock');
+      erpRows.push(...all.data);
     } catch {
       return { source: 'unavailable', reason: 'fetch_failed', asOf: null, rows: [] };
     }
@@ -3530,7 +3556,11 @@ export class ErpSyncService {
    * RepsService.create, which pushes the other direction).
    */
   private async pullWarehouses(): Promise<number> {
-    const { data } = await this.erp.list<ErpWarehouse>('warehouses', { page: 1, pageSize: 200 });
+    // Every page. One call for `pageSize: 200` returned the first 100 warehouses
+    // and nothing said the rest existed — and a store that is not on this list
+    // cannot be matched to an ERP warehouse at all, so its whole stock is
+    // invisible to the snapshot.
+    const { data } = await this.erp.listAll<ErpWarehouse>('warehouses');
     // Read once per pull, not per salesman: the answer cannot change mid-batch,
     // and a settings failure must not lock anyone out, so it defaults to false.
     const activationOn = await this.settings

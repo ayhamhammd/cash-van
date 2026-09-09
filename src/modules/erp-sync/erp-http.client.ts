@@ -67,6 +67,54 @@ export class ErpHttpClient {
   }
 
   /**
+   * Every page of a list endpoint, however many the ERP decides to give per call.
+   *
+   * THE BUG THIS EXISTS TO END. The ERP CAPS pageSize at 100 (`parsePagination`),
+   * silently — ask for 200 and you are handed 100 with no indication that the
+   * number you asked for was ignored. Callers here asked for 200 and then paged
+   * as though they had received 200: `page * 200 >= total` declared the job done
+   * after fetching half of it, and `data.length < 200` treated a full page as the
+   * last one and stopped after the first.
+   *
+   * The result was that roughly HALF the ERP's stock snapshot never reached this
+   * server. Items in the fetched half read correctly; the rest silently kept
+   * whatever they had — and once a reconciliation was built on top of the same
+   * loop, "absent from the snapshot" was read as "the ERP says zero", so the
+   * unfetched half was zeroed. Half right, half zero, exactly as reported.
+   *
+   * So this counts what it has actually RECEIVED against the `total` the ERP
+   * reports, and never infers progress from the page size it asked for. It stops
+   * on a page that returns nothing, so a server that miscounts `total` cannot
+   * spin it for ever either.
+   */
+  async listAll<T>(
+    path: string,
+    query: Record<string, string | number | undefined> = {},
+    opts: { maxPages?: number } = {},
+  ): Promise<ErpListResult<T>> {
+    // The ERP's own ceiling. Asking for more is not an error, it is just ignored
+    // — which is what made the mismatch invisible.
+    const PAGE_SIZE = 100;
+    const maxPages = opts.maxPages ?? 500;
+    const out: T[] = [];
+    let total = Number.POSITIVE_INFINITY;
+    for (let page = 1; page <= maxPages; page += 1) {
+      const res = await this.list<T>(path, { ...query, page, pageSize: PAGE_SIZE });
+      total = res.total;
+      out.push(...res.data);
+      // An empty page ends it whatever `total` claims; otherwise stop only once
+      // as many rows as the ERP says exist are actually in hand.
+      if (res.data.length === 0 || out.length >= total) break;
+      if (page === maxPages) {
+        this.logger.warn(
+          `${path}: stopped at the ${maxPages}-page cap with ${out.length} of ${total} rows`,
+        );
+      }
+    }
+    return { data: out, total: Number.isFinite(total) ? total : out.length };
+  }
+
+  /**
    * GET an ERP endpoint and return the FULL parsed body (not just `data`) — needed when
    * the response carries extra top-level fields (e.g. `/ar/aging`'s `summary`).
    */

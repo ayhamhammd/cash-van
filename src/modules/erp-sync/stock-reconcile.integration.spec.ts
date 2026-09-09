@@ -30,6 +30,14 @@ run('stock reconciliation to the ERP (real DB)', () => {
 
   /** What the stubbed ERP answers for GET /van/stock. */
   let erpSnapshot: Array<{ skuCode: string; warehouseName: string; quantity: number }> = [];
+  /**
+   * Rows the ERP CLAIMS exist, when that differs from what it hands over.
+   *
+   * This is the shape of the real failure: the server caps pageSize at 100 and
+   * says nothing, so a short read looks exactly like a warehouse that is empty.
+   * null = honest, total matches what was returned.
+   */
+  let erpReportedTotal: number | null = null;
 
   const q = (sql: string, params: unknown[] = []) => ds.query(sql, params);
 
@@ -91,12 +99,11 @@ run('stock reconciliation to the ERP (real DB)', () => {
     const svc = Object.create(ErpSyncService.prototype) as Record<string, unknown>;
     svc.dataSource = ds;
     svc.settings = { getErpConfig: async () => ({ enabled: true, baseUrl: 'http://stub', apiKey: 'k' }) };
-    svc.erp = {
-      list: async (path: string) =>
-        path === 'van/stock'
-          ? { data: erpSnapshot, total: erpSnapshot.length }
-          : { data: [], total: 0 },
-    };
+    const answer = (path: string) =>
+      path === 'van/stock'
+        ? { data: erpSnapshot, total: erpReportedTotal ?? erpSnapshot.length }
+        : { data: [], total: 0 };
+    svc.erp = { list: async (p: string) => answer(p), listAll: async (p: string) => answer(p) };
     svc.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
     svc.events = { emit: () => undefined };
     svc.headers = ds.getRepository('VoucherHeader');
@@ -151,6 +158,7 @@ run('stock reconciliation to the ERP (real DB)', () => {
        VALUES ('admin','admin','x','ADMIN') ON CONFLICT (user_number) DO NOTHING`,
     );
     erpSnapshot = [];
+    erpReportedTotal = null;
   });
 
   it('adds what the ERP has and the van does not', async () => {
@@ -211,6 +219,32 @@ run('stock reconciliation to the ERP (real DB)', () => {
 
     await expect(makeService().reconcileStockToErp()).rejects.toThrow(/empty stock snapshot/i);
     expect(await onHand(`${P}-E`)).toBe(40);
+  });
+
+  it('refuses a snapshot that came back short of what the ERP says it holds', async () => {
+    // The real incident: the pager asked for 200 rows from a server that caps at
+    // 100 and stopped halfway, so half the catalogue was absent from the snapshot
+    // — and absent is read as "the ERP holds none of this". Half the items were
+    // correct and the other half were zeroed.
+    await makeItem(`${P}-SHORT`);
+    await stockIn(`${P}-IN-SHORT`, `${P}-SHORT`, 100);
+    erpSnapshot = [{ skuCode: `${P}-SHORT`, warehouseName: WH_NAME, quantity: 100 }];
+    erpReportedTotal = 250; // the ERP holds 250 rows; 1 arrived
+
+    await expect(makeService().reconcileStockToErp()).rejects.toThrow(/came back short/i);
+    expect(await onHand(`${P}-SHORT`)).toBe(100);
+  });
+
+  it('proceeds once the snapshot is whole', async () => {
+    await makeItem(`${P}-WHOLE`);
+    await stockIn(`${P}-IN-WHOLE`, `${P}-WHOLE`, 100);
+    erpSnapshot = [{ skuCode: `${P}-WHOLE`, warehouseName: WH_NAME, quantity: 4 }];
+    erpReportedTotal = 1;
+
+    const res = await makeService().reconcileStockToErp();
+
+    expect(await onHand(`${P}-WHOLE`)).toBe(4);
+    expect(res.erpRowsFetched).toBe(res.erpRowsReported);
   });
 
   it('leaves a store alone while its documents are still queued for the ERP', async () => {
