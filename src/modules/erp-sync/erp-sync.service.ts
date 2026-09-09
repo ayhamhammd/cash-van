@@ -178,6 +178,53 @@ interface ErpReceipt {
   createdAt?: string | null;
 }
 
+/** One pool the reconciliation will correct, with the unit shape its line needs. */
+interface StockCorrection {
+  row: {
+    storeNumber: string;
+    storeName: string;
+    itemNumber: string;
+    itemName: string | null;
+    stockUnitCode: string;
+    erpQty: number;
+    localQty: number;
+    delta: number;
+  };
+  itemUnitId: string | null;
+  unitBaseQty: number;
+}
+
+/** What one store's correction moved. */
+export interface StockReconcileStore {
+  storeNumber: string;
+  storeName: string;
+  /** The voucher that carries the correction — null on a dry run. */
+  voucherNumber: string | null;
+  pools: number;
+  absQtyCorrected: number;
+}
+
+/** A store left alone, and why. Never silent: an uncorrected van still disagrees. */
+export interface StockReconcileSkip {
+  storeNumber: string;
+  poolsDrifted: number;
+  reason: string;
+}
+
+export interface StockReconcileResult {
+  dryRun: boolean;
+  checkedAt: string;
+  erpRowsFetched: number;
+  poolsCompared: number;
+  poolsDrifted: number;
+  /** ERP SKUs with no cash-van item — their stock cannot be compared or fixed. */
+  unresolvedSkus: number;
+  /** ERP warehouses matching no cash-van store, by name. */
+  unmatchedWarehouses: string[];
+  applied: StockReconcileStore[];
+  skipped: StockReconcileSkip[];
+}
+
 /** A ledger row from the ERP `GET /api/v1/stock-movements` (the inbound feed). */
 interface ErpMovement {
   id: string;
@@ -2846,6 +2893,295 @@ export class ErpSyncService {
       unmatchedWarehouses: [...unmatchedWarehouses],
       rows,
     };
+  }
+
+  /**
+   * Make cash-van's van stock equal the ERP's, whatever it currently says.
+   *
+   * WHY THIS HAS TO EXIST. Cash-van stores no stock figure — `item_balance` is a
+   * VIEW that SUMS every movement ever applied, and those movements arrive from
+   * the ERP through a feed that can drop rows: a movement naming a SKU the
+   * catalogue has not synced yet is logged and skipped while the cursor moves
+   * past it, so it is never seen again. Every loss is permanent and nothing ever
+   * corrects it. Close a van and reload it from an ERP template and the two
+   * sides disagree from then on.
+   *
+   * WHAT THIS DOES. Reads the ERP's absolute snapshot (GET /van/stock — the book
+   * of record), compares it pool by pool with what cash-van computes, and posts
+   * ONE correcting voucher per store for the difference. After it runs the two
+   * agree exactly. It is not a smarter feed; it is the truth-up the feed has
+   * never had.
+   *
+   * WHY IT IS SAFE THIS TIME. A `/van/stock` reconciliation existed once and was
+   * removed (migration DropErpStockSnapshot) for double-counting. Three things
+   * are different:
+   *
+   *  - **The feed is drained first.** Corrections are computed against a
+   *    cash-van that has already applied everything the ERP has published, so
+   *    the difference is real drift and not a movement still in the post.
+   *  - **Nothing may be in flight the other way.** A van sale sitting in the
+   *    outbox has not reached the ERP, so the ERP's snapshot is legitimately
+   *    behind — correcting to it would erase the sale. Any store with unsent
+   *    documents is skipped and said so, not guessed at.
+   *  - **It corrects TO an absolute figure, so it converges.** The old version
+   *    fed correction deltas into the same ledger the feed was filling, and
+   *    errors accumulated. This one measures the gap again from scratch every
+   *    run: if a movement is ever counted twice, the next run sees the surplus
+   *    and removes it. Repetition heals rather than compounds.
+   *
+   * THE ONE GAP LEFT. A movement created in the seconds between the drain and
+   * the snapshot read is inside the snapshot AND will be pulled again by the
+   * next feed run. Closing that needs a watermark the ERP does not expose yet
+   * (docs/PLAN-erp-sync-reconciliation.md §5.1). Until it does, that residue is
+   * bounded by the length of one snapshot read and is removed by the next
+   * reconciliation — which is the whole point of correcting to an absolute.
+   *
+   * The correcting voucher is written straight to the ledger, exactly as a
+   * mirrored ERP movement is, so it raises no posted event and can never be
+   * pushed back — it describes stock the ERP already has.
+   */
+  async reconcileStockToErp(
+    opts: { dryRun?: boolean } = {},
+  ): Promise<StockReconcileResult> {
+    const cfg = await this.settings.getErpConfig();
+    if (!cfg.enabled) {
+      throw new ServiceUnavailableException('The ERP connection is turned off.');
+    }
+
+    // 1. Apply everything the ERP has already published. Skipping this would
+    //    read a movement that is merely late as though it were drift.
+    if (!opts.dryRun) await this.pullAllMovements();
+
+    // 2. Measure. Same detector the drift report uses — one implementation of
+    //    "what do the two sides disagree about", so the report and the fix can
+    //    never describe different numbers.
+    const drift = await this.computeStockDrift();
+
+    // 3. A snapshot with nothing in it is a broken read, not an empty company.
+    //    Believing it would zero every van at once.
+    if (drift.erpRowsFetched === 0) {
+      throw new ServiceUnavailableException(
+        'The ERP returned an empty stock snapshot. Refusing to reconcile — ' +
+          'treating that as "everything is zero" would empty every van.',
+      );
+    }
+
+    // 4. Which stores have documents still on their way to the ERP. For those,
+    //    the ERP's figure is behind by definition and is not something to
+    //    correct towards.
+    const blocked = await this.storesWithUnsentDocuments();
+
+    const byStore = new Map<string, typeof drift.rows>();
+    for (const r of drift.rows) {
+      const list = byStore.get(r.storeNumber) ?? [];
+      list.push(r);
+      byStore.set(r.storeNumber, list);
+    }
+
+    const applied: StockReconcileStore[] = [];
+    const skipped: StockReconcileSkip[] = [];
+
+    for (const [storeNumber, rows] of byStore) {
+      const reason = blocked.get(storeNumber);
+      if (reason) {
+        skipped.push({ storeNumber, poolsDrifted: rows.length, reason });
+        continue;
+      }
+      const corrections: StockCorrection[] = [];
+      for (const r of rows) {
+        const unit = await this.correctionUnit(r.itemNumber, r.stockUnitCode);
+        if (!unit) {
+          // The pool exists in the balance view but its unit cannot be resolved
+          // back to an item_unit — correcting it would post a line that breaks
+          // the qty invariant. Report it rather than write something wrong.
+          skipped.push({
+            storeNumber,
+            poolsDrifted: 1,
+            reason: `no unit for ${r.itemNumber} / ${r.stockUnitCode || 'base'}`,
+          });
+          continue;
+        }
+        corrections.push({ row: r, ...unit });
+      }
+      if (corrections.length === 0) continue;
+
+      const voucherNumber = opts.dryRun
+        ? null
+        : await this.postStockCorrection(storeNumber, corrections);
+
+      applied.push({
+        storeNumber,
+        storeName: rows[0]?.storeName ?? storeNumber,
+        voucherNumber,
+        pools: corrections.length,
+        // What the correction moves in total, both ways, as a size — the number
+        // that says how far apart the two sides had drifted.
+        absQtyCorrected:
+          Math.round(corrections.reduce((n, c) => n + Math.abs(c.row.delta), 0) * 1000) / 1000,
+      });
+    }
+
+    if (!opts.dryRun && applied.length > 0) {
+      this.events.emit('stock.changed', { reason: 'erp.stock.reconciled' });
+    }
+
+    return {
+      dryRun: Boolean(opts.dryRun),
+      checkedAt: drift.checkedAt,
+      erpRowsFetched: drift.erpRowsFetched,
+      poolsCompared: drift.poolsCompared,
+      poolsDrifted: drift.driftedPools,
+      unresolvedSkus: drift.unresolvedSkus,
+      unmatchedWarehouses: drift.unmatchedWarehouses,
+      applied,
+      skipped,
+    };
+  }
+
+  /**
+   * Stores holding documents cash-van has not managed to send yet, and why that
+   * blocks them.
+   *
+   * A pending or failed outbox row is a sale, return or transfer the ERP has not
+   * seen. Its stock has already left the van here and has not left it there, so
+   * the ERP reads high — and a reconciliation would faithfully put the goods
+   * back on a van that no longer has them. The van whose document it is gets
+   * left alone until the queue drains.
+   *
+   * A queued document whose store cannot be determined blocks EVERY store: the
+   * one thing worse than skipping a van is correcting the wrong one.
+   */
+  private async storesWithUnsentDocuments(): Promise<Map<string, string>> {
+    const rows: Array<{ store_number: string | null; n: string }> = await this.dataSource.query(
+      `SELECT vt.store_number, COUNT(DISTINCT o.ref)::text AS n
+         FROM erp_outbox o
+         LEFT JOIN voucher_transactions vt ON vt.voucher_number = o.ref
+        WHERE o.status IN ('pending', 'failed')
+        GROUP BY vt.store_number`,
+    );
+    const blocked = new Map<string, string>();
+    let unattributed = 0;
+    for (const r of rows) {
+      if (!r.store_number) {
+        unattributed += Number(r.n) || 0;
+        continue;
+      }
+      blocked.set(
+        r.store_number,
+        `${r.n} document(s) still on their way to the ERP — reconciling now would erase them`,
+      );
+    }
+    if (unattributed > 0) {
+      for (const s of await this.allStoreCodes()) {
+        if (!blocked.has(s)) {
+          blocked.set(
+            s,
+            `${unattributed} queued document(s) could not be traced to a store — ` +
+              'every store is held back rather than risk correcting the wrong one',
+          );
+        }
+      }
+    }
+    return blocked;
+  }
+
+  /**
+   * The item_unit a pool belongs to, so a correction line carries the same
+   * unit shape the rest of the ledger does.
+   *
+   * A blank stock unit is the item's own base pool, which owns no item_unit row.
+   * A named one is a variant that holds its own stock.
+   */
+  private async correctionUnit(
+    itemNumber: string,
+    stockUnitCode: string,
+  ): Promise<{ itemUnitId: string | null; unitBaseQty: number } | null> {
+    if (!stockUnitCode) return { itemUnitId: null, unitBaseQty: 1 };
+    const rows: Array<{ id: string; qty: string }> = await this.dataSource.query(
+      `SELECT iu.id, iu.qty
+         FROM item_units iu
+         JOIN item_cart ic ON ic.id = iu.item_id
+         JOIN units u      ON u.id = iu.unit_id
+        WHERE ic.item_number = $1 AND u.code = $2 AND iu.is_stock_unit = TRUE
+        LIMIT 1`,
+      [itemNumber, stockUnitCode],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return { itemUnitId: row.id, unitBaseQty: Math.max(1, Number(row.qty) || 1) };
+  }
+
+  /**
+   * Write one store's correction as a single posted voucher.
+   *
+   * Both directions in one document on purpose: this is one act of reconciliation
+   * at one instant, and splitting it into an IN and an OUT would make it look
+   * like two unrelated stock events in the history. `item_balance` reads the
+   * from/to store columns and not the kind, so a line's sign is carried by which
+   * of the two it fills.
+   *
+   * Written directly, like a mirrored movement, so no posted event fires and the
+   * outbox never sees it — it describes stock the ERP already holds, and pushing
+   * it back would apply the difference to the ERP a second time.
+   */
+  private async postStockCorrection(
+    storeNumber: string,
+    corrections: StockCorrection[],
+  ): Promise<string> {
+    const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+    const voucherNumber = `ERP-RECON-${storeNumber}-${stamp}`;
+    const header = this.headers.create({
+      voucherNumber,
+      // An adjustment either way: the balance view takes the direction from the
+      // line, so the header names the act rather than a direction.
+      transKind: 'IN',
+      userCode: 'admin',
+      referenceVoucherNumber: null,
+      inDate: new Date(),
+      total: '0',
+      totalTax: '0',
+      netTotal: '0',
+      totalDiscountValue: '0',
+      totalDiscountPercentage: '0',
+      isPosted: true,
+      isEdit: false,
+    });
+    const txns = corrections.map((c) => {
+      const into = c.row.delta > 0; // ERP has more than we do → put it back on
+      const abs = Math.abs(c.row.delta);
+      return this.txns.create({
+        voucherNumber,
+        itemNumber: c.row.itemNumber,
+        itemName: c.row.itemName ?? c.row.itemNumber,
+        transKind: into ? 'IN' : 'OUT',
+        storeNumber,
+        fromStoreNumber: into ? null : storeNumber,
+        toStoreNumber: into ? storeNumber : null,
+        itemQty: String(abs),
+        unitPrice: '0',
+        qtyOfUnit: String(abs / c.unitBaseQty),
+        unitBaseQty: c.unitBaseQty,
+        stockUnitCode: c.row.stockUnitCode,
+        itemUnitId: c.itemUnitId,
+        signedQty: String(into ? abs : -abs),
+        taxPercentage: '0',
+        discountPercentage: '0',
+        discountValue: '0',
+        total: '0',
+        netTotal: '0',
+      });
+    });
+    // One transaction: a header with no lines is a voucher that corrects nothing
+    // and blocks the number for ever.
+    await this.dataSource.transaction(async (em) => {
+      await em.getRepository(VoucherHeader).save(header);
+      await em.getRepository(VoucherTransaction).save(txns);
+    });
+    this.logger.log(
+      `Stock reconciled for store ${storeNumber}: ${corrections.length} pool(s) corrected ` +
+        `to the ERP snapshot (${voucherNumber})`,
+    );
+    return voucherNumber;
   }
 
   /**

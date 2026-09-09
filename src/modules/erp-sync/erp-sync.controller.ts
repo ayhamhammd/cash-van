@@ -200,6 +200,22 @@ export class ErpSyncController {
     return this.sync.computeStockDrift();
   }
 
+  @Post('sync/reconcile-stock')
+  @ApiOperation({
+    summary: 'Make van stock match the ERP',
+    description:
+      "Drains the movement feed, reads the ERP's absolute /van/stock snapshot, and " +
+      'posts one correcting voucher per store so cash-van\'s on-hand equals the ' +
+      "ERP's exactly. A store with documents still queued for the ERP is SKIPPED " +
+      'and reported — correcting towards a snapshot that has not seen a van\'s own ' +
+      'sales yet would put sold goods back on the van. Pass ?dryRun=1 to see what ' +
+      'it would change without writing anything. Admin only.',
+  })
+  @ApiOkResponse({ description: 'What was corrected, and what was left alone' })
+  reconcileStock(@Query('dryRun') dryRun?: string) {
+    return this.sync.reconcileStockToErp({ dryRun: dryRun === '1' || dryRun === 'true' });
+  }
+
   @Post('sync/movements/catch-up')
   @ApiOperation({
     summary: 'Skip stock-movement history (post API-key switch)',
