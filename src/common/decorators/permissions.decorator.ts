@@ -35,3 +35,21 @@ export const ANY_PERMISSIONS_KEY = 'requiredAnyPermissions';
  */
 export const RequireAnyPermission = (...perms: UserPermission[]) =>
   SetMetadata(ANY_PERMISSIONS_KEY, perms);
+
+export const PERMISSION_KEYS_KEY = 'requiredPermissionKeys';
+
+/**
+ * Require a granular DASHBOARD permission key, e.g. `segments.edit`.
+ *
+ * Separate from [RequirePermissions] because the two describe different people.
+ * Those are the salesman's boolean columns on `users`; these are the dotted
+ * catalogue an admin ticks for an office user, stored as a jsonb array and
+ * carried in the token as `permKeys`.
+ *
+ * The keys existed and were enforced only in the browser — the sidebar hid an
+ * entry the API would still answer. This is what makes them real.
+ *
+ * Admins pass, as they do on every other gate here.
+ */
+export const RequirePermissionKeys = (...keys: string[]) =>
+  SetMetadata(PERMISSION_KEYS_KEY, keys);

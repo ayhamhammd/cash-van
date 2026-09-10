@@ -93,6 +93,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         role,
         repId,
         permissions: {},
+        // Stripped for the same reason as `permissions`: a tracking token must
+        // carry no authority beyond telemetry.
+        permKeys: [],
         trackingJti: payload.jti,
         deviceId: payload.deviceId,
       };
@@ -105,6 +108,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       role,
       repId,
       permissions: payload.permissions ?? {},
+      // The granular dashboard keys ("segments.view", "reports.tax", …). They
+      // have always ridden in the token for the browser to read, and were
+      // dropped here — so the server could not enforce a single one of them.
+      permKeys: payload.permKeys ?? [],
     };
   }
 }

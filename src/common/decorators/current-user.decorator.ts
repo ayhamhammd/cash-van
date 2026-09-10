@@ -9,6 +9,13 @@ export interface AuthenticatedUser {
   repId: string | null;
   permissions: Record<string, boolean>;
   /**
+   * Granular dashboard permission keys, e.g. "segments.edit". Distinct from
+   * [permissions]: those are the salesman's boolean columns, these are the
+   * dotted catalogue an admin assigns to an OFFICE user. Empty for a token
+   * minted before this shipped, which reads as "holds none".
+   */
+  permKeys: string[];
+  /**
    * Set only for a long-lived device tracking token. Its presence is what
    * `TrackingTokenGuard` keys off to confine the caller to telemetry routes —
    * an ordinary session leaves it undefined.

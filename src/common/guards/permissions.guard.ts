@@ -8,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 
 import {
   ANY_PERMISSIONS_KEY,
+  PERMISSION_KEYS_KEY,
   PERMISSIONS_KEY,
   UserPermission,
 } from '../decorators/permissions.decorator';
@@ -26,8 +27,13 @@ export class PermissionsGuard implements CanActivate {
       ANY_PERMISSIONS_KEY,
       [context.getHandler(), context.getClass()],
     );
+    const requiredKeys = this.reflector.getAllAndOverride<string[]>(
+      PERMISSION_KEYS_KEY,
+      [context.getHandler(), context.getClass()],
+    );
     const hasAny = !!requiredAny && requiredAny.length > 0;
-    if ((!required || required.length === 0) && !hasAny) {
+    const hasKeys = !!requiredKeys && requiredKeys.length > 0;
+    if ((!required || required.length === 0) && !hasAny && !hasKeys) {
       return true;
     }
 
@@ -40,6 +46,17 @@ export class PermissionsGuard implements CanActivate {
     }
     if (user.userType === 'ADMIN') {
       return true;
+    }
+    // Granular dashboard keys. `role === 'admin'` is already handled above via
+    // userType; this also lets the ADMIN ROLE through, because an admin who is
+    // not userType ADMIN still runs the office.
+    if (hasKeys && user.role !== 'admin') {
+      const missingKeys = requiredKeys.filter((k) => !user.permKeys?.includes(k));
+      if (missingKeys.length > 0) {
+        throw new ForbiddenException(
+          `Missing permission(s): ${missingKeys.join(', ')}`,
+        );
+      }
     }
     if (hasAny && !requiredAny.some((p) => user.permissions?.[p])) {
       throw new ForbiddenException(

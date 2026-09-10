@@ -20,7 +20,7 @@ import {
 
 import { SegmentsService } from './segments.service';
 import { RepScopeService } from '../users/rep-scope.service';
-import { Roles } from '../../common/decorators/roles.decorator';
+import { RequirePermissionKeys } from '../../common/decorators/permissions.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import {
   CurrentUser,
@@ -34,6 +34,19 @@ import { AddMembersDto } from './dto/add-members.dto';
 import { SegmentStatsQuery } from './dto/segment-stats.query';
 import { AssignRepDto } from './dto/assign-rep.dto';
 
+/**
+ * Segments are gated by PERMISSION, not by role.
+ *
+ * `segments.view` opens the screen, `segments.edit` allows every write. Admins
+ * pass both, as everywhere. The role list is deliberately gone: RolesGuard is an
+ * exact-match check, so `@Roles('admin')` would have refused a manager who HOLDS
+ * segments.edit — which is the whole point of granting it.
+ *
+ * Net effect: nobody below admin reaches segments until an administrator ticks
+ * the box, INCLUDING managers, who used to see them by role alone. That is the
+ * cost of being able to say "this manager must not touch segments", and it is
+ * the same trade the per-report keys already make.
+ */
 @ApiTags('segments')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
@@ -45,7 +58,7 @@ export class SegmentsController {
   ) {}
 
   @Get()
-  @Roles('admin', 'manager')
+  @RequirePermissionKeys('segments.view')
   @ApiOperation({ summary: 'List customer segments with member counts' })
   @ApiOkResponse({ description: '{ items, total }' })
   list(@Query() query: ListSegmentsQuery) {
@@ -53,7 +66,7 @@ export class SegmentsController {
   }
 
   @Get('by-customer/:customerId')
-  @Roles('admin', 'manager')
+  @RequirePermissionKeys('segments.view')
   @ApiOperation({ summary: 'Segments a customer belongs to (for profile chips)' })
   @ApiOkResponse({ description: 'Segment tags' })
   byCustomer(@Param('customerId', ParseUUIDPipe) customerId: string) {
@@ -61,7 +74,7 @@ export class SegmentsController {
   }
 
   @Get(':id')
-  @Roles('admin', 'manager')
+  @RequirePermissionKeys('segments.view')
   @ApiOperation({ summary: 'One segment' })
   @ApiOkResponse({ description: 'Segment' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
@@ -69,7 +82,7 @@ export class SegmentsController {
   }
 
   @Post()
-  @Roles('admin')
+  @RequirePermissionKeys('segments.edit')
   @ApiOperation({ summary: 'Create a segment' })
   @ApiCreatedResponse({ description: 'Created segment' })
   create(@Body() dto: CreateSegmentDto, @CurrentUser('sub') userId: string) {
@@ -77,7 +90,7 @@ export class SegmentsController {
   }
 
   @Patch(':id')
-  @Roles('admin')
+  @RequirePermissionKeys('segments.edit')
   @ApiOperation({ summary: 'Update a segment' })
   @ApiOkResponse({ description: 'Updated segment' })
   update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateSegmentDto) {
@@ -85,7 +98,7 @@ export class SegmentsController {
   }
 
   @Delete(':id')
-  @Roles('admin')
+  @RequirePermissionKeys('segments.edit')
   @ApiOperation({ summary: 'Delete a segment' })
   @ApiOkResponse({ description: 'Deleted' })
   async remove(@Param('id', ParseUUIDPipe) id: string) {
@@ -94,7 +107,7 @@ export class SegmentsController {
   }
 
   @Post(':id/refresh')
-  @Roles('admin')
+  @RequirePermissionKeys('segments.edit')
   @ApiOperation({ summary: 'Re-materialise a dynamic segment from its rules' })
   @ApiOkResponse({ description: '{ matched, total }' })
   refresh(@Param('id', ParseUUIDPipe) id: string) {
@@ -102,7 +115,7 @@ export class SegmentsController {
   }
 
   @Get(':id/stats')
-  @Roles('admin', 'manager')
+  @RequirePermissionKeys('segments.view')
   @ApiOperation({ summary: 'Segment sales performance (rep-scope filtered)' })
   @ApiOkResponse({ description: 'Sales stats over [from, to]' })
   async stats(
@@ -114,7 +127,7 @@ export class SegmentsController {
   }
 
   @Get(':id/reps')
-  @Roles('admin', 'manager')
+  @RequirePermissionKeys('segments.view')
   @ApiOperation({ summary: 'Salesmen linked to a segment' })
   @ApiOkResponse({ description: 'Linked reps' })
   listReps(@Param('id', ParseUUIDPipe) id: string) {
@@ -122,7 +135,7 @@ export class SegmentsController {
   }
 
   @Post(':id/reps')
-  @Roles('admin')
+  @RequirePermissionKeys('segments.edit')
   @ApiOperation({ summary: 'Link a salesman to a segment' })
   @ApiCreatedResponse({ description: 'Linked reps' })
   addRep(
@@ -134,7 +147,7 @@ export class SegmentsController {
   }
 
   @Delete(':id/reps/:repId')
-  @Roles('admin')
+  @RequirePermissionKeys('segments.edit')
   @ApiOperation({ summary: 'Unlink a salesman from a segment' })
   @ApiOkResponse({ description: 'Linked reps' })
   removeRep(
@@ -145,7 +158,7 @@ export class SegmentsController {
   }
 
   @Post(':id/assign-rep')
-  @Roles('admin')
+  @RequirePermissionKeys('segments.edit')
   @ApiOperation({
     summary: 'Assign every member of a segment to one salesman (bulk reassign)',
   })
@@ -163,7 +176,7 @@ export class SegmentsController {
   }
 
   @Get(':id/members')
-  @Roles('admin', 'manager')
+  @RequirePermissionKeys('segments.view')
   @ApiOperation({ summary: 'List a segment’s members (rep-scope filtered)' })
   @ApiOkResponse({ description: '{ items, total }' })
   async members(
@@ -175,7 +188,7 @@ export class SegmentsController {
   }
 
   @Post(':id/members')
-  @Roles('admin')
+  @RequirePermissionKeys('segments.edit')
   @ApiOperation({ summary: 'Add customers to a segment' })
   @ApiCreatedResponse({ description: '{ added, total }' })
   addMembers(
@@ -187,7 +200,7 @@ export class SegmentsController {
   }
 
   @Delete(':id/members/:customerId')
-  @Roles('admin')
+  @RequirePermissionKeys('segments.edit')
   @ApiOperation({ summary: 'Remove a customer from a segment' })
   @ApiOkResponse({ description: '{ total }' })
   removeMember(
