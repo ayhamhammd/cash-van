@@ -453,7 +453,21 @@ export class VouchersService implements OnModuleInit {
               qty: f.qty,
             });
         }
+        // The pool a gift moves out of.
+        //
+        // A gift line carried no unit at all, so resolveItemUnit() returned null
+        // and the stock check looked in the BASE pool ('') — while an item whose
+        // sellable unit owns its own pool (isStockUnit) keeps every piece in that
+        // unit's pool instead. The van then held the goods and the sale was
+        // refused anyway: "Not enough stock of 442 in store 105: have 0, need 1"
+        // with two pieces sitting in the "حبة" pool the whole time.
+        //
+        // So a gift is booked in the item's own stock unit where it has one. The
+        // unit is sent as a CODE, not an id, because resolveItemUnit re-resolves
+        // it against the item and would reject an id belonging to another item.
+        const giftUnits = await this.stockUnitCodesFor([...merged.keys()]);
         for (const f of merged.values()) {
+          const unitCode = giftUnits.get(f.itemNumber);
           dto.transactions.push({
             itemNumber: f.itemNumber,
             itemName: names.get(f.itemNumber) ?? f.itemNumber,
@@ -463,6 +477,7 @@ export class VouchersService implements OnModuleInit {
             discountValue: '0',
             unitBaseQty: 1,
             storeNumber: saleStore,
+            ...(unitCode ? { unitCode, unitName: unitCode } : {}),
           });
         }
       }
@@ -493,6 +508,38 @@ export class VouchersService implements OnModuleInit {
     return new Map(
       items.map((i) => [i.itemNumber, i.nameAr ?? i.name ?? i.itemNumber]),
     );
+  }
+
+  /**
+   * The stock-unit CODE each of these items keeps its pieces in, where it has one.
+   *
+   * An item whose sellable unit is flagged `isStockUnit` owns its own pool, and
+   * every piece of it lives there rather than in the item's base pool. A line
+   * that names no unit is booked against the base pool — correct for a packaging
+   * unit that converts down, wrong for an item whose stock never sits there.
+   * Items with no such unit are simply absent from the map: base pool, as before.
+   */
+  private async stockUnitCodesFor(
+    itemNumbers: string[],
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (!itemNumbers.length) return out;
+    const rows: Array<{ item_number: string; code: string }> =
+      await this.dataSource.query(
+        `SELECT ic.item_number, u.code
+           FROM item_units iu
+           JOIN item_cart ic ON ic.id = iu.item_id
+           JOIN units u ON u.id = iu.unit_id
+          WHERE ic.item_number = ANY($1::text[])
+            AND iu.is_stock_unit = true
+            AND u.code IS NOT NULL AND u.code <> ''`,
+        [itemNumbers],
+      );
+    // One stock unit per item is the shape the app builds; if a second ever
+    // appears, the first by query order wins rather than the line losing its
+    // pool entirely.
+    for (const r of rows) if (!out.has(r.item_number)) out.set(r.item_number, r.code);
+    return out;
   }
 
   /**
