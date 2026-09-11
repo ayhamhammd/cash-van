@@ -79,8 +79,20 @@ export class ReportsController {
       'One aggregated payload for the dashboard home page: sales today vs yesterday, payments, visits, customers/debt, cheques due soon, low stock and active reps.',
   })
   @ApiOkResponse({ description: 'Aggregated dashboard KPIs' })
-  async dashboard(@CurrentUser() user: AuthenticatedUser) {
-    return this.reports.dashboard(await this.repScope.visibleRepIds(user));
+  @ApiQuery({
+    name: 'date',
+    required: false,
+    description:
+      'YYYY-MM-DD — show the dashboard as it stood on that day. Omit for today. ' +
+      'Day-scoped figures follow the date; open orders, total debt, low stock and ' +
+      'active reps are current state and are flagged by `isHistorical`.',
+    example: '2026-09-01',
+  })
+  async dashboard(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('date') date?: string,
+  ) {
+    return this.reports.dashboard(await this.repScope.visibleRepIds(user), date);
   }
 
   @Get('sales-trend')

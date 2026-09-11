@@ -90,6 +90,13 @@ export interface VisitRow {
 /** Aggregated KPI payload for the office dashboard home page. */
 export interface DashboardOverview {
   date: string;
+  /**
+   * True when [date] is not today — the day-scoped figures describe that day,
+   * but the point-in-time ones (open orders, total debt, low stock, active
+   * reps) are CURRENT state and cannot be reconstructed for a past date. The
+   * screen says so rather than passing today's debt off as history.
+   */
+  isHistorical: boolean;
   sales: {
     todayNet: number;
     todayCount: number;
@@ -98,6 +105,9 @@ export interface DashboardOverview {
     returnsTodayCount: number;
     ordersTodayCount: number;
     openOrdersCount: number;
+    /** Sales made ON ACCOUNT that day — a SALE carrying a CREDIT payment row. */
+    creditTodayNet: number;
+    creditTodayCount: number;
   };
   payments: { todayTotal: number; todayCash: number; todayCheque: number };
   visits: { today: number; todayWithSale: number; yesterday: number };
@@ -786,24 +796,61 @@ export class ReportsService {
    *   payment_cheques  → no rep column at all; reached through the customer
    *   item_balance     → no rep dimension; see the comment at that query
    */
-  async dashboard(visibleRepIds: string[] | null = null): Promise<DashboardOverview> {
+  /**
+   * The dashboard payload, for TODAY or for any day in the past.
+   *
+   * `asOf` anchors every day-scoped figure: sales, returns, orders raised,
+   * collections, visits and credit sales all describe that day, and "yesterday"
+   * becomes the day before it. The anchor is a parameter rather than
+   * CURRENT_DATE so one query shape serves both cases — a second historical
+   * code path would drift from the live one the first time either changed.
+   *
+   * What CANNOT move with it: open orders, total debt, low stock and active rep
+   * counts are current state with no history to read. They are returned as they
+   * stand and `isHistorical` tells the screen to label them, which is honest;
+   * silently showing today's debt under yesterday's date would not be.
+   */
+  async dashboard(
+    visibleRepIds: string[] | null = null,
+    asOf?: string,
+  ): Promise<DashboardOverview> {
     const scope = visibleRepIds ?? null;
+    // Null → CURRENT_DATE inside SQL, so "today" stays the database's day and
+    // does not drift with the API server's clock.
+    const day = asOf && /^\d{4}-\d{2}-\d{2}$/.test(asOf) ? asOf : null;
     const [salesRows, openOrderRows, payRows, visitRows, custRows, chequeRows, lowStockRows, repRows] =
       await Promise.all([
         this.ds.query(
-          `SELECT
-              COALESCE(SUM(net_total::numeric) FILTER (WHERE trans_kind = 'SALE'   AND in_date >= CURRENT_DATE), 0)::float8 AS "todayNet",
-              COUNT(*)                         FILTER (WHERE trans_kind = 'SALE'   AND in_date >= CURRENT_DATE)::int        AS "todayCount",
-              COALESCE(SUM(net_total::numeric) FILTER (WHERE trans_kind = 'SALE'   AND in_date <  CURRENT_DATE), 0)::float8 AS "yesterdayNet",
-              COALESCE(SUM(net_total::numeric) FILTER (WHERE trans_kind = 'RETURN' AND in_date >= CURRENT_DATE), 0)::float8 AS "returnsTodayNet",
-              COUNT(*)                         FILTER (WHERE trans_kind = 'RETURN' AND in_date >= CURRENT_DATE)::int        AS "returnsTodayCount",
-              COUNT(*)                         FILTER (WHERE trans_kind = 'ORDER'  AND in_date >= CURRENT_DATE)::int        AS "ordersTodayCount"
-            FROM voucher_headers
-           WHERE is_posted = true AND deleted_at IS NULL
-             AND in_date >= CURRENT_DATE - 1
+          // The window is [day-1, day+1): "yesterday" is everything below the
+          // anchor, "today" everything from it up to the next midnight. Without
+          // the upper bound a past date would sweep in every sale since.
+          `WITH anchor AS (SELECT COALESCE($2::date, CURRENT_DATE) AS d)
+           SELECT
+              COALESCE(SUM(h.net_total::numeric) FILTER (WHERE h.trans_kind = 'SALE'   AND h.in_date >= a.d), 0)::float8 AS "todayNet",
+              COUNT(*)                           FILTER (WHERE h.trans_kind = 'SALE'   AND h.in_date >= a.d)::int        AS "todayCount",
+              COALESCE(SUM(h.net_total::numeric) FILTER (WHERE h.trans_kind = 'SALE'   AND h.in_date <  a.d), 0)::float8 AS "yesterdayNet",
+              COALESCE(SUM(h.net_total::numeric) FILTER (WHERE h.trans_kind = 'RETURN' AND h.in_date >= a.d), 0)::float8 AS "returnsTodayNet",
+              COUNT(*)                           FILTER (WHERE h.trans_kind = 'RETURN' AND h.in_date >= a.d)::int        AS "returnsTodayCount",
+              COUNT(*)                           FILTER (WHERE h.trans_kind = 'ORDER'  AND h.in_date >= a.d)::int        AS "ordersTodayCount",
+              -- On account: a SALE carrying a CREDIT payment row. EXISTS, not a
+              -- join — a split sale has several payment rows and a join would
+              -- count its value once per row.
+              COALESCE(SUM(h.net_total::numeric) FILTER (
+                WHERE h.trans_kind = 'SALE' AND h.in_date >= a.d
+                  AND EXISTS (SELECT 1 FROM payments p
+                               WHERE p.voucher_number = h.voucher_number
+                                 AND p.payment_type = 'CREDIT')), 0)::float8 AS "creditTodayNet",
+              COUNT(*) FILTER (
+                WHERE h.trans_kind = 'SALE' AND h.in_date >= a.d
+                  AND EXISTS (SELECT 1 FROM payments p
+                               WHERE p.voucher_number = h.voucher_number
+                                 AND p.payment_type = 'CREDIT'))::int          AS "creditTodayCount"
+            FROM voucher_headers h CROSS JOIN anchor a
+           WHERE h.is_posted = true AND h.deleted_at IS NULL
+             AND h.in_date >= a.d - 1 AND h.in_date < a.d + 1
              AND ($1::uuid[] IS NULL
-                  OR user_code IN (SELECT code FROM reps WHERE id = ANY($1::uuid[])))`,
-          [scope],
+                  OR h.user_code IN (SELECT code FROM reps WHERE id = ANY($1::uuid[])))`,
+          [scope, day],
         ),
         this.ds.query(
           `SELECT COUNT(*)::int AS c
@@ -817,24 +864,27 @@ export class ReportsService {
           // "Collected today" = actual collection receipts (the collections table),
           // NOT sales-voucher payment lines. amount is fils → JOD major. Only money
           // actually collected (confirmed/deposited), excluding pending/bounced.
-          `SELECT
+          `WITH anchor AS (SELECT COALESCE($2::date, CURRENT_DATE) AS d)
+           SELECT
               COALESCE(SUM(amount), 0)::float8 / 1000                                   AS "todayTotal",
               COALESCE(SUM(amount) FILTER (WHERE method = 'cash'),   0)::float8 / 1000   AS "todayCash",
               COALESCE(SUM(amount) FILTER (WHERE method = 'cheque'), 0)::float8 / 1000   AS "todayCheque"
-            FROM collections
-           WHERE status IN ('confirmed','deposited') AND collected_at >= CURRENT_DATE
-             AND ($1::uuid[] IS NULL OR rep_id = ANY($1::uuid[]))`,
-          [scope],
+            FROM collections c CROSS JOIN anchor a
+           WHERE c.status IN ('confirmed','deposited')
+             AND c.collected_at >= a.d AND c.collected_at < a.d + 1
+             AND ($1::uuid[] IS NULL OR c.rep_id = ANY($1::uuid[]))`,
+          [scope, day],
         ),
         this.ds.query(
-          `SELECT
-              COUNT(*) FILTER (WHERE visited_at >= CURRENT_DATE)::int                 AS "today",
-              COUNT(*) FILTER (WHERE visited_at >= CURRENT_DATE AND had_sale)::int    AS "todayWithSale",
-              COUNT(*) FILTER (WHERE visited_at <  CURRENT_DATE)::int                 AS "yesterday"
-            FROM customer_visits
-           WHERE visited_at >= CURRENT_DATE - 1
-             AND ($1::uuid[] IS NULL OR rep_id = ANY($1::uuid[]))`,
-          [scope],
+          `WITH anchor AS (SELECT COALESCE($2::date, CURRENT_DATE) AS d)
+           SELECT
+              COUNT(*) FILTER (WHERE v.visited_at >= a.d)::int                      AS "today",
+              COUNT(*) FILTER (WHERE v.visited_at >= a.d AND v.had_sale)::int       AS "todayWithSale",
+              COUNT(*) FILTER (WHERE v.visited_at <  a.d)::int                      AS "yesterday"
+            FROM customer_visits v CROSS JOIN anchor a
+           WHERE v.visited_at >= a.d - 1 AND v.visited_at < a.d + 1
+             AND ($1::uuid[] IS NULL OR v.rep_id = ANY($1::uuid[]))`,
+          [scope, day],
         ),
         this.ds.query(
           `SELECT
@@ -849,17 +899,18 @@ export class ReportsService {
           [scope],
         ),
         this.ds.query(
-          `SELECT COUNT(*)::int AS "dueSoonCount",
+          `WITH anchor AS (SELECT COALESCE($2::date, CURRENT_DATE) AS d)
+           SELECT COUNT(*)::int AS "dueSoonCount",
                   COALESCE(SUM(amount::numeric), 0)::float8 AS "dueSoonAmount"
-             FROM payment_cheques
+             FROM payment_cheques CROSS JOIN anchor a
             WHERE deleted_at IS NULL
-              AND due_date >= CURRENT_DATE AND due_date < CURRENT_DATE + 8
+              AND due_date >= a.d AND due_date < a.d + 8
               -- payment_cheques carries no rep_id; the owning salesman is a
               -- property of the CUSTOMER the cheque came from.
               AND ($1::uuid[] IS NULL OR customer_number IN (
                     SELECT customer_number FROM customers
                      WHERE rep_id = ANY($1::uuid[]) AND deleted_at IS NULL))`,
-          [scope],
+          [scope, day],
         ),
         // NOT scoped: item_balance has no rep dimension — stock sits in a
         // warehouse/van by stock_number, with no mapping back to a salesman.
@@ -887,8 +938,10 @@ export class ReportsService {
     const v = visitRows[0] ?? {};
     const c = custRows[0] ?? {};
     const q = chequeRows[0] ?? {};
+    const today = new Date().toISOString().slice(0, 10);
     return {
-      date: new Date().toISOString().slice(0, 10),
+      date: day ?? today,
+      isHistorical: !!day && day !== today,
       sales: {
         todayNet: s.todayNet ?? 0,
         todayCount: s.todayCount ?? 0,
@@ -897,6 +950,8 @@ export class ReportsService {
         returnsTodayCount: s.returnsTodayCount ?? 0,
         ordersTodayCount: s.ordersTodayCount ?? 0,
         openOrdersCount: openOrderRows[0]?.c ?? 0,
+        creditTodayNet: s.creditTodayNet ?? 0,
+        creditTodayCount: s.creditTodayCount ?? 0,
       },
       payments: {
         todayTotal: p.todayTotal ?? 0,
