@@ -197,6 +197,9 @@ export class AuthService {
       canApproveStockRequest:
         user.canApproveStockRequest || user.role === 'admin' || user.role === 'manager',
       canCollectOnSale: user.canCollectOnSale,
+      // A requirement, not a capability: the app reads it to decide whether to
+      // refuse a sign-in and every document while location is denied.
+      requireLocation: user.requireLocation,
       canFindCustomers: user.canFindCustomers,
       routesOnly: user.routesOnly,
       canEditCustomerCredit: user.canEditCustomerCredit,

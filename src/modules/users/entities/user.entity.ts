@@ -141,6 +141,21 @@ export class User extends BaseEntity {
   canCollectOnSale!: boolean;
 
   /**
+   * Must this salesman's phone have location switched on?
+   *
+   * When set, the app refuses to sign in and refuses to write any document
+   * — sale, return, order, collection — while the device denies location. It is
+   * a REQUIREMENT rather than a capability, which is why it is not named canX:
+   * granting it takes something away.
+   *
+   * Off by default, like everything else here. Switching it on for everyone at
+   * once would lock out any rep whose permission happens to be denied when the
+   * update lands, in the middle of a working day.
+   */
+  @Column({ name: 'require_location', type: 'boolean', default: false })
+  requireLocation!: boolean;
+
+  /**
    * Reveals the "find customers" screen on the salesman app — GPS prospecting
    * around the rep's own position.
    *

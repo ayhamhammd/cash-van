@@ -122,6 +122,7 @@ export class CreateUserDto {
   @IsOptional() @IsBoolean() canApproveStockRequest?: boolean;
 
   @IsOptional() @IsBoolean() canCollectOnSale?: boolean;
+  @IsOptional() @IsBoolean() requireLocation?: boolean;
 
   @ApiPropertyOptional({
     description:
