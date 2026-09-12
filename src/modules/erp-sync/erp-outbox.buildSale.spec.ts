@@ -10,11 +10,14 @@ import { ErpOutboxService } from './erp-outbox.service';
 type Row = { voucherNumber: string; amount: string; paymentType: string };
 
 // Constructor arg order: erp, settings, cashAccounts, outbox, idmap(4), headers(5),
-// lines, tobaccoProfiles, collections, customers, salesmanSettlements, payments(11).
-function makeSvc(mocks: { payments?: any; headers?: any; idmap?: any } = {}) {
+// lines(6), tobaccoProfiles, collections, customers, salesmanSettlements, payments(11).
+function makeSvc(mocks: { payments?: any; headers?: any; idmap?: any; lines?: any } = {}) {
   const args: any[] = new Array(12).fill(null);
   args[4] = mocks.idmap ?? null;
   args[5] = mocks.headers ?? null;
+  // The split receipt now names the collecting van, and resolves it from the
+  // voucher's lines exactly as buildSale does — so this repo is no longer unused.
+  args[6] = mocks.lines ?? { find: jest.fn().mockResolvedValue([]) };
   args[11] = mocks.payments ?? null;
   return new (ErpOutboxService as any)(...args) as ErpOutboxService;
 }
@@ -116,7 +119,12 @@ describe('ErpOutboxService.splitPaidPortion', () => {
 });
 
 describe('ErpOutboxService.buildSplitReceipt', () => {
-  function build(opts: { rows: Row[]; erpInvoiceNumber?: string | null; customerNumber?: string }) {
+  function build(opts: {
+    rows: Row[];
+    erpInvoiceNumber?: string | null;
+    customerNumber?: string;
+    userCode?: string;
+  }) {
     const idmap = {
       findOne: jest.fn(({ where }: any) => {
         if (where.entity === 'customer') return Promise.resolve(null); // → customerCode fallback
@@ -127,7 +135,11 @@ describe('ErpOutboxService.buildSplitReceipt', () => {
       }),
     };
     const headers = {
-      findOne: jest.fn().mockResolvedValue({ customerNumber: opts.customerNumber ?? 'C-1' }),
+      findOne: jest.fn().mockResolvedValue({
+        customerNumber: opts.customerNumber ?? 'C-1',
+        // The salesman who raised it — the fallback van when no line names a store.
+        userCode: opts.userCode ?? '203',
+      }),
     };
     const svc = makeSvc({ payments: paymentsRepo(opts.rows), headers, idmap });
     return (svc as any).buildSplitReceipt('S-1') as Promise<any>;
@@ -147,6 +159,9 @@ describe('ErpOutboxService.buildSplitReceipt', () => {
         amount: 60,
         paymentMethod: 'CASH',
         invoiceNumber: 'INV-500',
+        // The paid half lands on the van that made the sale, not on whichever
+        // invoice the ERP would otherwise have allocated it against.
+        warehouseCode: '203',
       },
     });
   });
@@ -157,7 +172,12 @@ describe('ErpOutboxService.buildSplitReceipt', () => {
       erpInvoiceNumber: null,
     });
     expect(call.body).not.toHaveProperty('invoiceNumber');
-    expect(call.body).toMatchObject({ externalId: 'S-1-PAY', amount: 60, paymentMethod: 'CASH' });
+    expect(call.body).toMatchObject({
+      externalId: 'S-1-PAY',
+      amount: 60,
+      paymentMethod: 'CASH',
+      warehouseCode: '203',
+    });
   });
 
   it('returns null when the sale is not a split (nothing to receipt)', async () => {

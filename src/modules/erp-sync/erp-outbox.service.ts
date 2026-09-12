@@ -532,6 +532,17 @@ export class ErpOutboxService {
     // (customerId). Falls back to customerCode for van-native customers.
     const ref = await this.customerRef(customer.customerNumber);
     if (!('customerId' in ref) && !('customerCode' in ref)) return null;
+    // WHICH VAN took the money in. Without it the ERP attributes the cash to the
+    // warehouse on whichever invoice the receipt was allocated against — and a
+    // receipt allocates FIFO across the customer's oldest open invoices, so that
+    // is whoever made THAT sale, possibly weeks earlier and possibly a different
+    // salesman. Every van then closed its day showing CASH COLLECTED 0.000.
+    //
+    // The API key cannot answer it: this deployment runs one shared key across
+    // all the vans, so it is bound to no warehouse. The rep's code IS the ERP
+    // warehouse code (one shared identity — see vanStoreOf), so naming the rep
+    // who collected names the van.
+    const rep = col.repId ? await this.reps.findOne({ where: { id: col.repId } }) : null;
     return {
       path: 'receipts',
       body: {
@@ -540,6 +551,7 @@ export class ErpOutboxService {
         amount: col.amount / 1000, // fils → JOD major (ERP expects decimal)
         paymentMethod: col.method === 'cheque' ? 'CHECK' : 'CASH',
         notes: col.note ?? undefined,
+        ...(rep?.code ? { warehouseCode: rep.code } : {}),
       },
     };
   }
@@ -568,6 +580,10 @@ export class ErpOutboxService {
     });
     const invoiceNumber = map?.erpCode ?? undefined;
     const externalId = `${voucherNumber}-PAY`;
+    // Same attribution as the sale this settles — the paid portion was taken in
+    // by the van that made it, so the two halves of a split sale land on one
+    // salesman's day rather than the invoice deciding for the cash.
+    const lines = await this.lines.find({ where: { voucherNumber } });
     return {
       path: 'receipts',
       idem: externalId,
@@ -577,6 +593,7 @@ export class ErpOutboxService {
         amount: portion.amount, // JOD major (voucher payments are stored in JOD)
         paymentMethod: portion.paymentMethod,
         ...(invoiceNumber ? { invoiceNumber } : {}),
+        warehouseCode: this.vanStoreOf(lines, header.userCode),
       },
     };
   }
