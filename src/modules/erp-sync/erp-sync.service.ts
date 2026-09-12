@@ -770,16 +770,28 @@ export class ErpSyncService {
   async getErpCustomerStatement(
     code: string,
     range: { from?: string; to?: string } = {},
+    erpId?: string | null,
   ): Promise<ErpStatement | null> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
-    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey || !code) return null;
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return null;
+    if (!code && !erpId) return null;
     const qs = new URLSearchParams();
     if (range.from) qs.set('from', range.from);
     if (range.to) qs.set('to', range.to);
     const suffix = qs.toString() ? `?${qs}` : '';
-    return this.erp.getOne<ErpStatement>(
-      `customers/by-code/${encodeURIComponent(code)}/statement${suffix}`,
-    );
+    // BY ID WHERE WE HAVE ONE, because the code often does not exist.
+    //
+    // An ERP customer's `code` is optional, and one created in the ERP commonly
+    // has none — cash-van then derives its own `ERP-<uuid-prefix>` number just to
+    // have something to key on. Asking the ERP for a statement under THAT is
+    // asking for a code it has never held: it answered 404, this returned null,
+    // and the van app showed a shopkeeper "unavailable" instead of their
+    // account. The id-map holds the real ERP id for exactly this reason, and the
+    // outbox has always used it when pushing.
+    const path = erpId
+      ? `customers/${encodeURIComponent(erpId)}/statement${suffix}`
+      : `customers/by-code/${encodeURIComponent(code)}/statement${suffix}`;
+    return this.erp.getOne<ErpStatement>(path);
   }
 
   /** A GL account's live balance from the ERP, keyed by chart-of-accounts code. */
@@ -828,8 +840,17 @@ export class ErpSyncService {
     });
     if (!customer?.customerNumber) return { source: 'unavailable', reason: 'unlinked' };
     if (!(await this.erpConfigReady())) return { source: 'unavailable', reason: 'erp_off' };
+    // The ERP's own id for this customer, where the sync recorded one. Preferred
+    // over the code — see getErpCustomerStatement.
+    const map = await this.idmap.findOne({
+      where: { entity: 'customer', localId: customer.customerNumber },
+    });
     try {
-      const erp = await this.getErpCustomerStatement(customer.customerNumber, range);
+      const erp = await this.getErpCustomerStatement(
+        customer.customerNumber,
+        range,
+        map?.erpId ?? null,
+      );
       if (!erp) return { source: 'unavailable', reason: 'not_found' };
       return erp;
     } catch {
