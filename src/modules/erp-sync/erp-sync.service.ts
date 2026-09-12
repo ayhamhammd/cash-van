@@ -734,13 +734,23 @@ export class ErpSyncService {
     return !!(cfg?.enabled && cfg.baseUrl && cfg.apiKey);
   }
 
-  /** A customer's live balance from the ERP, keyed by ERP customer code. */
-  async getErpCustomerBalance(code: string): Promise<ErpBalance | null> {
+  /** A customer's live balance from the ERP, by its ERP id or, failing that, code. */
+  async getErpCustomerBalance(
+    code: string,
+    erpId?: string | null,
+  ): Promise<ErpBalance | null> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
-    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey || !code) return null;
-    return this.erp.getOne<ErpBalance>(
-      `customers/by-code/${encodeURIComponent(code)}/balance`,
-    );
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return null;
+    if (!code && !erpId) return null;
+    // BY ID WHERE WE HAVE ONE — the same reason as the statement below. An ERP
+    // customer's code is optional, this side derives `ERP-<uuid-prefix>` for one
+    // that has none, and asking the ERP for a code it has never held answers
+    // 404. The customer profile then read "ERP balance unavailable" beside an
+    // account whose balance the ERP knows perfectly well.
+    const path = erpId
+      ? `customers/${encodeURIComponent(erpId)}/balance`
+      : `customers/by-code/${encodeURIComponent(code)}/balance`;
+    return this.erp.getOne<ErpBalance>(path);
   }
 
   /**
@@ -820,8 +830,18 @@ export class ErpSyncService {
     if (!(await this.erpConfigReady())) {
       return { source: 'unavailable', reason: 'erp_off', balance: null };
     }
+    // The ERP's own id for this customer, where the sync recorded one — which it
+    // does for every customer it pulls. Preferred over the code, because a
+    // customer the ERP holds no code for is keyed here by a number this side
+    // invented and the ERP cannot match.
+    const map = await this.idmap.findOne({
+      where: { entity: 'customer', localId: customer.customerNumber },
+    });
     try {
-      const erp = await this.getErpCustomerBalance(customer.customerNumber);
+      const erp = await this.getErpCustomerBalance(
+        customer.customerNumber,
+        map?.erpId ?? null,
+      );
       if (!erp) return { source: 'unavailable', reason: 'not_found', balance: null };
       return { source: 'erp', reason: null, balance: erp.balance, creditLimit: erp.creditLimit };
     } catch {

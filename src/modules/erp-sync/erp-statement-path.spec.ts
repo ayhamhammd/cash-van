@@ -83,3 +83,56 @@ describe('getErpCustomerStatement — which path it asks for', () => {
     expect(paths[0]).toBe('customers/by-code/C%2F1%202/statement');
   });
 });
+
+/**
+ * The same question for a customer's BALANCE.
+ *
+ * The profile screen shows the ERP balance beside the statement, and it was
+ * asking the same wrong way: `by-code/ERP-685cf412/balance`. So a customer the
+ * ERP holds no code for read "ERP balance unavailable" next to an account whose
+ * balance the ERP knows perfectly well — both halves of that screen blank for
+ * the same reason.
+ */
+describe('getErpCustomerBalance — which path it asks for', () => {
+  function makeSvc(): { svc: ErpSyncService; paths: string[] } {
+    const paths: string[] = [];
+    const svc = Object.create(ErpSyncService.prototype) as Record<string, unknown>;
+    svc.settings = {
+      getErpConfig: async () => ({ enabled: true, baseUrl: 'http://erp', apiKey: 'k' }),
+    };
+    svc.erp = {
+      getOne: async (path: string) => {
+        paths.push(path);
+        return { balance: 0 };
+      },
+    };
+    return { svc: svc as unknown as ErpSyncService, paths };
+  }
+
+  const call = (code: string, erpId?: string | null) => {
+    const { svc, paths } = makeSvc();
+    return (svc as unknown as {
+      getErpCustomerBalance(c: string, e?: string | null): Promise<unknown>;
+    })
+      .getErpCustomerBalance(code, erpId)
+      .then(() => paths);
+  };
+
+  it('asks by ID when the id-map knows the ERP customer', async () => {
+    expect((await call('ERP-685cf412', '685cf412-3359-4bc9-9e6b-0dd06c90d9fc'))[0])
+      .toBe('customers/685cf412-3359-4bc9-9e6b-0dd06c90d9fc/balance');
+  });
+
+  it('never sends a derived ERP- number as a code', async () => {
+    const paths = await call('ERP-685cf412', '685cf412-3359-4bc9-9e6b-0dd06c90d9fc');
+    expect(paths[0]).not.toContain('by-code');
+  });
+
+  it('falls back to the code when nothing is mapped', async () => {
+    expect((await call('C-1001', null))[0]).toBe('customers/by-code/C-1001/balance');
+  });
+
+  it('asks for nothing when it has neither identifier', async () => {
+    expect(await call('', null)).toEqual([]);
+  });
+});
