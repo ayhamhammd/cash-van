@@ -29,6 +29,13 @@ export class UserResponseDto {
   @ApiProperty() canRequestStock!: boolean;
   @ApiProperty() canApproveStockRequest!: boolean;
   @ApiProperty() canCollectOnSale!: boolean;
+  /**
+   * Whether this rep must keep location on.
+   *
+   * A REQUIREMENT, not a grant — every other flag here allows something and
+   * this one takes something away, which is why it is not named canX.
+   */
+  @ApiProperty() requireLocation!: boolean;
   @ApiProperty() canFindCustomers!: boolean;
   @ApiProperty() routesOnly!: boolean;
   @ApiProperty() canEditCustomerCredit!: boolean;
@@ -62,6 +69,7 @@ export class UserResponseDto {
       canRequestStock: u.canRequestStock,
       canApproveStockRequest: u.canApproveStockRequest,
       canCollectOnSale: u.canCollectOnSale,
+      requireLocation: u.requireLocation,
       canFindCustomers: u.canFindCustomers,
       routesOnly: u.routesOnly,
       canEditCustomerCredit: u.canEditCustomerCredit,
