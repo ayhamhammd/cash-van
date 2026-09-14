@@ -49,6 +49,10 @@ describe('buildPayment — the collecting van rides the receipt', () => {
   it('sends warehouseCode — the rep code IS the ERP warehouse code', async () => {
     const out = await build({ id: 'rep-1', code: '203' });
     expect(out.body.warehouseCode).toBe('203');
+    // …and salesmanCode, the ERP's preferred route: warehouseCode says which
+    // cash box, salesmanCode says who carried the money. Same string, because
+    // van 203 and salesman 203 are one identity on this deployment.
+    expect(out.body.salesmanCode).toBe('203');
     // and nothing else about the call changed
     expect(out.body).toMatchObject({
       externalId: 'col-1',
@@ -66,7 +70,9 @@ describe('buildPayment — the collecting van rides the receipt', () => {
       14: one({ id: 'rep-1', code: '106' }),
     }) as unknown as { buildPayment(id: string): Promise<{ body: Record<string, unknown> }> };
     const out = await svc.buildPayment('col-1');
-    expect(out.body).toMatchObject({ paymentMethod: 'CHECK', warehouseCode: '106' });
+    expect(out.body).toMatchObject({
+      paymentMethod: 'CHECK', warehouseCode: '106', salesmanCode: '106',
+    });
   });
 
   it('omits the field rather than sending null when the rep has no code', async () => {
@@ -76,6 +82,9 @@ describe('buildPayment — the collecting van rides the receipt', () => {
     // exactly what we want here.
     const out = await build({ id: 'rep-1', code: null });
     expect('warehouseCode' in out.body).toBe(false);
+    // salesmanCode is refused HARDER than a warehouse — the ERP 404s an
+    // unknown one — so a rep with no code must send no salesman either.
+    expect('salesmanCode' in out.body).toBe(false);
   });
 
   it('omits the field when the collection names no rep', async () => {
@@ -87,5 +96,6 @@ describe('buildPayment — the collecting van rides the receipt', () => {
     }) as unknown as { buildPayment(id: string): Promise<{ body: Record<string, unknown> }> };
     const out = await svc.buildPayment('col-1');
     expect('warehouseCode' in out.body).toBe(false);
+    expect('salesmanCode' in out.body).toBe(false);
   });
 });

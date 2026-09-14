@@ -542,6 +542,13 @@ export class ErpOutboxService {
     // all the vans, so it is bound to no warehouse. The rep's code IS the ERP
     // warehouse code (one shared identity — see vanStoreOf), so naming the rep
     // who collected names the van.
+    //
+    // Name the MAN as well as the van. `warehouseCode` says which cash box;
+    // `salesmanCode` says who carried the money, which is what the ERP books
+    // to the van cash box and what the day-closing attributes the collection
+    // to. The ERP treats salesmanCode as the declared identity and rejects an
+    // unknown one outright, so send it only when the rep actually has a code —
+    // an unattributed receipt still posting beats every collection failing.
     const rep = col.repId ? await this.reps.findOne({ where: { id: col.repId } }) : null;
     return {
       path: 'receipts',
@@ -551,7 +558,7 @@ export class ErpOutboxService {
         amount: col.amount / 1000, // fils → JOD major (ERP expects decimal)
         paymentMethod: col.method === 'cheque' ? 'CHECK' : 'CASH',
         notes: col.note ?? undefined,
-        ...(rep?.code ? { warehouseCode: rep.code } : {}),
+        ...(rep?.code ? { warehouseCode: rep.code, salesmanCode: rep.code } : {}),
       },
     };
   }
@@ -584,6 +591,10 @@ export class ErpOutboxService {
     // by the van that made it, so the two halves of a split sale land on one
     // salesman's day rather than the invoice deciding for the cash.
     const lines = await this.lines.find({ where: { voucherNumber } });
+    // One identity, two fields: the van store code and the salesman code are
+    // the same string on this deployment (see vanStoreOf), so the receipt can
+    // name both the cash box and the man without a second lookup.
+    const van = this.vanStoreOf(lines, header.userCode);
     return {
       path: 'receipts',
       idem: externalId,
@@ -593,7 +604,8 @@ export class ErpOutboxService {
         amount: portion.amount, // JOD major (voucher payments are stored in JOD)
         paymentMethod: portion.paymentMethod,
         ...(invoiceNumber ? { invoiceNumber } : {}),
-        warehouseCode: this.vanStoreOf(lines, header.userCode),
+        warehouseCode: van,
+        ...(van ? { salesmanCode: van } : {}),
       },
     };
   }

@@ -160,8 +160,10 @@ describe('ErpOutboxService.buildSplitReceipt', () => {
         paymentMethod: 'CASH',
         invoiceNumber: 'INV-500',
         // The paid half lands on the van that made the sale, not on whichever
-        // invoice the ERP would otherwise have allocated it against.
+        // invoice the ERP would otherwise have allocated it against — and it
+        // names the salesman, which is what the ERP books to the van cash box.
         warehouseCode: '203',
+        salesmanCode: '203',
       },
     });
   });
