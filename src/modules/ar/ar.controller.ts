@@ -63,9 +63,10 @@ export class ArController {
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('customerNumber') customerNumber?: string,
+    @Query('repId') repId?: string,
   ) {
     return this.ar.receivables(
-      { from, to, customerNumber },
+      { from, to, customerNumber, repId },
       await this.repScope.visibleRepIds(user),
     );
   }

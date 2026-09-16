@@ -343,13 +343,20 @@ export class ArService {
       from?: string;
       to?: string;
       customerNumber?: string;
+      /** One salesman, chosen in the UI — narrower than the caller's own scope. */
+      repId?: string;
     },
     visibleRepIds: string[] | null = null,
   ): Promise<ReceivablesResult> {
     const from = q.from && /^\d{4}-\d{2}-\d{2}$/.test(q.from) ? q.from : null;
     const to = q.to && /^\d{4}-\d{2}-\d{2}$/.test(q.to) ? q.to : null;
     const cust = q.customerNumber?.trim() || null;
-    const params = [from, to, cust, visibleRepIds];
+    const repId = q.repId?.trim() || null;
+    // Every query below binds all five, so each must REFERENCE all five —
+    // Postgres rejects a bind that supplies more parameters than the statement
+    // uses ("bind message supplies 5 parameters, but prepared statement
+    // requires 4"), which is what broke the returns query.
+    const params = [from, to, cust, visibleRepIds, repId];
 
     // Credit SALE vouchers, one row per voucher (the debits), oldest-first.
     const saleRows: Array<{
@@ -369,6 +376,7 @@ export class ArService {
           AND ($2::date IS NULL OR h.created_at < ($2::date + 1))
           AND ($3::text IS NULL OR h.customer_number = $3 OR c.customer_name ILIKE '%' || $3 || '%')
           AND ($4::uuid[] IS NULL OR c.rep_id = ANY($4::uuid[]))
+          AND ($5::uuid IS NULL OR c.rep_id = $5::uuid)
         GROUP BY h.customer_number, c.customer_name, h.voucher_number, h.created_at
         ORDER BY h.customer_number, h.created_at ASC`,
       params,
@@ -385,6 +393,7 @@ export class ArService {
           AND ($2::date IS NULL OR co.collected_at < ($2::date + 1))
           AND ($3::text IS NULL OR c.customer_number = $3 OR c.customer_name ILIKE '%' || $3 || '%')
           AND ($4::uuid[] IS NULL OR c.rep_id = ANY($4::uuid[]))
+          AND ($5::uuid IS NULL OR c.rep_id = $5::uuid)
         GROUP BY c.customer_number`,
       params,
     );
@@ -399,6 +408,8 @@ export class ArService {
           AND ($1::date IS NULL OR h.created_at >= $1::date)
           AND ($2::date IS NULL OR h.created_at < ($2::date + 1))
           AND ($3::text IS NULL OR h.customer_number = $3 OR c.customer_name ILIKE '%' || $3 || '%')
+          AND ($4::uuid[] IS NULL OR c.rep_id = ANY($4::uuid[]))
+          AND ($5::uuid IS NULL OR c.rep_id = $5::uuid)
         GROUP BY h.customer_number`,
       params,
     );
