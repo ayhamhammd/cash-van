@@ -189,6 +189,18 @@ export class CollectionsService {
     // from the sum of the cheques (each cheque carries its own amount).
     let amount: number;
     if (dto.method === 'cheque') {
+      // An older handset sends ONE cheque with no amount of its own — see
+      // `cheque` on the DTO. Folded into the list here, carrying the
+      // collection's own amount, so the rest of this method has one shape to
+      // reason about and the cheque row is written exactly as a new app's is.
+      if ((!dto.cheques || dto.cheques.length === 0) && dto.cheque) {
+        if (!dto.amount || dto.amount < 1) {
+          throw new BadRequestException(
+            'amount is required with the single-cheque form (there is no per-cheque amount to total)',
+          );
+        }
+        dto.cheques = [{ ...dto.cheque, amount: dto.amount }];
+      }
       if (!dto.cheques || dto.cheques.length === 0) {
         throw new BadRequestException('at least one cheque is required when method=cheque');
       }

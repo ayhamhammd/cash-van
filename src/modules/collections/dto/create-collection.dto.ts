@@ -17,6 +17,36 @@ import {
   ValidateNested,
 } from 'class-validator';
 
+/**
+ * The old single-cheque shape: the same fields WITHOUT an amount, because the
+ * app that sends it has only the collection's own total.
+ */
+export class LegacyChequeInputDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @Length(0, 128)
+  bankName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @Length(0, 64)
+  chequeNumber?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @Length(0, 200)
+  payee?: string;
+
+  @ApiPropertyOptional({ description: 'YYYY-MM-DD' })
+  @IsOptional()
+  @IsString()
+  @Length(0, 10)
+  dueDate?: string;
+}
+
 export class ChequeInputDto {
   @ApiProperty({ description: "This cheque's amount in fils", minimum: 1 })
   @IsInt()
@@ -142,4 +172,29 @@ export class CreateCollectionDto {
   @ValidateNested({ each: true })
   @Type(() => ChequeInputDto)
   cheques?: ChequeInputDto[];
+
+  /**
+   * ONE cheque, the way older handsets send it — accepted, never required.
+   *
+   * The van app posted a singular `cheque` object with no amount on it. This DTO
+   * declared only the plural, and the app's validation refuses a body carrying
+   * any property it does not declare (forbidNonWhitelisted), so every cheque
+   * collection a rep took was rejected with a 400 BEFORE the service ran. It
+   * reached neither VanFlow nor the ERP, and the rep was never told.
+   *
+   * The app now sends `cheques`. This stays because the handsets in the field do
+   * not all update on the day the server does, and a rep taking cheques with
+   * last month's build should start working the moment this deploys rather than
+   * when someone gets their phone. The service folds it into `cheques`, using
+   * the collection's own `amount` — which is the amount the old app sent, and
+   * the only one it had.
+   */
+  @ApiPropertyOptional({
+    type: ChequeInputDto,
+    description: 'Legacy single-cheque form from older app builds. Prefer `cheques`.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LegacyChequeInputDto)
+  cheque?: LegacyChequeInputDto;
 }
