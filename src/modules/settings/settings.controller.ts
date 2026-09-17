@@ -27,6 +27,7 @@ import { UpdateAccountingDto } from './dto/update-accounting.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
 import { UpdateAiDto } from './dto/update-ai.dto';
+import { UpdateMapsDto } from './dto/update-maps.dto';
 import { SetTobaccoTaxDto } from './dto/set-tobacco-tax.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -161,5 +162,18 @@ export class SettingsController {
   @ApiOkResponse({ description: 'AI settings (key masked)' })
   updateAi(@Body() dto: UpdateAiDto) {
     return this.settings.updateAi(dto);
+  }
+
+  @Patch('maps')
+  @ApiOperation({
+    summary: 'Set the Google Maps browser key',
+    description:
+      'Store or rotate the Google Maps JavaScript key (encrypted). Omit apiKey to ' +
+      'keep the current one; send an empty string to clear it and fall back to the ' +
+      "server's GOOGLE_MAPS_API_KEY. Admin only.",
+  })
+  @ApiOkResponse({ description: 'Maps settings (key masked to last 4)' })
+  updateMaps(@Body() dto: UpdateMapsDto) {
+    return this.settings.updateMaps(dto);
   }
 }

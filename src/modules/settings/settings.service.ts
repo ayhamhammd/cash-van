@@ -9,6 +9,7 @@ import { UpdateAccountingDto } from './dto/update-accounting.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
 import { UpdateErpDto } from './dto/update-erp.dto';
 import { UpdateAiDto } from './dto/update-ai.dto';
+import { UpdateMapsDto } from './dto/update-maps.dto';
 import { validateAiApiKey } from './ai-key.util';
 import {
   BASE_VOUCHER_TEMPLATE,
@@ -74,12 +75,20 @@ export interface AppSettingsView {
     language: string;
     capabilities: Record<string, boolean>;
   };
+  maps: {
+    apiKeyLast4: string | null;
+    isConfigured: boolean;
+    mapId: string | null;
+    /** Where a browser gets its key right now: 'settings' | 'environment' | 'none'. */
+    source: 'settings' | 'environment' | 'none';
+  };
   updatedAt: Date;
   updatedBy: string | null;
 }
 
 export type ErpView = AppSettingsView['erp'];
 export type AiView = AppSettingsView['ai'];
+export type MapsView = AppSettingsView['maps'];
 
 export interface JoFotaraUpdateView {
   clientId: string;
@@ -432,8 +441,68 @@ export class SettingsService {
         language: row.aiLanguage ?? 'auto',
         capabilities: row.aiCapabilities ?? {},
       },
+      maps: this.mapsSection(row),
       updatedAt: row.updatedAt,
       updatedBy: row.updatedBy ?? null,
+    };
+  }
+
+  /**
+   * `source` answers the question an admin actually has when a map is blank:
+   * where would a browser get its key right now. A stored key wins, otherwise
+   * the server environment, otherwise nothing is configured anywhere.
+   */
+  private mapsSection(row: AppSettings): MapsView {
+    const hasStored = !!row.googleMapsApiKeyLast4;
+    return {
+      apiKeyLast4: row.googleMapsApiKeyLast4 ?? null,
+      isConfigured: hasStored,
+      mapId: row.googleMapsMapId ?? null,
+      source: hasStored ? 'settings' : process.env.GOOGLE_MAPS_API_KEY ? 'environment' : 'none',
+    };
+  }
+
+  /** Set or rotate the browser key. An empty string clears it back to the env fallback. */
+  async updateMaps(dto: UpdateMapsDto): Promise<MapsView> {
+    const row = await this.requireRow();
+    if (dto.apiKey !== undefined) {
+      const key = dto.apiKey.trim();
+      if (key) {
+        row.googleMapsApiKeyEncrypted = encryptSecret(key);
+        row.googleMapsApiKeyLast4 = maskSecret(key).slice(-4);
+      } else {
+        // A deliberate clear, not "unchanged" — the admin is handing the
+        // decision back to the server environment.
+        row.googleMapsApiKeyEncrypted = null;
+        row.googleMapsApiKeyLast4 = null;
+      }
+    }
+    if (dto.mapId !== undefined) row.googleMapsMapId = dto.mapId.trim() || null;
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return this.mapsSection(row);
+  }
+
+  /**
+   * What the browser actually loads Maps with — returned in the clear, unlike
+   * every other stored key here, because Maps JS runs in the browser and cannot
+   * use a key it never receives. The control that matters for this key is the
+   * HTTP-referrer restriction on it in Google Cloud, not secrecy in transit to
+   * a signed-in user.
+   *
+   * Falls back to the server environment, so an install that never opens
+   * Settings keeps behaving exactly as it did before.
+   */
+  async mapsRuntime(): Promise<{ googleMapsApiKey: string; googleMapsMapId: string }> {
+    const row = await this.repo
+      .createQueryBuilder('s')
+      .addSelect('s.googleMapsApiKeyEncrypted')
+      .where('s.id = 1')
+      .getOne();
+    const stored = readStoredSecret(row?.googleMapsApiKeyEncrypted, 'Google Maps API key');
+    return {
+      googleMapsApiKey: stored || process.env.GOOGLE_MAPS_API_KEY || '',
+      googleMapsMapId: row?.googleMapsMapId || process.env.GOOGLE_MAPS_MAP_ID || '',
     };
   }
 

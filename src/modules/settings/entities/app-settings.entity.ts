@@ -220,6 +220,26 @@ export class AppSettings {
   @Column({ name: 'main_store_number', type: 'text', nullable: true })
   mainStoreNumber?: string | null;
 
+  /**
+   * Google Maps browser key, set from Settings rather than baked into the image.
+   *
+   * Encrypted at rest like every other stored key, but unlike the JoFotara/ERP/AI
+   * secrets this one is MEANT to reach the browser — Maps JS runs client-side, so
+   * the value is handed to any signed-in user and is protected by an HTTP-referrer
+   * restriction in Google Cloud, not by hiding it. Rotating it here takes effect on
+   * the next page load; the env var stays as the fallback for installs that never
+   * set one.
+   */
+  @Column({ name: 'google_maps_api_key_encrypted', type: 'text', nullable: true, select: false })
+  googleMapsApiKeyEncrypted?: string | null;
+
+  @Column({ name: 'google_maps_api_key_last4', type: 'text', nullable: true })
+  googleMapsApiKeyLast4?: string | null;
+
+  /** Optional Map ID for cloud-styled maps. Not a secret. */
+  @Column({ name: 'google_maps_map_id', type: 'text', nullable: true })
+  googleMapsMapId?: string | null;
+
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 
