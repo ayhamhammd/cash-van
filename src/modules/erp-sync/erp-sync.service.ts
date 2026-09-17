@@ -63,7 +63,15 @@ export interface ErpBalance {
 /** One posting line of an ERP customer statement (major units). */
 export interface ErpStatementLine {
   date: string | null;
-  type: 'INVOICE' | 'PAYMENT';
+  /**
+   * The ERP's own kind.
+   *
+   * JOURNAL is a voucher posted straight to the customer's ledger account — an
+   * opening balance is the common one. It was missing here, and every consumer
+   * that branched on "INVOICE or else" therefore called a debit voucher a
+   * payment, which says the opposite of what it is.
+   */
+  type: 'INVOICE' | 'PAYMENT' | 'JOURNAL';
   reference: string;
   description: string;
   debit: number;
