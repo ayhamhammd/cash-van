@@ -41,6 +41,18 @@ export class CreateCustomerDto {
   @IsUUID('all', { each: true })
   extraPhotoIds?: string[];
 
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'Customer segment to file this shop under (GET /customers/segments). Optional. ' +
+      'A customer sits in exactly one segment, so this creates the single membership. ' +
+      'Travels on an approval request too, so a segment chosen in the field survives ' +
+      'the office approving the customer.',
+  })
+  @IsOptional()
+  @IsUUID()
+  segmentId?: string;
+
   @ApiPropertyOptional({ description: 'Auto-generated (CUST-000001) when omitted.' })
   @IsOptional()
   @IsString()

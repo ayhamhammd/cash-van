@@ -21,6 +21,8 @@ import { AuthenticatedUser } from '../../common/decorators/current-user.decorato
 import { PendingCustomerPhoto } from './entities/pending-customer-photo.entity';
 import { CustomerAttachment } from './entities/customer-attachment.entity';
 import { User } from '../users/entities/user.entity';
+import { CustomerSegment } from '../segments/entities/customer-segment.entity';
+import { SegmentCustomer } from '../segments/entities/segment-customer.entity';
 import { CreateCustomerDto } from './dto/create-customer.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 import { ListCustomersQuery } from './dto/list-customers.query';
@@ -78,6 +80,10 @@ export class CustomersService {
     private readonly attachments: Repository<CustomerAttachment>,
     @InjectRepository(User)
     private readonly users: Repository<User>,
+    @InjectRepository(CustomerSegment)
+    private readonly segments: Repository<CustomerSegment>,
+    @InjectRepository(SegmentCustomer)
+    private readonly segmentMembers: Repository<SegmentCustomer>,
     private readonly jobs: JobsService,
     private readonly storage: StorageService,
     private readonly events: EventEmitter2,
@@ -247,6 +253,7 @@ export class CustomersService {
       source: dto.sourceProspectId ? 'PROSPECTING' : 'MANUAL',
     });
     const saved = await this.customers.save(entity);
+    await this.fileInSegment(saved.id, dto.segmentId);
     if (dto.sourceProspectId) {
       // An event rather than a direct call: prospecting already depends on
       // customers (convert() writes one), so calling back would be circular.
@@ -271,6 +278,53 @@ export class CustomersService {
       creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
     });
     return saved;
+  }
+
+  /**
+   * Segments a customer can be filed under, as a picker needs them.
+   *
+   * Active only: an archived segment is one the office has stopped using, and
+   * offering it to a rep would keep filling it. Sorted by Arabic name, since
+   * that is what the picker shows.
+   */
+  async segmentOptions(): Promise<
+    Array<{ id: string; nameAr: string; nameEn: string | null; color: string | null }>
+  > {
+    const rows = await this.segments.find({
+      where: { isActive: true },
+      order: { nameAr: 'ASC' },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      nameAr: r.nameAr,
+      nameEn: r.nameEn ?? null,
+      color: r.color ?? null,
+    }));
+  }
+
+  /**
+   * File a new customer under the segment whoever created them chose.
+   *
+   * A customer sits in exactly ONE segment, so this is a single membership
+   * row rather than a list. Written as MANUAL because a person picked it: the
+   * rule engine rewrites its own RULE rows on every run and would otherwise
+   * delete a rep's choice the first time it ran.
+   *
+   * An unknown or inactive segment is refused rather than dropped. The id
+   * comes from a picker this server filled, so a miss means the app is sending
+   * something stale — and a customer silently filed nowhere is a customer the
+   * rep believes is segmented.
+   */
+  private async fileInSegment(customerId: string, segmentId?: string): Promise<void> {
+    if (!segmentId) return;
+    const segment = await this.segments.findOne({ where: { id: segmentId } });
+    if (!segment) throw new BadRequestException('Unknown customer segment');
+    if (!segment.isActive) {
+      throw new BadRequestException('That customer segment is no longer active');
+    }
+    await this.segmentMembers.save(
+      this.segmentMembers.create({ segmentId, customerId, source: 'MANUAL' }),
+    );
   }
 
   /** Next serial customer number: CUST-000001. */

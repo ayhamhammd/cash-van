@@ -9,6 +9,8 @@ import { ApprovalsModule } from '../approvals/approvals.module';
 import { PendingCustomerPhoto } from './entities/pending-customer-photo.entity';
 import { CustomerAttachment } from './entities/customer-attachment.entity';
 import { User } from '../users/entities/user.entity';
+import { CustomerSegment } from '../segments/entities/customer-segment.entity';
+import { SegmentCustomer } from '../segments/entities/segment-customer.entity';
 import {
   AI_PROFILE_REFRESH_QUEUE,
   CustomersService,
@@ -28,6 +30,12 @@ import { ErpSyncModule } from '../erp-sync/erp-sync.module';
       CustomerVisit,
       CustomerAttachment,
       User,
+      // The segment a rep files a new customer under. The entities rather than
+      // SegmentsModule: that module is permission-gated around a dashboard
+      // screen, and importing it here would drag that surface into the create
+      // path for a two-table write.
+      CustomerSegment,
+      SegmentCustomer,
     ]),
   ],
   controllers: [CustomersController],

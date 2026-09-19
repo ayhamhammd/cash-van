@@ -79,6 +79,30 @@ export class CustomersController {
     return this.customers.list(query, await this.repScope.visibleRepIds(user));
   }
 
+  /**
+   * The segments a rep may file a new customer under.
+   *
+   * Deliberately NOT behind `segments.view`. That key guards the segments
+   * SCREEN — rules, members, rep assignment — and no salesman holds it; but a
+   * rep creating a shop has to be able to say which segment it belongs to, and
+   * a picker they cannot fill is a field they cannot use. What is returned is
+   * a name and a colour, which is all a picker needs and nothing a rep could
+   * not already see on a customer's chip.
+   *
+   * Declared ahead of `:id`, or Nest matches "segments" as a customer id.
+   */
+  @Get('segments')
+  @ApiOperation({
+    summary: 'Customer segments, for the create-customer picker',
+    description:
+      'Active segments only, newest names first. Open to any signed-in user, ' +
+      'including salesmen — unlike the segments module itself.',
+  })
+  @ApiOkResponse({ description: '[{ id, nameAr, nameEn, color }]' })
+  segmentOptions() {
+    return this.customers.segmentOptions();
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get customer', description: 'Fetch a single customer by id.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
