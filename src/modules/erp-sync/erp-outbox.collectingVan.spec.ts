@@ -15,10 +15,10 @@ import { ErpOutboxService } from './erp-outbox.service';
  *
  * Arg order: erp, settings, cashAccounts, outbox, idmap(4), headers(5),
  * lines(6), tobaccoProfiles, collections(8), customers(9), salesmanSettlements,
- * payments(11), itemUnits, stockRequests, reps(14).
+ * payments(11), itemUnits, stockRequests, reps(14), cheques(15).
  */
 function makeSvc(mocks: Record<number, unknown>): ErpOutboxService {
-  const args: unknown[] = new Array(15).fill(null);
+  const args: unknown[] = new Array(16).fill(null);
   for (const [i, v] of Object.entries(mocks)) args[Number(i)] = v;
   return new (ErpOutboxService as unknown as new (...a: unknown[]) => ErpOutboxService)(...args);
 }
@@ -68,6 +68,8 @@ describe('buildPayment — the collecting van rides the receipt', () => {
       8: one({ ...collection, method: 'cheque' }),
       9: one(customer),
       14: one({ id: 'rep-1', code: '106' }),
+      // A cheque receipt now reads its cheque rows to identify the cheque.
+      15: { find: jest.fn().mockResolvedValue([{ chequeNumber: 'X', dueDate: '2026-11-01' }]) },
     }) as unknown as { buildPayment(id: string): Promise<{ body: Record<string, unknown> }> };
     const out = await svc.buildPayment('col-1');
     expect(out.body).toMatchObject({
@@ -97,5 +99,69 @@ describe('buildPayment — the collecting van rides the receipt', () => {
     const out = await svc.buildPayment('col-1');
     expect('warehouseCode' in out.body).toBe(false);
     expect('salesmanCode' in out.body).toBe(false);
+  });
+});
+
+/**
+ * A CHECK receipt has to identify the cheque.
+ *
+ * The ERP used to accept one that did not, and the result was a voucher naming
+ * a cheque nobody could find: no Financial Paper, and no way to post it, because
+ * posting builds the paper out of the number and the due date. It now returns
+ * 400 instead, so a receipt that omits them never completes at all.
+ */
+describe('buildPayment — a cheque receipt identifies the cheque', () => {
+  const customer = { id: 'cust-1', customerNumber: '463', customerName: 'أسواق الراعي' };
+  const chequeCollection = {
+    id: 'col-1', customerId: 'cust-1', repId: 'rep-1',
+    amount: 25_000, method: 'cheque', note: null,
+  };
+
+  const build = (cheques: unknown[], col: unknown = chequeCollection) =>
+    (
+      makeSvc({
+        4: one(null),
+        8: one(col),
+        9: one(customer),
+        14: one({ id: 'rep-1', code: '203' }),
+        15: { find: jest.fn().mockResolvedValue(cheques) },
+      }) as unknown as { buildPayment(id: string): Promise<{ body: Record<string, unknown> }> }
+    ).buildPayment('col-1');
+
+  it('sends the number, due date, bank and drawer', async () => {
+    const out = await build([
+      { chequeNumber: '556677', dueDate: '2026-11-01', bankName: 'Housing Bank' },
+    ]);
+    expect(out.body).toMatchObject({
+      paymentMethod: 'CHECK',
+      checkNumber: '556677',
+      checkDueDate: '2026-11-01',
+      checkBankName: 'Housing Bank',
+      // The DRAWER is the customer who wrote it — payee is us.
+      checkDrawerName: 'أسواق الراعي',
+    });
+  });
+
+  it('trims a due date that arrives as a timestamp', async () => {
+    // `date` columns can come back as a Date or a longer string depending on
+    // the driver; the ERP wants YYYY-MM-DD.
+    const out = await build([{ chequeNumber: 'A', dueDate: '2026-11-01T00:00:00.000Z' }]);
+    expect(out.body.checkDueDate).toBe('2026-11-01');
+  });
+
+  it('omits a blank number rather than sending whitespace', async () => {
+    // The ERP counts whitespace as missing, so sending it only makes its own
+    // error message less accurate.
+    const out = await build([{ chequeNumber: '   ', dueDate: '2026-11-01' }]);
+    expect('checkNumber' in out.body).toBe(false);
+    expect(out.body.checkDueDate).toBe('2026-11-01');
+  });
+
+  it('sends no cheque fields at all on a cash collection', async () => {
+    const out = await build([], { ...chequeCollection, method: 'cash' });
+    expect(out.body.paymentMethod).toBe('CASH');
+    for (const k of ['checkNumber', 'checkDueDate', 'checkBankName', 'checkDrawerName']) {
+      expect(k in out.body).toBe(false);
+    }
   });
 });

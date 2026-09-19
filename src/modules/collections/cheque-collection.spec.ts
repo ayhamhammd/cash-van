@@ -55,14 +55,17 @@ describe('CollectionsService — the single-cheque form older apps send', () => 
     return full;
   }
 
+  // Every fixture below carries a number AND a due date because the service now
+  // refuses a cheque that identifies neither — see the cases at the end. These
+  // tests are about the FOLDING, so they use payloads that get past that gate.
   it('turns one legacy cheque into a list carrying the collection amount', async () => {
     const dto = await fold({
       method: 'cheque',
       amount: 260_325,
-      cheque: { bankName: 'Housing Bank', chequeNumber: '556677' },
+      cheque: { bankName: 'Housing Bank', chequeNumber: '556677', dueDate: '2026-11-01' },
     });
     expect(dto.cheques).toEqual([
-      { bankName: 'Housing Bank', chequeNumber: '556677', amount: 260_325 },
+      { bankName: 'Housing Bank', chequeNumber: '556677', dueDate: '2026-11-01', amount: 260_325 },
     ]);
   });
 
@@ -102,8 +105,8 @@ describe('CollectionsService — the single-cheque form older apps send', () => 
     const dto = await fold({
       method: 'cheque',
       cheques: [
-        { amount: 100, chequeNumber: 'A' },
-        { amount: 250, chequeNumber: 'B' },
+        { amount: 100, chequeNumber: 'A', dueDate: '2026-11-01' },
+        { amount: 250, chequeNumber: 'B', dueDate: '2026-11-02' },
       ],
     } as Partial<CreateCollectionDto>);
     // Two cheques, two rows, and the receipt totals them — the legacy path must
@@ -120,10 +123,10 @@ describe('CollectionsService — the single-cheque form older apps send', () => 
       method: 'cheque',
       amount: 350,
       cheques: [
-        { amount: 100, chequeNumber: 'A' },
-        { amount: 250, chequeNumber: 'B' },
+        { amount: 100, chequeNumber: 'A', dueDate: '2026-11-01' },
+        { amount: 250, chequeNumber: 'B', dueDate: '2026-11-02' },
       ],
-      cheque: { chequeNumber: 'OLD' },
+      cheque: { chequeNumber: 'OLD', dueDate: '2026-11-03' },
     } as Partial<CreateCollectionDto>);
     expect(dto.cheques).toHaveLength(2);
     expect(dto.cheques?.map((c) => c.chequeNumber)).toEqual(['A', 'B']);
@@ -133,6 +136,62 @@ describe('CollectionsService — the single-cheque form older apps send', () => 
     await expect(fold({ method: 'cheque', amount: 500 })).rejects.toBeInstanceOf(
       BadRequestException,
     );
+  });
+
+  // ── The cheque has to identify itself ──────────────────────────────────────
+  //
+  // The ERP refuses a CHECK receipt with no number or due date, because posting
+  // builds the Financial Paper out of exactly those two and cannot invent
+  // either. Refusing at intake puts the error in front of the salesman, who is
+  // holding the cheque; accepting it means a receipt that dead-letters hours
+  // later in an office where nobody can read it.
+
+  it('refuses a cheque with no number', async () => {
+    await expect(
+      fold({ method: 'cheque', cheques: [{ amount: 100, dueDate: '2026-11-01' }] } as Partial<CreateCollectionDto>),
+    ).rejects.toThrow(/chequeNumber/);
+  });
+
+  it('refuses a cheque with no due date', async () => {
+    await expect(
+      fold({ method: 'cheque', cheques: [{ amount: 100, chequeNumber: 'A' }] } as Partial<CreateCollectionDto>),
+    ).rejects.toThrow(/dueDate/);
+  });
+
+  it('counts whitespace as missing — a blank number identifies nothing', async () => {
+    await expect(
+      fold({
+        method: 'cheque',
+        cheques: [{ amount: 100, chequeNumber: '   ', dueDate: '2026-11-01' }],
+      } as Partial<CreateCollectionDto>),
+    ).rejects.toThrow(/chequeNumber/);
+  });
+
+  it('names the offending cheque, not just "a cheque"', async () => {
+    // Three in the batch and the second is the bad one: a salesman re-reading
+    // all three to find out which is worse than being told.
+    await expect(
+      fold({
+        method: 'cheque',
+        cheques: [
+          { amount: 100, chequeNumber: 'A', dueDate: '2026-11-01' },
+          { amount: 100, dueDate: '2026-11-02' },
+          { amount: 100, chequeNumber: 'C', dueDate: '2026-11-03' },
+        ],
+      } as Partial<CreateCollectionDto>),
+    ).rejects.toThrow(/cheque 2/);
+  });
+
+  it('refuses the OLD single-cheque form too when it cannot identify the cheque', async () => {
+    // The legacy path folds into the same list, so it must meet the same bar —
+    // otherwise an older handset writes exactly the receipt the ERP rejects.
+    await expect(
+      fold({
+        method: 'cheque',
+        amount: 500,
+        cheque: { bankName: 'Arab Bank' },
+      } as Partial<CreateCollectionDto>),
+    ).rejects.toThrow(/chequeNumber/);
   });
 
   it('does not touch a cash collection', async () => {

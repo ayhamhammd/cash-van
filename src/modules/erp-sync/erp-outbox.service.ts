@@ -9,6 +9,7 @@ import { Payment } from '../vouchers/entities/payment.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { Collection } from '../collections/entities/collection.entity';
+import { Cheque } from '../collections/entities/cheque.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { StockRequest } from '../stock-requests/entities/stock-request.entity';
@@ -77,6 +78,7 @@ export class ErpOutboxService {
     @InjectRepository(ItemUnit) private readonly itemUnits: Repository<ItemUnit>,
     @InjectRepository(StockRequest) private readonly stockRequests: Repository<StockRequest>,
     @InjectRepository(Rep) private readonly reps: Repository<Rep>,
+    @InjectRepository(Cheque) private readonly cheques: Repository<Cheque>,
   ) {}
 
   /** Queue a van document for push to the ERP (best-effort; never throws to the caller). */
@@ -550,17 +552,60 @@ export class ErpOutboxService {
     // unknown one outright, so send it only when the rep actually has a code —
     // an unattributed receipt still posting beats every collection failing.
     const rep = col.repId ? await this.reps.findOne({ where: { id: col.repId } }) : null;
+    const isCheque = col.method === 'cheque';
     return {
       path: 'receipts',
       body: {
         externalId: collectionId,
         ...ref,
         amount: col.amount / 1000, // fils → JOD major (ERP expects decimal)
-        paymentMethod: col.method === 'cheque' ? 'CHECK' : 'CASH',
+        paymentMethod: isCheque ? 'CHECK' : 'CASH',
         notes: col.note ?? undefined,
         ...(rep?.code ? { warehouseCode: rep.code, salesmanCode: rep.code } : {}),
+        ...(isCheque ? await this.chequeFields(col, customer.customerName) : {}),
       },
     };
+  }
+
+  /**
+   * The cheque itself, which the ERP now requires before it will take a CHECK
+   * receipt at all.
+   *
+   * It used to accept one with no number and no due date, and the result was a
+   * voucher naming a cheque nobody could identify: no Financial Paper was
+   * created, and the voucher could never post, because posting builds the paper
+   * out of exactly those two fields. The money sat in DRAFT with no journal
+   * behind it. A 400 here is the better outcome — the salesman is holding the
+   * cheque and can read it; nobody in the office can.
+   *
+   * A collection carries its cheques as rows, and the single-cheque form the
+   * handsets send produces exactly one. Where a collection somehow holds
+   * several, the first identifies the receipt and the rest are named in the
+   * drawer field, because the ERP's paper is one cheque and silently dropping
+   * the others would misstate what was handed over.
+   *
+   * The DRAWER is the customer who wrote the cheque, NOT `payee` — payee is who
+   * it is payable to, which is us.
+   */
+  private async chequeFields(
+    col: Collection,
+    customerName: string | null | undefined,
+  ): Promise<Record<string, string>> {
+    const rows = await this.cheques.find({ where: { collectionId: col.id } });
+    const first = rows[0];
+    if (!first) return {};
+    const out: Record<string, string> = {};
+    const number = first.chequeNumber?.trim();
+    const due = first.dueDate?.toString().slice(0, 10);
+    // Sent only when actually present: a blank string is what the ERP counts as
+    // missing anyway, and omitting it keeps its error message accurate.
+    if (number) out.checkNumber = number;
+    if (due) out.checkDueDate = due;
+    const bank = first.bankName?.trim();
+    if (bank) out.checkBankName = bank;
+    const drawer = customerName?.trim();
+    if (drawer) out.checkDrawerName = drawer;
+    return out;
   }
 
   /**

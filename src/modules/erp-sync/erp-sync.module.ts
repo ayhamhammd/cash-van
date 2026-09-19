@@ -13,6 +13,7 @@ import { CustomerPrice } from '../products/entities/customer-price.entity';
 import { PriceList } from '../products/entities/price-list.entity';
 import { PriceListItem } from '../products/entities/price-list-item.entity';
 import { Collection } from '../collections/entities/collection.entity';
+import { Cheque } from '../collections/entities/cheque.entity';
 import { VoucherHeader } from '../vouchers/entities/voucher-header.entity';
 import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.entity';
 import { Payment } from '../vouchers/entities/payment.entity';
@@ -46,6 +47,7 @@ import { StockRequest } from '../stock-requests/entities/stock-request.entity';
       PriceListItem,
       ProductCategory,
       Collection,
+      Cheque,
       ErpIdMap,
       ErpSyncCursor,
       ErpInvoice,

@@ -204,6 +204,25 @@ export class CollectionsService {
       if (!dto.cheques || dto.cheques.length === 0) {
         throw new BadRequestException('at least one cheque is required when method=cheque');
       }
+      // The ERP refuses a CHECK receipt that cannot identify the cheque, because
+      // posting builds the Financial Paper out of the number and the due date
+      // and cannot invent either. Refusing here too puts the error in front of
+      // the one person who can fix it — the salesman, holding the cheque. Accept
+      // it and the collection is recorded locally and then dead-letters on the
+      // way to the ERP, hours later, in an office where nobody can read it.
+      const unidentified = dto.cheques
+        .map((c, i) => {
+          const missing: string[] = [];
+          if (!c.chequeNumber || !c.chequeNumber.trim()) missing.push('chequeNumber');
+          if (!c.dueDate || !String(c.dueDate).trim()) missing.push('dueDate');
+          return missing.length ? `cheque ${i + 1}: ${missing.join(', ')}` : null;
+        })
+        .filter((x): x is string => x !== null);
+      if (unidentified.length) {
+        throw new BadRequestException(
+          `A cheque collection must identify the cheque — ${unidentified.join('; ')}`,
+        );
+      }
       amount = dto.cheques.reduce((s, c) => s + c.amount, 0);
     } else {
       if (!dto.amount || dto.amount < 1) {
