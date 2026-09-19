@@ -180,6 +180,11 @@ interface ErpWarehouse {
 /** A receipt row from the ERP `GET /api/v1/receipts` (customer payments feed). */
 interface ErpReceipt {
   id: string;
+  /**
+   * The ERP's own customer id. Always present, unlike the code — which is
+   * nullable, and absent on most customers the ERP itself created.
+   */
+  customerId?: string | null;
   customerCode: string | null;
   amount: number | string; // major units
   note?: string | null;
@@ -2574,6 +2579,36 @@ export class ErpSyncService {
   }
 
   /**
+   * Which cash-van customer a pulled receipt belongs to.
+   *
+   * BY ID FIRST, because the code is the half that goes missing. `customers
+   * .code` is nullable in the ERP and a customer created there usually has
+   * none; cash-van then invents an `ERP-<uuid-prefix>` number just to have
+   * something to key on, so matching a feed's code against `customerNumber`
+   * finds nobody. Those receipts were dropped — the rep's collection never
+   * appeared, and the customer's local ledger stayed short by the money they
+   * had actually paid. The id-map holds the ERP id for exactly this.
+   *
+   * The code is still tried, because a customer that HAS one may not be in the
+   * id-map yet on a first sync.
+   */
+  private async receiptCustomer(r: ErpReceipt) {
+    if (r.customerId) {
+      const map = await this.idmap.findOne({
+        where: { entity: 'customer', erpId: r.customerId },
+      });
+      if (map?.localId) {
+        const byMap = await this.customers.findOne({
+          where: { customerNumber: map.localId },
+        });
+        if (byMap) return byMap;
+      }
+    }
+    if (!r.customerCode) return null;
+    return this.customers.findOne({ where: { customerNumber: r.customerCode } });
+  }
+
+  /**
    * Inbound mirror (ERP → cash-van) of customer payment receipts. The ERP feed
    * already excludes our own pushed receipts (van_sales-tagged), so only
    * ERP-native receipts arrive. Each becomes a confirmed cash-van collection,
@@ -2594,10 +2629,7 @@ export class ErpSyncService {
         if (ts && (!maxTs || ts > maxTs)) maxTs = ts;
         const seen = await this.idmap.findOne({ where: { entity: 'receipt', erpId: r.id } });
         if (seen) continue;
-        if (!r.customerCode) continue;
-        const customer = await this.customers.findOne({
-          where: { customerNumber: r.customerCode },
-        });
+        const customer = await this.receiptCustomer(r);
         if (!customer?.repId) continue; // unknown customer / unassigned → can't attribute
         // Van-store payment rule: cash/cheque for a van store are created ONLY in
         // the dashboard / cash-van app — never mirrored from the ERP. Skip the
