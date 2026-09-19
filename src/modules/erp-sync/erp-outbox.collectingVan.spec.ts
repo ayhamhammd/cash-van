@@ -149,12 +149,14 @@ describe('buildPayment — a cheque receipt identifies the cheque', () => {
     expect(out.body.checkDueDate).toBe('2026-11-01');
   });
 
-  it('omits a blank number rather than sending whitespace', async () => {
-    // The ERP counts whitespace as missing, so sending it only makes its own
-    // error message less accurate.
-    const out = await build([{ chequeNumber: '   ', dueDate: '2026-11-01' }]);
-    expect('checkNumber' in out.body).toBe(false);
-    expect(out.body.checkDueDate).toBe('2026-11-01');
+  it('refuses a blank number instead of pushing a cheque it cannot name', async () => {
+    // This used to omit the field and push anyway, which bought nothing: the
+    // ERP rejects a CHECK receipt with no number, so the payload was built only
+    // to be turned away. It now fails before the call, with a message naming
+    // the field — see erp-outbox.unidentifiedCheque.spec.ts.
+    await expect(build([{ chequeNumber: '   ', dueDate: '2026-11-01' }])).rejects.toThrow(
+      /cheque number/,
+    );
   });
 
   it('sends no cheque fields at all on a cash collection', async () => {

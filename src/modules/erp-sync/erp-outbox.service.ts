@@ -95,6 +95,11 @@ export class ErpOutboxService {
     }
   }
 
+  /** The queued push for one document, if it has ever been queued. */
+  findFor(kind: ErpOutboxKind, ref: string): Promise<ErpOutbox | null> {
+    return this.outbox.findOne({ where: { kind, ref } });
+  }
+
   list(status?: ErpOutboxStatus): Promise<ErpOutbox[]> {
     return this.outbox.find({
       where: status ? { status } : {},
@@ -597,8 +602,28 @@ export class ErpOutboxService {
     const out: Record<string, string> = {};
     const number = first.chequeNumber?.trim();
     const due = first.dueDate?.toString().slice(0, 10);
-    // Sent only when actually present: a blank string is what the ERP counts as
-    // missing anyway, and omitting it keeps its error message accurate.
+    // Stop here rather than let the ERP say no six times.
+    //
+    // The handsets send no due date, so a cheque arrives identified by number
+    // alone and the ERP rejects it. Nothing about that changes with time: the
+    // missing date has to be keyed off the paper cheque in the office. Retrying
+    // it on a growing backoff only delays the message somebody needs to act on,
+    // which is exactly what TerminalPayloadError exists to prevent.
+    //
+    // Named precisely, because this string is what the office reads in
+    // GET /erp/outbox?status=dead_letter and what tells them which field to
+    // fill via PATCH /cheques/:id/details.
+    const unidentified: string[] = [];
+    if (!number) unidentified.push('cheque number');
+    if (!due) unidentified.push('due date');
+    if (unidentified.length) {
+      throw new TerminalPayloadError(
+        `Cheque collection ${col.collectionNumber ?? col.id} is missing its ` +
+          `${unidentified.join(' and ')}. The ERP will not register a cheque it ` +
+          `cannot identify — complete it with PATCH /cheques/:id/details, which ` +
+          `pushes the receipt again.`,
+      );
+    }
     if (number) out.checkNumber = number;
     if (due) out.checkDueDate = due;
     const bank = first.bankName?.trim();

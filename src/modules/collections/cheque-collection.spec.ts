@@ -142,9 +142,14 @@ describe('CollectionsService — the single-cheque form older apps send', () => 
   //
   // The ERP refuses a CHECK receipt with no number or due date, because posting
   // builds the Financial Paper out of exactly those two and cannot invent
-  // either. Refusing at intake puts the error in front of the salesman, who is
-  // holding the cheque; accepting it means a receipt that dead-letters hours
-  // later in an office where nobody can read it.
+  // either. Refusing the NUMBER at intake puts the error in front of the
+  // salesman, who is holding the cheque and can read it.
+  //
+  // The DUE DATE is deliberately not required here. No handset has a field for
+  // it, so requiring it refused the collection outright instead of prompting
+  // anyone — the cheque simply never reached the books. It is collected late
+  // instead: the receipt dead-letters naming the missing date, and the office
+  // completes it from the paper cheque and re-pushes.
 
   it('refuses a cheque with no number', async () => {
     await expect(
@@ -152,10 +157,16 @@ describe('CollectionsService — the single-cheque form older apps send', () => 
     ).rejects.toThrow(/chequeNumber/);
   });
 
-  it('refuses a cheque with no due date', async () => {
-    await expect(
-      fold({ method: 'cheque', cheques: [{ amount: 100, chequeNumber: 'A' }] } as Partial<CreateCollectionDto>),
-    ).rejects.toThrow(/dueDate/);
+  it('accepts a cheque with no due date — no handset can send one', async () => {
+    // The regression this guards against: requiring the date here blocked every
+    // cheque collection in the field, because not one handset sends it.
+    const dto = await fold({
+      method: 'cheque',
+      cheques: [{ amount: 100, chequeNumber: 'A' }],
+    } as Partial<CreateCollectionDto>);
+    expect(dto.cheques).toHaveLength(1);
+    expect(dto.cheques![0].chequeNumber).toBe('A');
+    expect(dto.cheques![0].dueDate).toBeUndefined();
   });
 
   it('counts whitespace as missing — a blank number identifies nothing', async () => {

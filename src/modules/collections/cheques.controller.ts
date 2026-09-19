@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   Res,
@@ -22,7 +23,10 @@ import {
 
 import { ChequesService } from './cheques.service';
 import { ListChequesQuery } from './dto/query.dto';
-import { ReconcileChequeDto } from './dto/collection-actions.dto';
+import {
+  ReconcileChequeDto,
+  UpdateChequeDetailsDto,
+} from './dto/collection-actions.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 
@@ -83,6 +87,25 @@ export class ChequesController {
   @ApiCreatedResponse({ description: 'Reconciled cheque' })
   reconcile(@Param('id', ParseUUIDPipe) id: string, @Body() dto: ReconcileChequeDto) {
     return this.cheques.reconcile(id, dto);
+  }
+
+  @Patch(':id/details')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: 'Complete cheque details and re-push',
+    description:
+      'Set the cheque number, due date and/or bank on a cheque the handset recorded ' +
+      'incompletely, then push its receipt to the ERP again. The ERP refuses a cheque ' +
+      'receipt that carries no number and due date, so this is how a rejected collection ' +
+      'is made to land. The response says what became of the ERP push. Admin/manager only.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Cheque id' })
+  @ApiOkResponse({ description: 'The updated cheque and the outcome of the ERP push' })
+  updateDetails(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateChequeDetailsDto,
+  ) {
+    return this.cheques.updateDetails(id, dto);
   }
 
   @Post(':id/mark-cleared')

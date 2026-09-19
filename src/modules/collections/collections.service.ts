@@ -207,14 +207,24 @@ export class CollectionsService {
       // The ERP refuses a CHECK receipt that cannot identify the cheque, because
       // posting builds the Financial Paper out of the number and the due date
       // and cannot invent either. Refusing here too puts the error in front of
-      // the one person who can fix it — the salesman, holding the cheque. Accept
-      // it and the collection is recorded locally and then dead-letters on the
-      // way to the ERP, hours later, in an office where nobody can read it.
+      // the one person who can fix it — the salesman, holding the cheque.
+      //
+      // That holds for the NUMBER, which the handsets send. It could not hold
+      // for the DUE DATE: no handset in the field has a field for it (every
+      // cheque on record carries a number and no date), so requiring it here
+      // did not prompt the salesman, it stopped him banking the cheque at all.
+      // A rejected collection is not a safer collection — the money is in his
+      // hand either way, and refusing it only keeps it off the books.
+      //
+      // So the date is collected late instead of not at all: the receipt
+      // dead-letters on the way out (erp-outbox dead-letters it immediately,
+      // naming the date as what is missing) and the office completes it from
+      // the paper cheque via PATCH /cheques/:id/details, which re-pushes. Make
+      // the date required again once the handsets can ask for it.
       const unidentified = dto.cheques
         .map((c, i) => {
           const missing: string[] = [];
           if (!c.chequeNumber || !c.chequeNumber.trim()) missing.push('chequeNumber');
-          if (!c.dueDate || !String(c.dueDate).trim()) missing.push('dueDate');
           return missing.length ? `cheque ${i + 1}: ${missing.join(', ')}` : null;
         })
         .filter((x): x is string => x !== null);
