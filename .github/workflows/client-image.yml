@@ -1,0 +1,89 @@
+# cash-van API — build the CLIENT image and attach it to the run for download.
+#
+# Deliberately separate from deploy.yml. That workflow pushes to GHCR for the
+# hosted environments; this one produces the offline tarball a Windows client
+# (94.142.51.91 / 77.245.5.113) loads with `docker load`, on a box that is not
+# going to `docker pull` from a private registry.
+#
+# It exists so nobody has to copy 100 MB off a laptop: the artifact downloads
+# from the run page in a browser that is already signed in to GitHub.
+#
+# The API image bakes in no hostname — it is a server, not a bundle — so ONE
+# build serves every client. The dashboard is the one that needs client-specific
+# args; see the matching workflow in the frontend repo.
+
+name: Client image (API)
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: client-image-api-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Native amd64 here, where the local script cross-builds under QEMU — the
+      # same image, minus the twenty minutes.
+      - name: Build the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: cashvan-api:prod
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The same check the local build script makes. A tsconfig change that
+      # excludes the entrypoint produces an image that loads fine and then
+      # exits on start, which is a miserable thing to discover on a client's
+      # machine at the end of a manual copy.
+      - name: Verify the image can actually start
+        run: |
+          docker run --rm --entrypoint node cashvan-api:prod \
+            -e "require('fs').accessSync('/app/dist/main.js'); require('fs').accessSync('/app/dist/database/data-source.js')"
+
+      - name: Save and describe
+        run: |
+          set -euo pipefail
+          mkdir -p dist-client
+          docker save cashvan-api:prod | gzip > dist-client/cashvan-api-prod.tar.gz
+          {
+            echo "cash-van API — client image"
+            echo "  built   : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "  branch  : ${GITHUB_REF_NAME}"
+            echo "  commit  : ${GITHUB_SHA}"
+            echo "  subject : $(git log -1 --pretty=%s)"
+            echo "  run     : ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "  sha256  : $(sha256sum dist-client/cashvan-api-prod.tar.gz | cut -d' ' -f1)"
+            echo
+            echo "On the client (PowerShell) — docker load reads the gzip directly:"
+            echo "  docker load -i .\\cashvan-api-prod.tar.gz"
+            echo "  docker compose up -d --force-recreate app"
+            echo
+            echo "Then run any pending migrations — they do NOT run on their own:"
+            echo "  docker exec cashvan-api node node_modules/typeorm/cli.js migration:run -d dist/database/data-source.js"
+          } > dist-client/BUILD-INFO.txt
+          cat dist-client/BUILD-INFO.txt
+          ls -lh dist-client
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cashvan-api-${{ github.sha }}
+          path: dist-client/
+          # Long enough to deploy at leisure, short enough that a year of dev
+          # pushes does not sit in storage at 100 MB each.
+          retention-days: 14
+          compression-level: 0 # already a .tar.gz; zipping it again buys nothing
