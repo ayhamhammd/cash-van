@@ -9,7 +9,7 @@ import {
 } from 'typeorm';
 import { Cheque } from './cheque.entity';
 
-export type CollectionMethod = 'cash' | 'cheque';
+export type CollectionMethod = 'cash' | 'cheque' | 'transfer';
 export type CollectionStatus = 'pending' | 'confirmed' | 'deposited' | 'bounced';
 
 @Entity({ name: 'collections' })
@@ -54,6 +54,24 @@ export class Collection {
 
   @Column({ name: 'deposited_at', type: 'timestamptz', nullable: true })
   depositedAt?: Date | null;
+
+  /**
+   * The bank's reference for a transfer — what an accountant matches against
+   * the statement. Its own column rather than `note`, which is free text a rep
+   * types and nobody can reconcile on.
+   */
+  @Column({ name: 'transfer_ref', type: 'text', nullable: true })
+  transferRef?: string | null;
+
+  /**
+   * The handset's own id for this collection, and the only thing standing
+   * between a timed-out retry and crediting the customer twice.
+   *
+   * Unique where present. A collection created in the office has none.
+   */
+  @Index('uq_collections_client_ref', { unique: true, where: '"client_ref" IS NOT NULL' })
+  @Column({ name: 'client_ref', type: 'text', nullable: true })
+  clientRef?: string | null;
 
   @Column({ type: 'text', nullable: true })
   note?: string | null;

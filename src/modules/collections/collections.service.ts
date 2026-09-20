@@ -170,6 +170,44 @@ export class CollectionsService {
   }
 
   async create(dto: CreateCollectionDto): Promise<Collection> {
+    /**
+     * A retry must not credit the customer twice.
+     *
+     * A van posts a collection, the request commits, the connection dies before
+     * the response — and the handset, correctly, sends it again. Without this
+     * the customer is credited twice for money handed over once, and the only
+     * trace is two receipts a day apart in the register.
+     *
+     * 409 with the original id, because the handset treats a conflict as
+     * success: the collection it was retrying does exist, which is exactly what
+     * it needed to know. A unique index backs this up — a check that only
+     * SELECTs loses the race it exists to win.
+     */
+    if (dto.clientRef) {
+      const seen = await this.collections.findOne({ where: { clientRef: dto.clientRef } });
+      if (seen) {
+        throw new ConflictException({
+          message: 'This collection has already been recorded',
+          code: 'duplicate_client_ref',
+          collectionId: seen.id,
+          collectionNumber: seen.collectionNumber,
+        });
+      }
+    }
+
+    /**
+     * A transfer is only worth distinguishing from cash if it can be matched to
+     * the bank statement, and the reference is the only thing that matches it.
+     * Recording one without is how the money became unreconcilable in the first
+     * place — the app was asking the rep for a reference and then throwing it
+     * away because the API would not take it.
+     */
+    if (dto.method === 'transfer' && !dto.transferRef?.trim()) {
+      throw new BadRequestException(
+        'transferRef is required when method=transfer — a transfer with no bank reference cannot be reconciled',
+      );
+    }
+
     const rep = await this.reps.findOne({ where: { id: dto.repId } });
     if (!rep) {
       throw new BadRequestException(`Rep ${dto.repId} not found`);
@@ -263,6 +301,8 @@ export class CollectionsService {
           status: initialStatus,
           confirmedAt: initialStatus === 'confirmed' ? new Date() : null,
           collectedAt: dto.collectedAt ? new Date(dto.collectedAt) : new Date(),
+          transferRef: dto.method === 'transfer' ? dto.transferRef!.trim() : null,
+          clientRef: dto.clientRef ?? null,
           note: dto.note ?? null,
         }),
       );

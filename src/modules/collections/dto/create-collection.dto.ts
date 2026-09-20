@@ -147,9 +147,32 @@ export class CreateCollectionDto {
   @Min(1)
   amount?: number;
 
-  @ApiProperty({ enum: ['cash', 'cheque'] })
-  @IsIn(['cash', 'cheque'])
-  method!: 'cash' | 'cheque';
+  @ApiProperty({ enum: ['cash', 'cheque', 'transfer'] })
+  @IsIn(['cash', 'cheque', 'transfer'])
+  method!: 'cash' | 'cheque' | 'transfer';
+
+  @ApiPropertyOptional({
+    description:
+      "The bank's reference for a transfer. Required when method=transfer — a " +
+      'transfer with nothing to match against the statement cannot be reconciled, ' +
+      'which is the only reason to record it as a transfer rather than cash.',
+  })
+  @IsOptional()
+  @IsString()
+  @Length(1, 120)
+  transferRef?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "The handset's own id for this collection, used ONLY to recognise a retry. " +
+      'Send a fresh random UUID per collection — never one derived from a counter, ' +
+      'which resets on reinstall and would collide with an older receipt. A replay ' +
+      'is answered 409 with the original id.',
+  })
+  @IsOptional()
+  @IsString()
+  @Length(1, 100)
+  clientRef?: string;
 
   @ApiPropertyOptional({ description: 'YYYY-MM-DD or ISO; defaults to now()' })
   @IsOptional()

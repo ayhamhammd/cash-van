@@ -36,6 +36,7 @@ import { ProductsModule } from './modules/products/products.module';
 import { RoutesModule } from './modules/routes/routes.module';
 import { InvoicesModule } from './modules/invoices/invoices.module';
 import { CollectionsModule } from './modules/collections/collections.module';
+import { ShiftsModule } from './modules/shifts/shifts.module';
 import { SystemModule } from './modules/system/system.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { TaxModule } from './modules/tax/tax.module';
@@ -102,6 +103,7 @@ import { SegmentsModule } from './modules/segments/segments.module';
     RoutesModule,
     InvoicesModule,
     CollectionsModule,
+    ShiftsModule,
     SystemModule,
     RealtimeModule,
     TaxModule,
