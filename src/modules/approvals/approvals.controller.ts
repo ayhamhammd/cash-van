@@ -54,7 +54,10 @@ export class ApprovalsController {
   }
 
   @Get()
-  @Roles('admin', 'manager')
+  // A supervisor sees their own salesmen's requests — the list is already
+  // filtered by visibleRepIds below, and the service refuses them anything
+  // that is not a new customer.
+  @Roles('admin', 'manager', 'supervisor')
   @ApiOperation({ summary: 'Approvals queue', description: 'Filter by status/type. Newest first.' })
   @ApiOkResponse({ description: '{ items, total }' })
   async list(@Query() q: ListApprovalsQueryDto, @CurrentUser() user: AuthenticatedUser) {
@@ -75,16 +78,21 @@ export class ApprovalsController {
   }
 
   @Get(':id')
-  @Roles('admin', 'manager')
+  @Roles('admin', 'manager', 'supervisor')
   @ApiOperation({ summary: 'Request detail (payload included)' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ description: 'ApprovalRequest' })
-  one(@Param('id', ParseUUIDPipe) id: string) {
-    return this.approvals.findOneOrThrow(id);
+  one(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() reviewer: AuthenticatedUser,
+  ) {
+    // Scoped, unlike before: the queue was filtered per supervisor and this
+    // route was not, so any id could be read by anyone who reached it.
+    return this.approvals.findOneForReviewer(id, reviewer);
   }
 
   @Post(':id/approve')
-  @Roles('admin', 'manager')
+  @Roles('admin', 'manager', 'supervisor')
   @ApiOperation({
     summary: 'Approve & execute',
     description:
@@ -101,7 +109,7 @@ export class ApprovalsController {
   }
 
   @Post(':id/reject')
-  @Roles('admin', 'manager')
+  @Roles('admin', 'manager', 'supervisor')
   @ApiOperation({ summary: 'Reject with a reason (shown verbatim to the salesman)' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ description: 'Decided request' })

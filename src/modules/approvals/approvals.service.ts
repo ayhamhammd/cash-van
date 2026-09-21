@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -207,6 +208,51 @@ export class ApprovalsService {
   }
 
   /**
+   * One request, as the person asking is allowed to see it.
+   *
+   * The unscoped [findOneOrThrow] is still what the internal callers use. This
+   * is for the HTTP route, which had no scope check at all: the LIST was
+   * filtered to a supervisor's own salesmen and the DETAIL was not, so anyone
+   * who could reach the queue could read any request by id. It did not matter
+   * while only admins and managers could reach it. It matters now.
+   */
+  async findOneForReviewer(
+    id: string,
+    reviewer: AuthenticatedUser,
+  ): Promise<ApprovalRequest> {
+    const row = await this.findOneOrThrow(id);
+    if (row.repId) await this.repScope.assertCanSeeRep(reviewer, row.repId);
+    this.assertReviewerMayDecide(reviewer, row);
+    return row;
+  }
+
+  /**
+   * A supervisor reviews their salesmen's NEW CUSTOMERS, and nothing else.
+   *
+   * They were given the approvals queue so a new shop does not wait for head
+   * office — the person who knows whether that shop is real is the one whose
+   * reps call on it. The rest of the queue is money: a discount, a price
+   * override, a return. Those stay with admin and manager until somebody asks
+   * for the opposite, because widening this is one entry in a list and
+   * narrowing it again after a supervisor has approved their own team's
+   * discounts is not.
+   *
+   * Scope is enforced separately by assertCanSeeRep — this is about WHAT, that
+   * is about WHOSE.
+   */
+  private assertReviewerMayDecide(
+    reviewer: AuthenticatedUser,
+    row: ApprovalRequest,
+  ): void {
+    if (reviewer.role !== 'supervisor') return;
+    if (row.type !== 'CUSTOMER_CREATE') {
+      throw new ForbiddenException(
+        'A supervisor may only decide new-customer requests',
+      );
+    }
+  }
+
+  /**
    * Approve → execute the stored voucher payload verbatim. Runs as the
    * reviewing manager (their CLS context), so the salesman-permission gate in
    * VouchersService passes; attribution stays with the rep via payload.userCode.
@@ -220,6 +266,7 @@ export class ApprovalsService {
     // A 403, not a filtered-away 404: acting on another supervisor's request is
     // a permission problem and should read as one.
     if (reviewer && row.repId) await this.repScope.assertCanSeeRep(reviewer, row.repId);
+    if (reviewer) this.assertReviewerMayDecide(reviewer, row);
     if (row.status !== 'pending') {
       throw new ConflictException(`Request is already ${row.status}`);
     }
@@ -281,6 +328,7 @@ export class ApprovalsService {
   ): Promise<ApprovalRequest> {
     const row = await this.findOneOrThrow(id);
     if (reviewer && row.repId) await this.repScope.assertCanSeeRep(reviewer, row.repId);
+    if (reviewer) this.assertReviewerMayDecide(reviewer, row);
     if (row.status !== 'pending') {
       throw new ConflictException(`Request is already ${row.status}`);
     }
