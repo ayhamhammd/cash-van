@@ -54,15 +54,34 @@ cut-over.
 
 ## Order
 
-**Now — active loss, small changes.**
+**Now — active loss, small changes.** ✅ **Shipped 2026-09-21** (`3a19012`, `aca297b`).
 
-1. 9 §3.1 + §3.2 — the authorization hole. Hours of work. Check the logs first for traffic where
-   the body's `userCode` disagrees with the token's rep.
-2. 2 §3 + §4.1–4.2 + §4.4 — the stock row lock and the CHECK constraints.
-3. 1 §4.1 + §4.2 + §4.6 — atomic intake, `202` with a verdict, `GET /sync/status`. The handset can
-   finally tell a stored document from a lost one.
-4. 7 §4.4 — catch the partition cron's failure. One `try/catch` and a notification, and it stops a
-   silent spreading failure.
+1. ✅ 9 §3.1 + §3.2 — the authorization hole. The acting rep comes from the token; naming
+   another rep needs `vouchers.createOnBehalf` and resolves to *that* rep.
+   `MobileContextGuard` no longer skips its ownership check for a caller with no rep link.
+2. ✅ 2 §3 + §4.1 + §4.2 — advisory lock per `(store, item, pool)`; atomic guarded upserts on
+   `van_stock`, `damaged_stock` and the fulfil release; the two missing CHECK constraints;
+   `stock_integrity_findings`.
+3. ✅ 1 §4.1 + §4.2 + §4.6 — atomic claim, `202` with a verdict, `GET /sync/status`.
+4. ✅ 7 §4.4 — `monthlyTick` catches, keeps three months of runway, counts rows stranded in the
+   DEFAULT partition, and raises it to the managers' inbox.
+
+Not yet done from those specs: **2 §4.4** (release `reserved` on ORDER *cancel* — fulfil already
+releases it) and **2 §5** (drift detection), both deliberately deferred to the tiers below.
+
+### What implementation corrected in the specs
+
+Four claims did not survive contact with the code. Each is now marked in its own spec, because
+a spec that misleads the next reader is worse than no spec:
+
+| claim | reality |
+|---|---|
+| `@Roles('salesman', …)` guards `/sync/*` | No such role. `UserRole` is `admin \| manager \| supervisor \| viewer`; a salesman is a `userType` with a `repId`. The rep resolution **is** the authorization. |
+| `van_stock` is the lockable authority for the availability check | It is written **only** on the draft-`post()` path. `create()` — every promoted handset document — moves stock through `voucher_transactions` alone. So the lock is an advisory lock on the pool key, not a row lock. |
+| `reserved` is never released | `fulfil()` releases it. The `AiChecks.ts:34` note saying otherwise is stale. What actually leaks is **cancellation**. |
+| `van_stock.quantity` has no CHECK, so the DB won't catch an overdraft | It has had one since `1716100000000`. The `Math.max(0, …)` clamp was *load-bearing* — it kept the constraint from firing. The defect is that an overdraft was written as `0` instead of refused. |
+
+Both migrations were run **and reverted** against a live database before shipping.
 
 **Next — money correctness.**
 
