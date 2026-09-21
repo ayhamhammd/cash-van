@@ -1,4 +1,7 @@
+import { BadRequestException, ConflictException } from '@nestjs/common';
+
 import { SyncService } from './sync.service';
+import { INTAKE_MAX_ATTEMPTS } from './intake-failure';
 import { SyncVoucherDto } from './dto/sync.dto';
 import { VoucherInbox } from './entities/voucher-inbox.entity';
 import type { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
@@ -197,5 +200,94 @@ describe('SyncService — the intake contract', () => {
     await expect(
       (svc as unknown as SyncService).statusFor(['', '  '], actor),
     ).resolves.toEqual({ items: [] });
+  });
+
+  // ── What happens to a document that did not post ──────────────────────────
+
+  describe('the retry policy', () => {
+    /** Captures the row patch and any notification, without touching a database. */
+    function failing(stored: Partial<VoucherInbox>) {
+      const updates: Array<Record<string, unknown>> = [];
+      const notified: Array<Record<string, unknown>> = [];
+      const svc = Object.create(SyncService.prototype) as Record<string, unknown>;
+      svc.logger = { warn: () => undefined, error: () => undefined };
+      svc.inbox = {
+        update: async (_w: unknown, patch: Record<string, unknown>) => {
+          updates.push(patch);
+        },
+      };
+      svc.notifications = {
+        notifyManagers: async (n: Record<string, unknown>) => {
+          notified.push(n);
+        },
+      };
+      const call = (e: unknown) =>
+        (
+          svc as unknown as { markFailed(r: VoucherInbox, e: unknown): Promise<void> }
+        ).markFailed(row(stored), e);
+      return { call, updates, notified };
+    }
+
+    it('keeps a retryable document in the queue, with a backoff', async () => {
+      const f = failing({ attempts: 0 });
+      await f.call(new BadRequestException('Not enough stock of 23232 in store 110101'));
+
+      expect(f.updates[0]).toMatchObject({ status: 'pending', attempts: 1 });
+      expect(f.updates[0].nextAttemptAt).toBeInstanceOf(Date);
+      // Nobody is interrupted for a document that will resolve itself when the
+      // load transfer lands.
+      expect(f.notified).toHaveLength(0);
+    });
+
+    it('rejects a terminal failure at once instead of burning the budget', async () => {
+      const f = failing({ attempts: 0 });
+      await f.call(new ConflictException({ code: 'CREDIT_LIMIT_EXCEEDED' }));
+
+      expect(f.updates[0]).toMatchObject({ status: 'rejected', attempts: 1 });
+      // A person has to act, so a person is told.
+      expect(f.notified[0]).toMatchObject({ kind: 'sync.document_rejected' });
+    });
+
+    it('dead-letters a retryable document once the budget is spent', async () => {
+      const f = failing({ attempts: INTAKE_MAX_ATTEMPTS - 1 });
+      await f.call(new BadRequestException('Not enough stock of 23232'));
+
+      expect(f.updates[0]).toMatchObject({
+        status: 'dead_letter',
+        attempts: INTAKE_MAX_ATTEMPTS,
+      });
+      expect(f.notified[0]).toMatchObject({ kind: 'sync.document_dead_letter' });
+    });
+
+    it('records the useful half of the error, not the class name', async () => {
+      const f = failing({ attempts: 0 });
+      await f.call(
+        new ConflictException({ code: 'CREDIT_HOLD', message: 'Customer is on hold' }),
+      );
+      // This string is what the rep and the clerk both read.
+      expect(f.updates[0].error).toBe('Customer is on hold');
+    });
+
+    it('does not let a failed notification mask the failure it reports', async () => {
+      const svc = Object.create(SyncService.prototype) as Record<string, unknown>;
+      const updates: Array<Record<string, unknown>> = [];
+      svc.logger = { warn: () => undefined, error: () => undefined };
+      svc.inbox = {
+        update: async (_w: unknown, patch: Record<string, unknown>) => {
+          updates.push(patch);
+        },
+      };
+      svc.notifications = {
+        notifyManagers: async () => {
+          throw new Error('inbox is down');
+        },
+      };
+      await expect(
+        (
+          svc as unknown as { markFailed(r: VoucherInbox, e: unknown): Promise<void> }
+        ).markFailed(row({ attempts: 0 }), new ConflictException({ code: 'CREDIT_HOLD' })),
+      ).resolves.toBeUndefined();
+      expect(updates[0]).toMatchObject({ status: 'rejected' });
+    });
   });
 });

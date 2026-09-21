@@ -10,15 +10,21 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { In, Repository } from 'typeorm';
 
-import { VoucherInbox, InboxType } from './entities/voucher-inbox.entity';
+import { VoucherInbox, InboxType, InboxStatus } from './entities/voucher-inbox.entity';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { CollectionsService } from '../collections/collections.service';
 import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
 import { SettingsService } from '../settings/settings.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateVoucherDto } from '../vouchers/dto/create-voucher.dto';
 import { CreateCollectionDto } from '../collections/dto/create-collection.dto';
 import { SyncVoucherDto, SyncCollectionDto, ListInboxQueryDto } from './dto/sync.dto';
 import { PERM_ON_BEHALF } from '../../common/constants/permissions';
+import {
+  classifyIntakeFailure,
+  intakeBackoffMs,
+  INTAKE_MAX_ATTEMPTS,
+} from './intake-failure';
 import type { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
 /**
@@ -62,6 +68,7 @@ export class SyncService {
     private readonly collections: CollectionsService,
     private readonly erpOutbox: ErpOutboxService,
     private readonly settings: SettingsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -205,16 +212,23 @@ export class SyncService {
     return this.findOneOrThrow(id);
   }
 
-  /** Re-attempt a pending/failed row (dashboard "retry"). */
+  /**
+   * Re-attempt a row by hand (dashboard "retry").
+   *
+   * Resets the attempt budget as well as running it now: an operator pressing
+   * retry has usually just fixed the cause, so making them fight a 24-hour
+   * backoff — or refusing outright because the row dead-lettered — would be
+   * answering a question they did not ask.
+   */
   async retry(id: string): Promise<VoucherInbox> {
     const row = await this.findOneOrThrow(id);
     if (row.status === 'posted') return row;
-    if (row.type === 'VOUCHER') {
-      const store = await this.storeForRow(row);
-      await this.promoteVoucher(row, store);
-    } else {
-      await this.promoteCollection(row);
-    }
+    await this.inbox.update(
+      { id },
+      { status: 'pending', attempts: 0, nextAttemptAt: new Date(), error: null },
+    );
+    row.attempts = 0;
+    await this.promoteRow(row);
     return this.findOneOrThrow(id);
   }
 
@@ -246,6 +260,19 @@ export class SyncService {
     return row;
   }
 
+  /**
+   * Try to move one staged row into the main tables. Used by the intake (first
+   * attempt) and by the drain (every attempt after). Never throws — the outcome
+   * lands on the row.
+   */
+  async promoteRow(row: VoucherInbox): Promise<void> {
+    if (row.type === 'VOUCHER') {
+      await this.promoteVoucher(row, await this.storeForRow(row));
+    } else {
+      await this.promoteCollection(row);
+    }
+  }
+
   // ---- internals --------------------------------------------------------
 
   private async promoteVoucher(row: VoucherInbox, store: string): Promise<void> {
@@ -263,7 +290,7 @@ export class SyncService {
       await this.markPosted(row.id, created.voucherNumber);
       // ERP push is enqueued via the 'erp.voucher.posted' event from vouchers.create.
     } catch (e) {
-      await this.markFailed(row.id, e);
+      await this.markFailed(row, e);
     }
   }
 
@@ -274,7 +301,7 @@ export class SyncService {
       );
       await this.markPosted(row.id, (created as { id?: string }).id ?? null);
     } catch (e) {
-      await this.markFailed(row.id, e);
+      await this.markFailed(row, e);
     }
   }
 
@@ -291,21 +318,88 @@ export class SyncService {
     );
   }
 
-  private async markFailed(id: string, e: unknown): Promise<void> {
+  /**
+   * Record a promotion failure, and decide whether the queue should try again.
+   *
+   * Every failure used to become `failed` and stop, whether or not a retry
+   * could ever have worked. Now the class of the failure decides:
+   *
+   *   terminal   → `rejected`. A person must act; say so at once rather than
+   *                burning eight attempts on a condition that cannot change.
+   *   retryable  → `pending` with a backoff, until INTAKE_MAX_ATTEMPTS, then
+   *                `dead_letter`.
+   *
+   * A rejected or dead-lettered document is ANNOUNCED. An inbox nobody reads is
+   * the defect this whole contract exists to fix, so the queue pushes rather
+   * than waiting to be visited.
+   */
+  private async markFailed(row: VoucherInbox, e: unknown): Promise<void> {
     const error = e instanceof Error ? e.message : String(e);
-    this.logger.warn(`Inbox ${id} promotion failed: ${error}`);
-    // `attempts` is counted here so the drain (SPEC §4.3) inherits a truthful
-    // number rather than starting every existing row from zero.
+    const detail =
+      (e as { response?: { message?: string } })?.response?.message ?? error;
+    const attempts = (row.attempts ?? 0) + 1;
+    const kind = classifyIntakeFailure(e);
+
+    const terminal = kind === 'terminal';
+    const exhausted = attempts >= INTAKE_MAX_ATTEMPTS;
+    const status: InboxStatus = terminal
+      ? 'rejected'
+      : exhausted
+        ? 'dead_letter'
+        : 'pending';
+
+    this.logger.warn(
+      `Inbox ${row.id} promotion failed (${kind}, attempt ${attempts}/${INTAKE_MAX_ATTEMPTS}) ` +
+        `→ ${status}: ${detail}`,
+    );
+
     await this.inbox.update(
-      { id },
+      { id: row.id },
       {
-        status: 'failed',
-        error,
+        status,
+        error: detail,
         processedAt: new Date(),
         lastAttemptAt: new Date(),
-        attempts: () => '"attempts" + 1',
+        attempts,
+        nextAttemptAt: new Date(Date.now() + intakeBackoffMs(attempts)),
       },
     );
+
+    if (status !== 'pending') await this.announce(row, status, detail);
+  }
+
+  /** Tell the office about a document that will not post on its own. */
+  private async announce(
+    row: VoucherInbox,
+    status: InboxStatus,
+    detail: string,
+  ): Promise<void> {
+    const what = row.assignedNumber ?? row.clientRef;
+    await this.notifications
+      .notifyManagers({
+        kind:
+          status === 'rejected'
+            ? 'sync.document_rejected'
+            : 'sync.document_dead_letter',
+        titleAr:
+          status === 'rejected'
+            ? 'مستند من المندوب مرفوض'
+            : 'مستند من المندوب توقّف بعد عدة محاولات',
+        titleEn:
+          status === 'rejected'
+            ? 'A salesman document was rejected'
+            : 'A salesman document gave up after repeated attempts',
+        bodyAr: `${what} — ${detail}`,
+        bodyEn: `${what} (${row.type.toLowerCase()}, ${row.userCode ?? 'unknown rep'}): ${detail}`,
+        refType: 'voucher_inbox',
+        refId: row.id,
+      })
+      .catch((err: unknown) => {
+        // A failed notification must not mask the failure it was reporting.
+        this.logger.error(
+          `Could not announce inbox ${row.id} ${status}: ${(err as Error).message}`,
+        );
+      });
   }
 
   /**

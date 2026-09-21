@@ -44,6 +44,10 @@ export const envValidationSchema = Joi.object({
   // costs more to reconcile than simply waiting does.
   ERP_HTTP_TIMEOUT_MS: Joi.number().min(1000).default(60000),
   ERP_OUTBOX_DRAIN_MS: Joi.number().min(5000).default(30000),
+  // How often the staged-document queue promotes what the handset has sent.
+  // Faster than the ERP drain on purpose: this one stands between a rep making
+  // a sale and that sale existing.
+  SYNC_INBOX_DRAIN_MS: Joi.number().min(5000).default(20000),
   ERP_PULL_INTERVAL_MS: Joi.number().min(30000).default(300000),
 
   // Dashboard origin used to build public quote links inside outgoing messages.

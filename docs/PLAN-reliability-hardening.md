@@ -85,7 +85,13 @@ Both migrations were run **and reverted** against a live database before shippin
 
 **Next — money correctness.**
 
-5. 1 §4.3 + §4.5 — the unattended drain with backoff and dead-letter.
+5. ✅ 1 §4.3 + §4.5 — the unattended drain with backoff and dead-letter (shipped 2026-09-21).
+   Failures are classified from the exceptions the voucher and collection services actually
+   throw, not from HTTP status: a 409 is terminal when it is a credit limit and retryable when
+   it is stock. Terminal failures reject on the first look instead of burning eight attempts —
+   the lesson `ErpOutboxService.TerminalPayloadError` already paid for. Rejected and
+   dead-lettered documents are announced to managers, because an inbox nobody reads is the
+   defect the whole contract exists to fix.
 6. 3 — transactional outbox, in its four steps. Run the sweep manually on each client first; what
    it finds is invoices missing from the ERP today.
 7. 4 §1–§4.2 — both clocks stored, one clamp, skew measured. Reports still read `in_date`.
