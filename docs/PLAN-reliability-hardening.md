@@ -92,8 +92,14 @@ Both migrations were run **and reverted** against a live database before shippin
    the lesson `ErpOutboxService.TerminalPayloadError` already paid for. Rejected and
    dead-lettered documents are announced to managers, because an inbox nobody reads is the
    defect the whole contract exists to fix.
-6. 3 — transactional outbox, in its four steps. Run the sweep manually on each client first; what
-   it finds is invoices missing from the ERP today.
+6. ✅ 3 — transactional outbox (shipped 2026-09-21). The enqueue commits with the voucher;
+   `ErpSyncService.onVoucherPosted` is gone. `POST /erp-sync/outbox/sweep` is the backstop —
+   **run it on each client before deploying**, because what it returns there is the backlog the
+   old post-commit push already lost. On the dev database it found one: a posted SALE from
+   2026-09-07, five days after the outbox went into active use, with no row.
+   Also fixed on the way past: `customers.total_debt` was a read-modify-write that ran after
+   the commit and swallowed its own failure — two concurrent credit sales lost one of the two
+   debts, silently.
 7. 4 §1–§4.2 — both clocks stored, one clamp, skew measured. Reports still read `in_date`.
 8. 5 — backup configuration. Independent of everything and the largest single reduction in
    worst-case exposure per day of work.

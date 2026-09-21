@@ -24,6 +24,7 @@ import { CashAccountsModule } from '../cash-accounts/cash-accounts.module';
 import { ErpHttpClient } from './erp-http.client';
 import { ErpSyncService } from './erp-sync.service';
 import { ErpOutboxService } from './erp-outbox.service';
+import { ErpOutboxSweepService } from './erp-outbox-sweep.service';
 import { ErpSyncController } from './erp-sync.controller';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
@@ -63,7 +64,12 @@ import { StockRequest } from '../stock-requests/entities/stock-request.entity';
     CashAccountsModule,
   ],
   controllers: [ErpSyncController],
-  providers: [ErpHttpClient, ErpSyncService, ErpOutboxService],
-  exports: [ErpSyncService, ErpOutboxService, ErpHttpClient],
+  providers: [
+    ErpHttpClient,
+    ErpSyncService,
+    ErpOutboxService,
+    ErpOutboxSweepService,
+  ],
+  exports: [ErpSyncService, ErpOutboxService, ErpOutboxSweepService, ErpHttpClient],
 })
 export class ErpSyncModule {}

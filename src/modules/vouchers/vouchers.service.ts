@@ -112,6 +112,10 @@ const VOUCHER_PREFIX: Record<string, string> = {
   PAYMENT_OUT: 'PAY',
 };
 import { CreateChequeDto } from './dto/create-cheque.dto';
+import {
+  enqueueOutboxWithin,
+  outboxKindForVoucher,
+} from '../erp-sync/outbox-enqueue';
 
 
 /** Permission keys gating sensitive salesman actions (F10). */
@@ -268,12 +272,12 @@ export class VouchersService implements OnModuleInit {
     const offerResult = await this.applyOffers(dto);
     const saleLoc = saleLocationOf(dto);
     const result = await this.createUnchecked(dto);
+    // Deliberately left OUTSIDE the transaction, both of them, and both already
+    // guarded: an offers bug or a visit-log hiccup must not roll back a sale.
+    // That is the existing "offers never block a sale" decision, kept on
+    // purpose rather than overlooked — unlike the AR debt above, which is money
+    // the customer owes and now commits with the voucher.
     await this.recordOfferRedemptions(result, offerResult);
-    // AR: immediately reflect a credit voucher on the customer's outstanding debt so the
-    // customer detail updates without waiting for the next ERP balance sync. A credit SALE
-    // raises the debt; a credit RETURN (credit note) lowers it. The ERP mirror
-    // (pullCustomerBalances) later reconciles total_debt to the authoritative ERP balance.
-    await this.applyCreditVoucherToDebt(dto);
     // Every sale is also a CALL on that customer, so the dashboard and the visit
     // reports show it. Without this a full selling day reads as zero visits —
     // customer_visits was only ever written by the app's explicit "log visit".
@@ -338,7 +342,10 @@ export class VouchersService implements OnModuleInit {
    * Best-effort — a failure here must never fail the voucher. The ERP mirror
    * (erp-sync `pullCustomerBalances`) later reconciles `total_debt` to the ERP balance.
    */
-  private async applyCreditVoucherToDebt(dto: CreateVoucherDto): Promise<void> {
+  private async applyCreditVoucherToDebt(
+    em: EntityManager,
+    dto: CreateVoucherDto,
+  ): Promise<void> {
     if (!dto.customerNumber) return;
     if (dto.transKind !== 'SALE' && dto.transKind !== 'RETURN') return;
     const creditAmount = (dto.payments ?? [])
@@ -346,23 +353,30 @@ export class VouchersService implements OnModuleInit {
       .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
     if (creditAmount <= 0) return;
 
-    try {
-      const repo = this.dataSource.getRepository(Customer);
-      const customer = await repo.findOne({
-        where: { customerNumber: dto.customerNumber },
-      });
-      if (!customer) return;
-      const sign = dto.transKind === 'RETURN' ? -1 : 1;
-      const next = (Number(customer.totalDebt) || 0) + sign * creditAmount;
-      customer.totalDebt = Math.max(0, next).toFixed(2); // debt never goes below 0
-      await repo.save(customer);
-    } catch (err) {
-      this.logger.warn(
-        `applyCreditVoucherToDebt failed for ${dto.customerNumber}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
+    const signed = (dto.transKind === 'RETURN' ? -1 : 1) * creditAmount;
+
+    // One statement, inside the voucher's transaction. Two things changed here
+    // and both were costing money quietly:
+    //
+    // 1. It was a read-modify-write on `total_debt` with no lock. Two credit
+    //    sales to one customer at once both read the old balance and one
+    //    overwrote the other — the same lost-update shape as the van stock,
+    //    except the number that goes missing is what the customer owes.
+    //
+    // 2. It ran AFTER the voucher committed, and swallowed its own failure into
+    //    a log line. So a credit sale could post with the debt never applied,
+    //    and the only symptom was a customer whose balance was quietly short
+    //    until the next ERP balance pull happened to correct it.
+    //
+    // Allowed to throw now: a credit sale whose debt cannot be recorded should
+    // not exist. GREATEST(0, …) is kept — debt below zero is a credit note
+    // question, and this is not the place to invent an answer.
+    await em.query(
+      `UPDATE customers
+          SET total_debt = GREATEST(0, COALESCE(total_debt, 0) + $2::numeric)
+        WHERE customer_number = $1`,
+      [dto.customerNumber, signed.toFixed(2)],
+    );
   }
 
   /**
@@ -636,6 +650,15 @@ export class VouchersService implements OnModuleInit {
   }
 
   private async createUnchecked(dto: CreateVoucherDto): Promise<VoucherHeader> {
+    // Read OUTSIDE the transaction: this is a settings query with a decrypt on
+    // it, and holding voucher locks open across it buys nothing. A flag that
+    // flips between here and the commit costs at most one document taking the
+    // previous answer, which the sweep picks up.
+    const erpEnabled = await this.settings
+      .getErpConfig()
+      .then((c) => c.enabled)
+      .catch(() => false);
+
     return this.dataSource.transaction(async (em) => {
       const tk = await this.loadTransKind(em, dto.transKind);
       const isTransferVoucher = dto.transKind === TRANSFER_KIND;
@@ -1097,6 +1120,27 @@ export class VouchersService implements OnModuleInit {
         await em.getRepository(Payment).save(payments);
       }
 
+      // AR: a credit voucher moves the customer's outstanding debt. Inside the
+      // transaction, because a credit sale whose debt is not recorded is not a
+      // credit sale. (The ERP mirror later reconciles total_debt to the
+      // authoritative ERP balance; this keeps the dashboard honest until then.)
+      await this.applyCreditVoucherToDebt(em, dto);
+
+      // ── Tell the ERP, inside this transaction ────────────────────────────
+      // The enqueue used to happen AFTER the commit, via an in-process event
+      // (`erp.voucher.posted` → ErpSyncService.onVoucherPosted → enqueue). A
+      // crash, a redeploy, or a throw in any of the four awaits in between left
+      // a posted sale that was never queued — and nothing anywhere looked for
+      // one. The row now commits with the voucher or not at all.
+      //
+      // Deliberately allowed to throw: a sale the ERP will never hear about has
+      // not fully happened, so it takes the whole document down with it rather
+      // than committing into a silence somebody discovers at month end.
+      if (erpEnabled && header.isPosted) {
+        const kind = outboxKindForVoucher(header.transKind, header.voucherNumber);
+        if (kind) await enqueueOutboxWithin(em, kind, header.voucherNumber);
+      }
+
       return em.getRepository(VoucherHeader).findOneOrFail({
         where: { id: header.id },
         relations: { transactions: true, payments: true },
@@ -1109,6 +1153,11 @@ export class VouchersService implements OnModuleInit {
    * (out for SALE/TRANSFER_OUT, in for RETURN/TRANSFER_IN, reserve for ORDER).
    */
   async post(id: string): Promise<VoucherHeader> {
+    const erpEnabled = await this.settings
+      .getErpConfig()
+      .then((c) => c.enabled)
+      .catch(() => false);
+
     const result = await this.dataSource.transaction(async (em) => {
       const header = await em.getRepository(VoucherHeader).findOne({
         where: { id },
@@ -1144,14 +1193,23 @@ export class VouchersService implements OnModuleInit {
         }
       }
 
+      // Queued inside THIS transaction, like create()'s posted path — critical
+      // for the create-then-post flows (TRANSFER, and any draft posted later),
+      // which would otherwise never reach the ERP outbox at all.
+      if (erpEnabled) {
+        const kind = outboxKindForVoucher(header.transKind, header.voucherNumber);
+        if (kind) await enqueueOutboxWithin(em, kind, header.voucherNumber);
+      }
+
       return em.getRepository(VoucherHeader).findOneOrFail({
         where: { id },
         relations: { transactions: true, payments: true },
       });
     });
-    // Mirror to the ERP now that it's posted — same as create()'s posted path.
-    // Critical for the create-then-post flows (TRANSFER, and any draft posted
-    // later), which would otherwise never reach the ERP outbox.
+    // The event still fires, for the realtime bridge and the cash-account
+    // listener. It no longer carries the ERP enqueue — that committed with the
+    // voucher above, so there is no window in which a posted document is
+    // unqueued.
     this.events.emit('erp.voucher.posted', {
       voucherNumber: result.voucherNumber,
       transKind: result.transKind,

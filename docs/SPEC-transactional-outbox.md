@@ -57,13 +57,33 @@ comment at `erp-sync.service.ts:640` shows the team already reasoned about the a
 — and fixed it by making the push unconditional. But unconditional only helps if the row
 exists. If the enqueue never ran, there is nothing to push and nothing to notice.
 
-### 1.3 The post-commit side effects have the same shape
+### 1.3 The post-commit side effects — corrected after reading them
 
-`recordOfferRedemptions`, `applyCreditVoucherToDebt` and `recordSaleVisit` (`:272`–`:281`)
-all mutate state that is logically part of the sale, after the sale has committed. A credit
-SALE whose `applyCreditVoucherToDebt` throws is posted with the customer's debt never raised —
-AR understated, silently, until the next ERP balance pull happens to correct it. Same class of
-defect, same fix.
+An earlier draft said these three were unwrapped, so a throw in one would prevent the event at
+`:286` from firing at all. **That is wrong: all three already have an internal `try/catch`.**
+`recordOfferRedemptions` (`:564`), `applyCreditVoucherToDebt` (`:353`) and `recordSaleVisit`
+(`:1279`) each swallow their own failure.
+
+What is actually wrong with `applyCreditVoucherToDebt` is worse, and in a different way:
+
+    const customer = await repo.findOne({ where: { customerNumber } });
+    const next = (Number(customer.totalDebt) || 0) + sign * creditAmount;
+    customer.totalDebt = Math.max(0, next).toFixed(2);
+    await repo.save(customer);
+
+- **A read-modify-write with no lock**, exactly the shape fixed for van stock in
+  `SPEC-stock-write-integrity.md`. Two credit sales to one customer at once both read the old
+  balance and one overwrites the other. The number that goes missing is what the customer owes.
+- **It runs after the commit and swallows its failure into a log line.** So a credit sale can
+  post with the debt never applied, and the only symptom is a balance that is quietly short
+  until the next ERP balance pull happens to correct it.
+
+So this one moves inside the transaction *and* becomes a relative `UPDATE`, and is allowed to
+throw — a credit sale whose debt cannot be recorded should not exist.
+
+`recordOfferRedemptions` and `recordSaleVisit` **stay outside**, deliberately. An offers bug or
+a visit-log hiccup must not roll back a sale; that is the existing "offers never block a sale"
+decision (`:379`), and it is a decision, not an oversight.
 
 ### 1.4 `enqueue` is itself a check-then-insert
 
@@ -179,16 +199,21 @@ Three details that are easy to get wrong:
   settings row directly, not through the decrypting accessor — and let the drain keep being the
   place that reports a bad key.
 
-### 4.3 The other post-commit writes move in too
+### 4.3 The AR debt moves in, and becomes atomic
 
-`recordOfferRedemptions`, `applyCreditVoucherToDebt` and `recordSaleVisit` take an
-`EntityManager` and are called inside the same transaction. They currently run at `:272`–`:281`
-on the default connection.
+`applyCreditVoucherToDebt` takes the caller's `EntityManager`, runs inside the voucher's
+transaction, and stops reading before it writes:
 
-`recordSaleVisit` is the one judgement call: a failure to log a visit is not worth refusing a
-sale over. Keep it outside, but wrap it in its own `try/catch` so it can no longer prevent
-`:286` from running. The AR debt write and the offer redemption move inside without exception —
-both are money.
+    UPDATE customers
+       SET total_debt = GREATEST(0, COALESCE(total_debt, 0) + $2::numeric)
+     WHERE customer_number = $1
+
+`GREATEST(0, …)` is kept: debt below zero is a credit-note question and this is not the place to
+invent an answer. The internal `try/catch` is removed — a credit sale whose debt cannot be
+recorded should not exist.
+
+The other two keep their current placement and their guards, for the reason in §1.3. State that
+in the code, so the asymmetry reads as a decision rather than an accident.
 
 ### 4.4 The event keeps its other two subscribers
 
@@ -241,8 +266,10 @@ backlog of §1.1 at that site, and those are real invoices missing from the ERP 
 5. **Mirror loop guard.** Promote a voucher numbered `ERP-…`. No outbox row.
 6. **Sweep reads zero.** After the release, the hourly sweep finds nothing across a day of
    real traffic. Before the release, on each client, it finds and reports the backlog.
-7. **AR is atomic.** Force `applyCreditVoucherToDebt` to throw on a credit SALE. No voucher is
-   created; the customer's debt is unchanged.
+7. **AR is atomic.** Force the debt `UPDATE` to throw on a credit SALE: no voucher is created.
+   Then post two credit sales of 100 to one customer in parallel from a balance of 0 — the
+   balance is exactly 200, not 100. The second half is the lost update, and it fails before
+   this change.
 
 ## 6. Rollout
 
@@ -253,7 +280,8 @@ Order matters, because the middle state must be safe:
    still in place. Now there are two paths to the same row and the unique constraint makes
    that safe, so nothing can be lost while the change is half-deployed.
 3. `createUnchecked` enqueues transactionally; delete `ErpSyncService.onVoucherPosted`.
-4. Move the AR and redemption writes inside the transaction (§4.3).
+4. Move the AR write inside the transaction and make it relative (§4.3). The redemption and
+   visit writes stay where they are.
 
 Keep the sweep permanently. It costs one indexed query an hour and it is the only thing that
 can tell you this spec is still true a year from now.

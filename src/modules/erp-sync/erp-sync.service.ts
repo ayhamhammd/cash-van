@@ -30,6 +30,7 @@ import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.ent
 import { SettingsService } from '../settings/settings.service';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { ErpHttpClient } from './erp-http.client';
+import { OUTBOX_KIND_BY_TRANS } from './outbox-enqueue';
 import { ErpOutboxService } from './erp-outbox.service';
 import { ErpOutbox } from './entities/erp-outbox.entity';
 import { ErpIdMap } from './entities/erp-id-map.entity';
@@ -41,15 +42,6 @@ import { ErpOutboxKind } from './entities/erp-outbox.entity';
 // Read from process.env for the same reason as ERP_OUTBOX_DRAIN_MS: @Interval()
 // runs at class-definition time, before DI. Validated in validation.schema.ts.
 const PULL_INTERVAL_MS = parseInt(process.env.ERP_PULL_INTERVAL_MS ?? '300000', 10);
-
-const OUTBOX_KIND_BY_TRANS: Record<string, ErpOutboxKind | undefined> = {
-  SALE: 'SALE_INVOICE',
-  RETURN: 'SALES_RETURN',
-  ORDER: 'SALES_ORDER',
-  IN: 'STOCK_ADJUSTMENT',
-  OUT: 'STOCK_ADJUSTMENT',
-  TRANSFER: 'STOCK_TRANSFER',
-};
 
 /** ERP `GET customers/by-code/{code}/balance` — figures in major units. */
 export interface ErpBalance {
@@ -629,22 +621,15 @@ export class ErpSyncService {
     return this.allowedItemNumbersForWarehouse(van.whNumber);
   }
 
-  /** Queue a posted cash-van voucher for push to the ERP, by kind. */
-  @OnEvent('erp.voucher.posted')
-  async onVoucherPosted(p: { voucherNumber: string; transKind: string }): Promise<void> {
-    const cfg = await this.settings.getErpConfig().catch(() => null);
-    if (!cfg?.enabled) return;
-    // Always auto-push (owner decision). `directExport` used to park the voucher
-    // in the ERP Export page instead; a voucher that posted but never reached the
-    // ERP is invisible until someone remembers to drain that queue, so the push is
-    // now unconditional. The Export page still works for re-sending by hand, and
-    // the outbox stays idempotent on externalId, so a manual re-send can't
-    // duplicate an invoice the auto-push already created.
-    // Never push back a voucher we mirrored IN from the ERP (loop guard).
-    if (p.voucherNumber.startsWith('ERP-')) return;
-    const kind = OUTBOX_KIND_BY_TRANS[p.transKind];
-    if (kind) await this.outbox.enqueue(kind, p.voucherNumber);
-  }
+  // `onVoucherPosted` used to live here: it listened for `erp.voucher.posted`
+  // and called `outbox.enqueue`. That listener ran AFTER the voucher's
+  // transaction had committed, so a crash or a redeploy in the gap produced a
+  // posted sale that was never queued, with nothing anywhere looking for one.
+  //
+  // The enqueue now happens inside the voucher's own transaction
+  // (`VouchersService.createUnchecked` / `post`, via `enqueueOutboxWithin`), and
+  // `ErpOutboxSweepService` is the backstop that proves it. The event still
+  // fires for the realtime bridge and the cash-account listener.
 
   /**
    * Mirror a cash-van salesman's van store into the ERP as a van warehouse
@@ -987,7 +972,8 @@ export class ErpSyncService {
   async onCollectionConfirmed(p: { collectionId: string }): Promise<void> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
     if (!cfg?.enabled) return;
-    // Always auto-push — see onVoucherPosted.
+    // Always auto-push. A collection is not inside a voucher transaction, so it
+    // stays on the best-effort enqueue and is covered by the sweep.
     await this.outbox.enqueue('PAYMENT', p.collectionId);
   }
 

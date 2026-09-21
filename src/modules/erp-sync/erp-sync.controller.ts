@@ -23,6 +23,7 @@ import {
 
 import { ErpSyncService } from './erp-sync.service';
 import { ErpOutboxService } from './erp-outbox.service';
+import { ErpOutboxSweepService } from './erp-outbox-sweep.service';
 import { ErpOutboxStatus } from './entities/erp-outbox.entity';
 import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -37,6 +38,7 @@ export class ErpSyncController {
   constructor(
     private readonly sync: ErpSyncService,
     private readonly outbox: ErpOutboxService,
+    private readonly sweep: ErpOutboxSweepService,
   ) {}
 
   @Post('sync/now')
@@ -295,5 +297,21 @@ export class ErpSyncController {
   @ApiOkResponse({ description: 'The updated outbox row' })
   outboxRetry(@Param('id', ParseUUIDPipe) id: string) {
     return this.outbox.retry(id);
+  }
+
+  @Post('outbox/sweep')
+  @ApiOperation({
+    summary: 'Find posted vouchers with no ERP outbox row, and queue them',
+    description:
+      'The backstop for the transactional enqueue. It runs hourly on its own; ' +
+      'this triggers it now. The count it returns SHOULD be zero — a non-zero ' +
+      'one means a posted document reached voucher_headers by a route that does ' +
+      'not queue it, and each hit is an invoice that exists here and has never ' +
+      'existed in the ERP. Run it once on an installation being upgraded, before ' +
+      'anything else, to measure the backlog left by the old post-commit push.',
+  })
+  @ApiOkResponse({ description: '{ found, queued }' })
+  outboxSweep() {
+    return this.sweep.sweep();
   }
 }

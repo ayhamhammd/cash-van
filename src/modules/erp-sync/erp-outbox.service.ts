@@ -17,6 +17,7 @@ import { Rep } from '../reps/entities/rep.entity';
 import { SettingsService } from '../settings/settings.service';
 import { CashAccountsService } from '../cash-accounts/cash-accounts.service';
 import { ErpHttpClient } from './erp-http.client';
+import { enqueueOutboxWithin } from './outbox-enqueue';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import {
   ErpOutbox,
@@ -81,15 +82,23 @@ export class ErpOutboxService {
     @InjectRepository(Cheque) private readonly cheques: Repository<Cheque>,
   ) {}
 
-  /** Queue a van document for push to the ERP (best-effort; never throws to the caller). */
+  /**
+   * Queue a document for the ERP, best-effort.
+   *
+   * For callers that are NOT inside a document's transaction — a customer
+   * edited on the dashboard, a warehouse pushed on rep creation, an approved
+   * stock request. Swallowing the failure is right *here*: there is no
+   * transaction to roll back, and the sweep (`ErpOutboxSweepService`) or a later
+   * re-enqueue will catch what is missed.
+   *
+   * It is emphatically NOT right for a voucher. A sale whose enqueue is
+   * swallowed is a sale the ERP never hears about, and that is what
+   * `enqueueOutboxWithin` exists to prevent: same statement, inside the
+   * caller's transaction, allowed to throw.
+   */
   async enqueue(kind: ErpOutboxKind, ref: string): Promise<void> {
     try {
-      const existing = await this.outbox.findOne({ where: { kind, ref } });
-      if (existing && existing.status !== 'failed' && existing.status !== 'dead_letter') return;
-      const row = existing ?? this.outbox.create({ kind, ref });
-      row.status = 'pending';
-      row.nextAttemptAt = new Date();
-      await this.outbox.save(row);
+      await enqueueOutboxWithin(this.outbox.manager, kind, ref);
     } catch (e) {
       this.logger.warn(`enqueue ${kind} ${ref} failed: ${e instanceof Error ? e.message : e}`);
     }
