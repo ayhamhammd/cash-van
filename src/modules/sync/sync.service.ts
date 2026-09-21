@@ -1,4 +1,11 @@
-import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
@@ -10,6 +17,8 @@ import { SettingsService } from '../settings/settings.service';
 import { CreateVoucherDto } from '../vouchers/dto/create-voucher.dto';
 import { CreateCollectionDto } from '../collections/dto/create-collection.dto';
 import { SyncVoucherDto, SyncCollectionDto, ListInboxQueryDto } from './dto/sync.dto';
+import { PERM_ON_BEHALF } from '../../common/constants/permissions';
+import type { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
 @Injectable()
 export class SyncService {
@@ -32,8 +41,16 @@ export class SyncService {
    */
   async ingestVoucher(
     dto: SyncVoucherDto,
+    actor: AuthenticatedUser,
   ): Promise<{ id: string; voucherNumber: string; status: InboxStatus; error?: string | null }> {
     const { clientRef, ...voucher } = dto;
+
+    // WHO this document belongs to is decided by the token, not by the body.
+    // `userCode` used to be taken from the payload with nothing compared against
+    // the caller, so any authenticated user could post a sale out of another
+    // rep's van, in that rep's name, against that rep's stock and settlement.
+    const acting = await this.resolveActingRep(voucher.userCode, null, actor);
+    voucher.userCode = acting.userCode;
 
     // Idempotent replay: same device document → return the existing row.
     if (clientRef) {
@@ -50,7 +67,7 @@ export class SyncService {
 
     // Resolve the store the number is keyed off: a line's store, else the rep's
     // van store. Inject it onto storeless lines so stock moves from the van.
-    const repId = await this.resolveRepId(voucher.userCode);
+    const repId = acting.repId;
     const store = await this.resolveStore(voucher, repId);
     // Keep the app's own voucher number — a single series across app + server, so
     // the number never changes on upload. Only fall back to a server-reserved
@@ -84,8 +101,18 @@ export class SyncService {
 
   async ingestCollection(
     dto: SyncCollectionDto,
+    actor: AuthenticatedUser,
   ): Promise<{ id: string; status: InboxStatus; error?: string | null }> {
     const { clientRef, ...collection } = dto;
+
+    // Same rule as a voucher: the money lands in the acting rep's settlement, so
+    // the acting rep comes from the token.
+    const acting = await this.resolveActingRep(
+      undefined,
+      (collection as { repId?: string }).repId,
+      actor,
+    );
+    (collection as { repId?: string }).repId = acting.repId ?? undefined;
     if (clientRef) {
       const existing = await this.inbox.findOne({ where: { clientRef } });
       if (existing) {
@@ -96,7 +123,7 @@ export class SyncService {
       this.inbox.create({
         type: 'COLLECTION',
         clientRef: clientRef ?? null,
-        repId: (collection as { repId?: string }).repId ?? null,
+        repId: acting.repId,
         payload: collection as unknown as Record<string, unknown>,
         status: 'pending',
       }),
@@ -188,18 +215,6 @@ export class SyncService {
     }
   }
 
-  /** When ERP mode is on, queue a posted van sale/return for push to the ERP. */
-  private async queueErpPush(transKind: string, voucherNumber: string): Promise<void> {
-    try {
-      const cfg = await this.settings.getErpConfig();
-      if (!cfg.enabled) return;
-      if (transKind === 'SALE') await this.erpOutbox.enqueue('SALE_INVOICE', voucherNumber);
-      else if (transKind === 'RETURN') await this.erpOutbox.enqueue('SALES_RETURN', voucherNumber);
-    } catch {
-      // best-effort; a missed enqueue is recoverable via a future re-sync/retry
-    }
-  }
-
   private async promoteCollection(row: VoucherInbox): Promise<void> {
     try {
       const created = await this.collections.create(
@@ -222,6 +237,87 @@ export class SyncService {
     const error = e instanceof Error ? e.message : String(e);
     this.logger.warn(`Inbox ${id} promotion failed: ${error}`);
     await this.inbox.update({ id }, { status: 'failed', error, processedAt: new Date() });
+  }
+
+  /**
+   * Who this document belongs to — decided by the token, never by the body.
+   *
+   * Three cases, and there is no fourth:
+   *
+   *   1. The caller names nobody, or names themselves → they act as the rep
+   *      their own token carries. A caller with no rep link is refused; there is
+   *      no such thing as a document with no owner.
+   *   2. The caller names a DIFFERENT rep and may act on their behalf (admin,
+   *      manager, or `vouchers.createOnBehalf`) → that rep owns it. This is the
+   *      office replaying a stuck handset document, or raising one for a rep.
+   *   3. The caller names a different rep and may not → 403. Silently rewriting
+   *      it to the caller would post the document under a rep the app never
+   *      intended, so the mismatch is surfaced rather than corrected.
+   *
+   * Pass EITHER a `userCode` (vouchers key off `users.user_number`) or a
+   * `repId` (collections carry the rep's uuid); the other is resolved here.
+   */
+  private async resolveActingRep(
+    requestedUserCode: string | undefined,
+    requestedRepId: string | null | undefined,
+    actor: AuthenticatedUser,
+  ): Promise<{ repId: string | null; userCode: string }> {
+    const wantedCode = requestedUserCode?.trim() || undefined;
+    const wantedRepId = requestedRepId?.trim() || undefined;
+
+    const ownByCode = !wantedCode || wantedCode === actor.userNumber;
+    const ownByRepId = !wantedRepId || wantedRepId === actor.repId;
+
+    if (ownByCode && ownByRepId) {
+      if (!actor.repId) {
+        throw new ForbiddenException({
+          code: 'no_rep_link',
+          message:
+            'This account is not linked to a salesman, so it cannot file a document of its own. ' +
+            'Name the salesman explicitly (requires permission to act on their behalf).',
+        });
+      }
+      return { repId: actor.repId, userCode: actor.userNumber };
+    }
+
+    // Naming someone else. `userType === 'ADMIN'` mirrors PermissionsGuard, which
+    // lets a full admin through before any key is consulted.
+    const privileged =
+      actor.userType === 'ADMIN' || actor.role === 'admin' || actor.role === 'manager';
+    if (!privileged && !(actor.permKeys ?? []).includes(PERM_ON_BEHALF)) {
+      throw new ForbiddenException({
+        code: 'REP_MISMATCH',
+        message:
+          'This document names a different salesman than your account. ' +
+          'Acting on behalf of another salesman needs permission.',
+        tokenUserCode: actor.userNumber,
+        requested: wantedCode ?? wantedRepId,
+      });
+    }
+
+    if (wantedRepId) {
+      const code = await this.userCodeForRep(wantedRepId);
+      if (!code) throw new BadRequestException(`Rep ${wantedRepId} not found`);
+      return { repId: wantedRepId, userCode: code };
+    }
+
+    const repId = await this.resolveRepId(wantedCode);
+    if (!repId) {
+      throw new BadRequestException(`No salesman linked to user "${wantedCode}"`);
+    }
+    return { repId, userCode: wantedCode as string };
+  }
+
+  /** The login code (`users.user_number`) behind a rep id. */
+  private async userCodeForRep(repId: string): Promise<string | null> {
+    const rows: Array<{ user_number: string }> = await this.inbox.manager.query(
+      `SELECT u.user_number FROM reps r
+         JOIN users u ON u.id = r.user_id
+        WHERE r.id = $1 AND r.deleted_at IS NULL
+        LIMIT 1`,
+      [repId],
+    );
+    return rows[0]?.user_number ?? null;
   }
 
   private async resolveRepId(userCode?: string): Promise<string | null> {

@@ -76,11 +76,28 @@ export class MobileContextGuard implements CanActivate {
       throw new NotFoundException(`No rep linked to user "${salesmanCode}"`);
     }
 
-    // Admins/managers may query any salesman; a salesman token may only act as itself.
+    // Admins/managers may query any salesman; everyone else may act only as the
+    // rep their own token names.
+    //
+    // The `tokenUser?.repId &&` that used to guard this comparison made the whole
+    // check vanish for a caller with NO rep link — a viewer, a stock-manager
+    // account, a supervisor whose rep link was removed — because `undefined &&`
+    // is falsy and the branch was skipped. Such a caller could read any
+    // salesman's van stock, customers and prices. Absence of a rep link is now
+    // its own denial, with its own code so support can tell the two apart.
     const tokenUser = req.user;
     const privileged = tokenUser?.role === 'admin' || tokenUser?.role === 'manager';
-    if (!privileged && tokenUser?.repId && tokenUser.repId !== rep.id) {
-      throw new ForbiddenException('Salesman not authorized for this account');
+    if (!privileged && !tokenUser?.repId) {
+      throw new ForbiddenException({
+        code: 'no_rep_link',
+        message: 'This account is not linked to a salesman.',
+      });
+    }
+    if (!privileged && tokenUser?.repId !== rep.id) {
+      throw new ForbiddenException({
+        code: 'rep_mismatch',
+        message: 'Salesman not authorized for this account',
+      });
     }
 
     req.mobileCtx = { companyNumber: row.companyNumber, salesmanCode, rep };

@@ -76,7 +76,7 @@ look identical in `audit_log`. Nothing records "user X acted as rep Y".
 | | today | after |
 |---|---|---|
 | `/sync/*` attribution | `userCode` from the body | **from the token; a mismatch is `403`** |
-| `/sync/*` authorization | any authenticated user | **`@Roles('salesman','admin','manager')` + rep-bound** |
+| `/sync/*` authorization | any authenticated user | **must resolve to a rep — own, or named with permission** |
 | `/vouchers` with another rep's `userCode` | allowed for anyone | **requires `vouchers.createOnBehalf`** |
 | Who the policy applies to | the caller | **the target salesman**, with the caller's override recorded |
 | Audit | indistinguishable | **`acted_as_rep_id` + `on_behalf` reason on the voucher and in `audit_log`** |
@@ -93,10 +93,15 @@ author (the office user who raised it). Today the two are conflated into one bod
 ### 3.1 `/sync/*` derives the rep from the token
 
     @Post('vouchers')
-    @Roles('salesman', 'admin', 'manager')
     ingestVoucher(@Body() dto: SyncVoucherDto, @CurrentUser() user: AuthenticatedUser) {
       return this.sync.ingestVoucher(dto, user);
     }
+
+**Not `@Roles(...)`.** An earlier draft of this spec said `@Roles('salesman', …)`. There is no
+such role: `UserRole` is `admin | manager | supervisor | viewer` (`user.entity.ts:5`) and a
+salesman is a `userType` of `SALES`/`DRIVER` whose token carries a `repId`. "Has a rep link" is
+not expressible in `@Roles`, so the authorization is the rep resolution itself — which is
+stronger, because it also settles *which* rep rather than merely admitting the caller.
 
 In `SyncService.ingestVoucher` / `ingestCollection`:
 

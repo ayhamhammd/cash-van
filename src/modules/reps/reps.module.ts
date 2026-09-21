@@ -12,12 +12,16 @@ import { RepStatusService } from './rep-status.service';
 import { PartitionMaintenanceService } from './partition-maintenance.service';
 import { ErpSyncModule } from '../erp-sync/erp-sync.module';
 import { UsersModule } from '../users/users.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Rep, RepLocationEvent, RepStatus]),
     ErpSyncModule,
     UsersModule,
+    // PartitionMaintenanceService raises a managers' alert when it cannot create
+    // an upcoming partition. No cycle: NotificationsModule imports only entities.
+    NotificationsModule,
   ],
   controllers: [RepsController, LocationsController],
   providers: [

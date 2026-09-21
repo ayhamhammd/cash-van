@@ -11,6 +11,29 @@ book of record), `SPEC-sync-intake-contract.md` (why concurrent van writes are n
 
 ## 1. What exists today (verified 2026-09-21)
 
+### 1.0 `van_stock` is only a PARTIAL mirror — found during implementation
+
+`applyLineToVan` is called from **`post()` only** (`vouchers.service.ts:1120`), the path that
+posts an existing draft. `create()` never calls `post()`. So a mobile voucher created with
+`isPosted: true` — which is every promoted handset document
+(`sync.service.ts:180`, `dto.isPosted = true`) — moves stock **only** through
+`voucher_transactions`, and therefore only through the `item_balance` view. It never touches
+`van_stock`.
+
+That reframes everything below:
+
+- the lost update in §1.1 is real, but confined to the draft-post path (TRANSFER, ORDER
+  reserve, damaged returns) — not to van sales;
+- **`van_stock` cannot be the lockable authority for the availability check**, because the
+  writer the check needs to serialise against does not write it. The original §4.2 of this
+  spec said otherwise and was wrong;
+- the actual overselling race is in the `item_balance` check, against a **view**, which is
+  the one thing that genuinely cannot be locked. §4.2 is rewritten accordingly.
+
+Two stores of the same quantity, one maintained on one code path and one on another, is the
+deeper defect. Unifying them belongs with `SPEC-erp-authoritative-stock.md`; what follows
+makes today's arrangement safe without pretending it is coherent.
+
 ### 1.1 The write is a read-modify-write with no lock
 
 `VouchersService.applyLineToVan` (`src/modules/vouchers/vouchers.service.ts:1244`):
@@ -74,17 +97,19 @@ made to serialise against it**.
 | `van_stock` write | read → mutate → save | **`INSERT … ON CONFLICT DO UPDATE` with a guarded `WHERE`** |
 | Negative result | clamped to 0, silently | **`InsufficientStockError`, document rejected** |
 | DB guarantee | none | **`CHECK (quantity >= 0)`, `CHECK (reserved >= 0)`** |
-| Availability check source | `item_balance` view | **`van_stock` row, locked** — for van stores |
-| Serialisation | none | the `van_stock` row is the lock for its pool |
+| Availability check source | `item_balance` view | unchanged — but read under a lock |
+| Serialisation | none | **`pg_advisory_xact_lock` per (store, item, pool)** |
 | Reconciliation | manual ERP recalculate | **scheduled drift check with an alarm** (§5) |
 
-The design choice worth stating plainly: **`van_stock` becomes the single lockable authority
-for van pools.** It is already per `(rep_id, product_id, stock_unit_code)` with a unique
-constraint (`uq_van_stock_rep_product_unit`), which makes it exactly the right lock
-granularity — two reps, or two different items, never contend.
+The design choice worth stating plainly: **the pool key becomes the lock, not any row.** Since
+`van_stock` is not written by the path that creates posted van sales (§1.0) and `item_balance`
+is a view, there is no row to lock — so the serialisation is an advisory lock on
+`(store, item, pool)`, held for the transaction. Same granularity a row lock would have given
+(two reps, or two items, never contend) with none of the schema change.
 
-`item_balance` stays, for reporting and for non-van stores. It stops being the thing a sale
-is validated against.
+Making one table the real authority for van stock is the right end state. It is a larger
+change that belongs with `SPEC-erp-authoritative-stock.md`, and it is not needed to stop the
+overselling.
 
 ---
 
@@ -180,28 +205,40 @@ check rejects first.
 guard — but it needs the same atomic upsert, because two returns of the same item in one
 batch lose one of the two increments today.
 
-### 4.2 The availability check reads and locks `van_stock`
+### 4.2 The availability check serialises on an advisory lock
 
-Replace `stockBalance` for **van stores** with a locking read inside the voucher transaction:
+`van_stock` is not written by the path that creates posted van sales (§1.0), so locking it
+would serialise nothing. The check reads `item_balance`, and a view has no rows to lock.
 
-    SELECT quantity - reserved AS available
-      FROM van_stock
-     WHERE rep_id = $1 AND product_id = $2 AND stock_unit_code = $3
-     FOR UPDATE;
+Take a transaction-scoped advisory lock per pool instead, immediately before the check:
 
-Missing row → available 0. Taking the lock here, before any line is applied, means the whole
-document's availability is evaluated against a snapshot no other transaction can move.
+    const lockKeys = [...need.values()]
+      .filter((n) => vanStores.has(n.store))
+      .map((n) => `${n.store}\u0000${n.itemNumber}\u0000${n.stockUnitCode}`)
+      .sort();
+    for (const key of lockKeys) {
+      await em.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [key]);
+    }
 
-Lock in a **deterministic order** — sort the `need` map (`:906`) by
-`(product_id, stock_unit_code)` before locking — or two vouchers with overlapping item sets
-in opposite order will deadlock. This is cheap and non-obvious, so it belongs in the code
-with a comment.
+Why this is the right instrument here:
 
-Non-van stores keep their current behaviour and rationale, which is already correct and
-already documented at `:932`: the local ledger is structurally ~0 for a depot whose stock was
-loaded in the ERP, so a depot source is trusted from the approval-time ERP check instead.
-`SPEC-erp-authoritative-stock.md` replaces that live check with a persisted snapshot; the
-van/warehouse split itself does not change.
+- **It gives the check something to hold.** The lock is released on commit or rollback, so the
+  window from "read the balance" to "insert the lines" is exclusive for that pool. The second
+  voucher's `item_balance` read then already includes the first one's rows.
+- **No schema, no new authority.** It does not require inventing a lockable stock row, which is
+  a larger change that belongs with the ERP-snapshot work.
+- **It contends narrowly.** Two reps, or the same rep on different items, never wait on each
+  other.
+- **Deterministic order (`.sort()`) is load-bearing.** Two vouchers naming the same two items in
+  opposite order would otherwise deadlock. This is cheap, invisible in behaviour, and the kind
+  of thing that gets dropped in a refactor — hence the comment in the code.
+- `hashtextextended(text, int8)` returns `bigint`, matching `pg_advisory_xact_lock(bigint)`.
+  Both are core Postgres; the deployed server is 16.4.
+
+Non-van stores keep their current behaviour and rationale, already documented at `:932`: the
+local ledger is structurally ~0 for a depot whose stock was loaded in the ERP, so a depot source
+is trusted from the approval-time ERP check instead. `SPEC-erp-authoritative-stock.md` replaces
+that live check with a persisted snapshot; the van/warehouse split itself does not change.
 
 ### 4.3 The error must reach the rep as a rejection
 
@@ -215,47 +252,35 @@ In the inbox drain (`SPEC-sync-intake-contract.md` §4.3) insufficient stock is 
 `rejected` only when `MAX_ATTEMPTS` is burnt. That is the one place where "retry" is the
 right answer to a stock error; everywhere else it is a refusal the rep must see.
 
-### 4.4 `reserved` must become real before it can be locked
+### 4.4 `reserved`: released on fulfil, but not on cancel
 
-`van_stock.reserved` is **write-only and already known to be wrong.** `effect === 'reserve'`
-increments it (`:1275`) and nothing anywhere decrements it — the migration that shipped the
-health checks says so in as many words:
+An earlier draft of this spec said `reserved` is never decremented, following the note left in
+`1722500000000-AiChecks.ts:34`:
 
-> `reserved` is only ever incremented. — `1722500000000-AiChecks.ts:34`
+> `reserved` is only ever incremented.
 
-and it ships a `van_stock_inconsistent` check (`:107`) whose whole purpose is to find rows
-where `reserved > quantity`. So the defect is not newly discovered; it is monitored.
+**That note is stale.** `fulfil()` (`vouchers.service.ts:1192`) does release it:
 
-Meanwhile the read path ignores the column entirely. `VanStockService.forStore`
-(`src/modules/products/van-stock.service.ts:97`) derives reserved from open ORDERs:
+    vs.reserved = Math.max(0, vs.reserved - qty);
+    vs.quantity = Math.max(0, vs.quantity - qty);
 
-    LEFT JOIN (SELECT … SUM(vt.item_qty) AS reserved
-                 FROM voucher_transactions vt JOIN voucher_headers vh …
-                WHERE vh.trans_kind = 'ORDER' AND vh.is_posted AND NOT vh.is_fulfilled …) o
+So the column is maintained on the happy path. Two things remain:
 
-Two notions of the same number: a column that only grows, and an aggregate that is correct
-but cannot be locked.
+1. **That release was itself a read-modify-write** with the same lost-update shape as §4.1, and
+   is now the same atomic `UPDATE`. `GREATEST(0, …)` is deliberately **kept** there, unlike in
+   §4.1: a reservation that no longer covers the line is a bookkeeping artefact of an order
+   placed before the stock moved, not an overdraft, and refusing to fulfil goods the rep has
+   already handed over would strand the order with no way forward.
+2. **Cancellation still leaks.** An ORDER that is deleted or abandoned without being fulfilled
+   never returns its reservation, so `quantity - reserved` drifts down over time. That is what
+   the `van_stock_inconsistent` health check (`AiChecks.ts:107`) actually detects. Emit a
+   release on the cancel/delete path too.
 
-**Resolve to the column**, because §4.2 needs one lockable row to hold the truth for a pool:
-
-1. Emit a `release` effect with the negative delta wherever an ORDER leaves the open set —
-   `is_fulfilled` set true, and on cancellation/deletion. Guarded by the same `WHERE`
-   in §4.1, so a release can never drive `reserved` below zero.
-2. Backfill the column from the derived aggregate in the migration, as the one-time
-   reconciliation:
-
-       UPDATE van_stock vs SET reserved = COALESCE(o.reserved, 0)
-         FROM (…the forStore subquery, grouped to (rep, product, pool)…) o
-        WHERE …;
-       -- rows with no open ORDER get 0
-       UPDATE van_stock SET reserved = 0 WHERE id NOT IN (SELECT … );
-
-3. Switch `VanStockService.forStore` to read `vs.reserved` and delete the subquery. One
-   authority, and the nightly drift job in §5 watches it.
-
-This is not optional polish: §4.2 refuses a sale when `quantity - reserved` is short, so
-shipping §4.2 against today's monotonically-growing `reserved` would turn a latent bug into
-refused sales on every van. §4.4 and §4.2 go out together or neither goes out.
+The read path is a separate question: `VanStockService.forStore`
+(`van-stock.service.ts:97`) ignores the column entirely and derives reserved from open
+unfulfilled ORDERs. Two notions of one number, one of them lockable and one of them correct.
+Resolving them to the column — with a backfill from the aggregate — is worth doing, but it is
+**not** a prerequisite for §4.2 any more, because §4.2 no longer reads `reserved`.
 
 ---
 
@@ -289,16 +314,17 @@ instead of by running an ERP Inventory Recalculate and hoping.
 4. **No deadlock.** Two vouchers with lines `[A,B]` and `[B,A]` promoted in parallel, 200
    iterations, zero deadlock errors.
 5. **Reserve releases.** Create an ORDER (reserves 5), fulfil it. `reserved` returns to its
-   prior value; a later sale of the full quantity succeeds.
+   prior value. Then create an ORDER and CANCEL it: `reserved` must also return — this is the
+   leak §4.4 identifies, and the test should fail before that fix lands.
 6. **Drift is reported.** Hand-edit `van_stock` out of step with the ledger. The nightly job
    files a `drift` finding and notifies; the quantity is left alone.
 
 ## 7. Rollout
 
-§3 and §4.1–4.2 ship together — the CHECK constraints without the guarded upsert would turn
-today's silent clamp into a hard failure with no protection against the race that causes it,
-which is strictly worse. §4.4 must be in the same release as §4.2 for the reason given there.
-§5 can follow independently.
+§3 and §4.1 ship together — the CHECK constraints without the guarded upsert would turn today's
+silent clamp into a hard failure with no protection against the race that causes it, which is
+strictly worse. §4.2 (the advisory lock) is independent of both and can ship alongside or
+before. §4.4's cancel-path release and §5 follow independently.
 
 Before the migration runs on a client, capture `SELECT count(*) FROM van_stock WHERE
 quantity < 0` — a non-zero count is the measured size of the problem at that site and is

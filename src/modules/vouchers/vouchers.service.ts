@@ -16,8 +16,6 @@ import { VoucherTransaction } from './entities/voucher-transaction.entity';
 import { Payment } from './entities/payment.entity';
 import { PaymentCheque } from './entities/payment-cheque.entity';
 import { TransactionKind } from './entities/transaction-kind.entity';
-import { VanStock } from '../products/entities/van-stock.entity';
-import { DamagedStock } from '../products/entities/damaged-stock.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
@@ -951,6 +949,30 @@ export class VouchersService implements OnModuleInit {
           )
         ).map((r: { n: string }) => r.n),
       );
+      // ── Serialise concurrent vouchers drawing on the SAME pool ────────────
+      // The check below reads `item_balance`, a VIEW aggregating posted
+      // voucher_transactions. A view cannot be locked, so under READ COMMITTED
+      // two vouchers both read "10 available", both pass, and both insert: the
+      // van is oversold and nothing says so. Promoting a handset's offline
+      // batch makes that routine rather than rare — up to 20 documents for one
+      // rep, back to back, and soon from more than one API instance.
+      //
+      // A transaction-scoped advisory lock per pool gives the check something
+      // to hold. It needs no schema, releases on commit or rollback, and
+      // contends only between vouchers touching the same (store, item, pool).
+      //
+      // Locked in a DETERMINISTIC order: two vouchers whose lines name the same
+      // two items in opposite order would otherwise deadlock.
+      const lockKeys = [...need.values()]
+        .filter((n) => vanStores.has(n.store))
+        .map((n) => `${n.store}\u0000${n.itemNumber}\u0000${n.stockUnitCode}`)
+        .sort();
+      for (const key of lockKeys) {
+        await em.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+          key,
+        ]);
+      }
+
       for (const n of need.values()) {
         if (!vanStores.has(n.store)) continue;
         const available = await this.stockBalance(
@@ -1165,19 +1187,25 @@ export class VouchersService implements OnModuleInit {
             .getRepository(ItemCart)
             .findOne({ where: { itemNumber: line.itemNumber } });
           if (!product) continue;
-          const vs = await em.getRepository(VanStock).findOne({
-            where: {
-              repId: rep.id,
-              productId: product.id,
-              stockUnitCode: line.stockUnitCode ?? '',
-            },
-          });
-          if (!vs) continue;
           const qty = Math.round(Number(line.itemQty) || 0);
-          vs.reserved = Math.max(0, vs.reserved - qty);
-          vs.quantity = Math.max(0, vs.quantity - qty);
-          vs.snapshotAt = new Date();
-          await em.getRepository(VanStock).save(vs);
+          if (qty <= 0) continue;
+          // Releasing the reservation and shipping the goods, atomically and in
+          // the database — the read-modify-write this replaces lost one of two
+          // concurrent fulfilments of the same pool.
+          //
+          // GREATEST(0, …) is kept HERE, unlike applyLineToVan: a reservation
+          // that no longer covers the line is a bookkeeping artefact of an order
+          // placed before the stock moved, not an overdraft, and refusing the
+          // fulfilment of goods the rep has already handed over would strand the
+          // order. The quantity leg is floored for the same reason.
+          await em.query(
+            `UPDATE van_stock
+                SET reserved    = GREATEST(0, reserved - $4),
+                    quantity    = GREATEST(0, quantity - $4),
+                    snapshot_at = now()
+              WHERE rep_id = $1 AND product_id = $2 AND stock_unit_code = $3`,
+            [rep.id, product.id, line.stockUnitCode ?? '', qty],
+          );
         }
       }
 
@@ -1241,7 +1269,33 @@ export class VouchersService implements OnModuleInit {
     return em.getRepository(Rep).findOne({ where: { userId: user.id } });
   }
 
-  /** Apply a single line to the rep's van_stock row (upserting it). */
+  /**
+   * Apply a single line to the rep's `van_stock` row.
+   *
+   * ## Why this is one statement
+   *
+   * It used to be `findOne` → mutate in JS → `save`. That is a read-modify-write
+   * with no row lock: two vouchers for the same pool both read `quantity = 10`,
+   * one writes 7, the other writes 6, and the second commit wins. Three pieces
+   * left the van and the ledger says four did.
+   *
+   * `ON CONFLICT DO UPDATE` takes the row lock for the rest of the transaction
+   * and computes the new value **in the database** from a relative delta, so the
+   * second voucher applies its change to the committed figure rather than to a
+   * stale read.
+   *
+   * ## Why a refusal, not a clamp
+   *
+   * The old code wrote `Math.max(0, quantity - qty)`, which silently absorbed an
+   * overdraft. That erased the only signal that stock accounting had broken, at
+   * the exact moment it broke. The `WHERE` guard below instead makes the update
+   * affect zero rows, which becomes a thrown error the caller must deal with.
+   *
+   * Note this runs on the draft-`post()` path only. A mobile voucher created
+   * already-posted moves stock through `voucher_transactions` (and therefore the
+   * `item_balance` ledger) and never reaches here — see
+   * docs/SPEC-stock-write-integrity.md for why that split is itself a defect.
+   */
   private async applyLineToVan(
     em: EntityManager,
     repId: string,
@@ -1257,26 +1311,41 @@ export class VouchersService implements OnModuleInit {
 
     // One van row per pool: a variant unit's stock is not the item's stock.
     const stockUnitCode = line.stockUnitCode ?? '';
-    const repo = em.getRepository(VanStock);
-    const vs =
-      (await repo.findOne({
-        where: { repId, productId: product.id, stockUnitCode },
-      })) ??
-      repo.create({
-        repId,
-        productId: product.id,
+    const qtyDelta = effect === 'in' ? qty : effect === 'out' ? -qty : 0;
+    const reservedDelta = effect === 'reserve' ? qty : 0;
+    const loadedAt = effect === 'in' ? new Date() : null;
+
+    const updated: unknown[] = await em.query(
+      `INSERT INTO van_stock (rep_id, product_id, stock_unit_code,
+                              quantity, reserved, loaded_at, snapshot_at)
+       VALUES ($1, $2, $3, GREATEST($4, 0), GREATEST($5, 0), $6, now())
+       ON CONFLICT (rep_id, product_id, stock_unit_code) DO UPDATE
+          SET quantity    = van_stock.quantity + $4,
+              reserved    = van_stock.reserved + $5,
+              loaded_at   = COALESCE($6, van_stock.loaded_at),
+              snapshot_at = now()
+        WHERE van_stock.quantity + $4 >= 0
+          AND van_stock.reserved + $5 >= 0
+       RETURNING quantity`,
+      [repId, product.id, stockUnitCode, qtyDelta, reservedDelta, loadedAt],
+    );
+
+    // Zero rows means the guard refused it: the row exists and the delta would
+    // drive it negative. (An insert can't be refused — a fresh row starts at the
+    // clamped value — but an `out` against a pool with no row at all is exactly
+    // what the availability check upstream already rejects.)
+    if (updated.length === 0) {
+      const unit = stockUnitCode ? ` (unit ${stockUnitCode})` : '';
+      throw new ConflictException({
+        code: 'INSUFFICIENT_STOCK',
+        message:
+          `Not enough van stock of ${line.itemNumber}${unit} to post this line: ` +
+          `need ${qty}.`,
+        itemNumber: line.itemNumber,
         stockUnitCode,
-        quantity: 0,
-        reserved: 0,
+        requested: qty,
       });
-
-    if (effect === 'in') vs.quantity += qty;
-    else if (effect === 'out') vs.quantity = Math.max(0, vs.quantity - qty);
-    else if (effect === 'reserve') vs.reserved += qty;
-
-    vs.snapshotAt = new Date();
-    if (effect === 'in') vs.loadedAt = new Date();
-    await repo.save(vs);
+    }
   }
 
   /** Accrue a returned line into the rep's damaged (quarantine) inventory. */
@@ -1292,14 +1361,18 @@ export class VouchersService implements OnModuleInit {
     const qty = Math.round(Number(line.itemQty) || 0);
     if (qty <= 0) return;
 
+    // Same atomic upsert as applyLineToVan, for the same reason: two returns of
+    // the same item in one promoted batch used to lose one of the increments.
+    // No guard is needed — this ledger only ever accrues.
     const stockUnitCode = line.stockUnitCode ?? '';
-    const repo = em.getRepository(DamagedStock);
-    const ds =
-      (await repo.findOne({ where: { repId, productId: product.id, stockUnitCode } })) ??
-      repo.create({ repId, productId: product.id, stockUnitCode, quantity: 0 });
-    ds.quantity += qty;
-    ds.updatedAt = new Date();
-    await repo.save(ds);
+    await em.query(
+      `INSERT INTO damaged_stock (rep_id, product_id, stock_unit_code, quantity, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (rep_id, product_id, stock_unit_code) DO UPDATE
+          SET quantity   = damaged_stock.quantity + $4,
+              updated_at = now()`,
+      [repId, product.id, stockUnitCode, qty],
+    );
   }
 
   async update(

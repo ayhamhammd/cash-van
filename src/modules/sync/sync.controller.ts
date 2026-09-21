@@ -31,6 +31,10 @@ import {
 } from './dto/sync.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 
 @ApiTags('sync')
 @ApiBearerAuth()
@@ -43,21 +47,30 @@ export class SyncController {
   @ApiOperation({
     summary: 'Stage & post a voucher from the mobile app',
     description:
-      'The app posts here instead of /vouchers. The server assigns the authoritative voucher number (returned immediately) and promotes the row into the main tables. Pass clientRef for idempotent retries.',
+      'The app posts here instead of /vouchers. The server assigns the authoritative voucher number (returned immediately) and promotes the row into the main tables. Pass clientRef for idempotent retries. ' +
+      'The salesman the document belongs to is taken from the TOKEN — a body `userCode` naming anyone else is refused unless the caller may act on their behalf.',
   })
   @ApiCreatedResponse({ type: SyncVoucherResultDto })
-  ingestVoucher(@Body() dto: SyncVoucherDto) {
-    return this.sync.ingestVoucher(dto);
+  ingestVoucher(
+    @Body() dto: SyncVoucherDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.sync.ingestVoucher(dto, user);
   }
 
   @Post('collections')
   @ApiOperation({
     summary: 'Stage & post a collection from the mobile app',
-    description: 'Same staging flow for cash/cheque collections. Pass clientRef for idempotency.',
+    description:
+      'Same staging flow for cash/cheque collections. Pass clientRef for idempotency. ' +
+      'As with vouchers, the acting salesman comes from the token, not from the body.',
   })
   @ApiCreatedResponse({ description: '{ id, status, error? }' })
-  ingestCollection(@Body() dto: SyncCollectionDto) {
-    return this.sync.ingestCollection(dto);
+  ingestCollection(
+    @Body() dto: SyncCollectionDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.sync.ingestCollection(dto, user);
   }
 
   @Get('inbox')
