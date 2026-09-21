@@ -37,20 +37,33 @@ describe('SyncService — document attribution comes from the token', () => {
     };
   }
 
-  /** Stops at the first write, so these tests see the decision, not the insert. */
+  /** Stops at the claim, so these tests see the decision, not the insert. */
   function makeSvc(repLookup: Record<string, string> = {}) {
     const staged: Array<Record<string, unknown>> = [];
     const svc = Object.create(SyncService.prototype) as Record<string, unknown>;
     svc.staged = staged;
-    svc.inbox = {
-      findOne: async () => null,
-      create: (v: Record<string, unknown>) => {
+    svc.logger = { warn: () => undefined, log: () => undefined };
+
+    // The intake claims its clientRef with a single INSERT ... ON CONFLICT DO
+    // NOTHING. Capturing `values()` is how these tests read the attribution the
+    // server decided on, which is the thing under test.
+    const builder = {
+      insert: () => builder,
+      values: (v: Record<string, unknown>) => {
         staged.push(v);
-        return v;
+        return builder;
       },
-      save: () => {
+      orIgnore: () => builder,
+      returning: () => builder,
+      execute: () => {
         throw new ReachedIntake();
       },
+    };
+
+    svc.inbox = {
+      createQueryBuilder: () => builder,
+      findOne: async () => null,
+      findOneByOrFail: async () => ({ id: 'row-1' }),
       manager: {
         query: async (sql: string, params: string[]) => {
           if (sql.includes('SELECT r.id')) {
@@ -143,6 +156,10 @@ describe('SyncService — document attribution comes from the token', () => {
     const [row] = (svc as unknown as { staged: Array<Record<string, unknown>> }).staged;
     expect(row).toMatchObject({ userCode: 'U-0001', repId: 'rep-1' });
     expect((row.payload as { userCode: string }).userCode).toBe('U-0001');
+    // A clientRef is mandatory now that it is the conflict target; a request
+    // without one is given a synthetic key rather than refused, so an older APK
+    // keeps selling.
+    expect(row.clientRef).toMatch(/^auto:/);
   });
 
   it('stamps the TARGET rep on an on-behalf document, not the caller', async () => {

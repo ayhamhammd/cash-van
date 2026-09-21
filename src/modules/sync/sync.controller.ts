@@ -14,7 +14,6 @@ import {
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
-  ApiCreatedResponse,
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
@@ -25,6 +24,7 @@ import { SyncService } from './sync.service';
 import {
   ListInboxQueryDto,
   SyncCollectionDto,
+  SyncStatusQueryDto,
   SyncVoucherDto,
   SyncVoucherResultDto,
   UpdateInboxPayloadDto,
@@ -44,13 +44,18 @@ export class SyncController {
   constructor(private readonly sync: SyncService) {}
 
   @Post('vouchers')
+  // 202, not 201: this answers "the server has durably taken responsibility",
+  // which is not the same as "the document posted". The verdict is in the body.
+  // A rejected document used to travel inside a 201, so a handset keying on the
+  // status code recorded it as synced and dropped its only copy.
+  @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
     summary: 'Stage & post a voucher from the mobile app',
     description:
       'The app posts here instead of /vouchers. The server assigns the authoritative voucher number (returned immediately) and promotes the row into the main tables. Pass clientRef for idempotent retries. ' +
       'The salesman the document belongs to is taken from the TOKEN — a body `userCode` naming anyone else is refused unless the caller may act on their behalf.',
   })
-  @ApiCreatedResponse({ type: SyncVoucherResultDto })
+  @ApiOkResponse({ type: SyncVoucherResultDto })
   ingestVoucher(
     @Body() dto: SyncVoucherDto,
     @CurrentUser() user: AuthenticatedUser,
@@ -59,18 +64,35 @@ export class SyncController {
   }
 
   @Post('collections')
+  @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({
     summary: 'Stage & post a collection from the mobile app',
     description:
       'Same staging flow for cash/cheque collections. Pass clientRef for idempotency. ' +
       'As with vouchers, the acting salesman comes from the token, not from the body.',
   })
-  @ApiCreatedResponse({ description: '{ id, status, error? }' })
+  @ApiOkResponse({ type: SyncVoucherResultDto })
   ingestCollection(
     @Body() dto: SyncCollectionDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.sync.ingestCollection(dto, user);
+  }
+
+  @Get('status')
+  @ApiOperation({
+    summary: 'Has the server got these documents?',
+    description:
+      'The reconciliation endpoint for the handset outbox. Pass every clientRef ' +
+      'still held locally; the reply says which posted, which are still staged, ' +
+      'and which were rejected. A ref MISSING from the reply never reached the ' +
+      'server and must be re-posted — that is the case the app could not ' +
+      'previously distinguish from success.',
+  })
+  @ApiOkResponse({ description: '{ items: SyncVoucherResultDto[] }' })
+  status(@Query() q: SyncStatusQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    const refs = (q.clientRefs ?? '').split(',').slice(0, 200);
+    return this.sync.statusFor(refs, user);
   }
 
   @Get('inbox')

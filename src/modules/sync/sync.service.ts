@@ -7,9 +7,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { randomUUID } from 'node:crypto';
+import { In, Repository } from 'typeorm';
 
-import { VoucherInbox, InboxStatus } from './entities/voucher-inbox.entity';
+import { VoucherInbox, InboxType } from './entities/voucher-inbox.entity';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { CollectionsService } from '../collections/collections.service';
 import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
@@ -19,6 +20,36 @@ import { CreateCollectionDto } from '../collections/dto/create-collection.dto';
 import { SyncVoucherDto, SyncCollectionDto, ListInboxQueryDto } from './dto/sync.dto';
 import { PERM_ON_BEHALF } from '../../common/constants/permissions';
 import type { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
+
+/**
+ * What the handset is told about one document.
+ *
+ * `status` is DERIVED from the stored row, not copied from it: the row tracks
+ * whether a retry is due, the device needs to know whether it may drop its local
+ * copy. Conflating the two is what let a `failed` row travel inside a 201.
+ */
+export interface IntakeResult {
+  /** Inbox row id. */
+  id: string;
+  /** Echoed so the app can match without trusting array order. */
+  clientRef: string;
+  /** Authoritative number. May differ from the one the app minted. */
+  voucherNumber: string;
+  /** The app's own number, when it supplied one. */
+  clientNumber?: string | null;
+  status: IntakeVerdict;
+  attempts: number;
+  error?: string | null;
+  /** True only while the server still intends to try again. */
+  retryable: boolean;
+}
+
+/**
+ * accepted — durably staged, not yet in the main tables. KEEP the local copy.
+ * posted    — in the main tables. The device may drop its copy.
+ * rejected  — terminal. Drop the copy and SHOW the rep: a human must act.
+ */
+export type IntakeVerdict = 'accepted' | 'posted' | 'rejected';
 
 @Injectable()
 export class SyncService {
@@ -34,15 +65,18 @@ export class SyncService {
   ) {}
 
   /**
-   * Stage a voucher from the mobile app: dedupe by clientRef, assign an
-   * authoritative number, then try to promote it into the main tables. The
-   * assigned number is returned even if promotion fails (the row waits in the
-   * inbox for retry) so the device always has a stable, conflict-free number.
+   * Stage a voucher from the mobile app: claim the clientRef, assign an
+   * authoritative number, then try to promote it into the main tables.
+   *
+   * The verdict travels in the BODY, not in the HTTP status — see
+   * `IntakeResult`. The controller answers 202 whatever happens, because "the
+   * server has durably taken responsibility for this document" and "the
+   * document posted" are different facts and the handset needs both.
    */
   async ingestVoucher(
     dto: SyncVoucherDto,
     actor: AuthenticatedUser,
-  ): Promise<{ id: string; voucherNumber: string; status: InboxStatus; error?: string | null }> {
+  ): Promise<IntakeResult> {
     const { clientRef, ...voucher } = dto;
 
     // WHO this document belongs to is decided by the token, not by the body.
@@ -51,58 +85,49 @@ export class SyncService {
     // rep's van, in that rep's name, against that rep's stock and settlement.
     const acting = await this.resolveActingRep(voucher.userCode, null, actor);
     voucher.userCode = acting.userCode;
+    const repId = acting.repId;
 
-    // Idempotent replay: same device document → return the existing row.
-    if (clientRef) {
-      const existing = await this.inbox.findOne({ where: { clientRef } });
-      if (existing) {
-        return {
-          id: existing.id,
-          voucherNumber: existing.assignedNumber ?? '',
-          status: existing.status,
-          error: existing.error,
-        };
-      }
-    }
+    const claim = await this.claim({
+      type: 'VOUCHER',
+      clientRef: this.idempotencyKey(clientRef, 'voucher'),
+      repId,
+      userCode: acting.userCode,
+      clientNumber: voucher.voucherNumber?.trim() || null,
+      payload: voucher as unknown as Record<string, unknown>,
+    });
+
+    // We lost the race, or this is an ordinary replay. Either way another
+    // request owns this document; answer from its row rather than making a
+    // second one. This is the NORMAL path for a handset retrying a request that
+    // timed out after the server had already accepted it.
+    if (!claim.won) return this.resultFor(claim.row);
 
     // Resolve the store the number is keyed off: a line's store, else the rep's
     // van store. Inject it onto storeless lines so stock moves from the van.
-    const repId = acting.repId;
     const store = await this.resolveStore(voucher, repId);
+
     // Keep the app's own voucher number — a single series across app + server, so
     // the number never changes on upload. Only fall back to a server-reserved
     // number if the client didn't supply one. (App numbers embed the userCode +
     // yearly sequence, so they're unique per rep.)
+    //
+    // Reserved AFTER the claim, deliberately: reserving first meant every
+    // replayed request burned a sequence value and threw it away.
     const assignedNumber =
       voucher.voucherNumber?.trim() ||
       (await this.vouchers.reserveVoucherNumber(voucher.transKind, store));
 
-    const row = await this.inbox.save(
-      this.inbox.create({
-        type: 'VOUCHER',
-        clientRef: clientRef ?? null,
-        repId,
-        userCode: voucher.userCode,
-        assignedNumber,
-        payload: voucher as unknown as Record<string, unknown>,
-        status: 'pending',
-      }),
-    );
+    await this.inbox.update({ id: claim.row.id }, { assignedNumber });
+    claim.row.assignedNumber = assignedNumber;
 
-    await this.promoteVoucher(row, store);
-    const fresh = await this.inbox.findOneByOrFail({ id: row.id });
-    return {
-      id: fresh.id,
-      voucherNumber: assignedNumber,
-      status: fresh.status,
-      error: fresh.error,
-    };
+    await this.promoteVoucher(claim.row, store);
+    return this.resultFor(await this.inbox.findOneByOrFail({ id: claim.row.id }));
   }
 
   async ingestCollection(
     dto: SyncCollectionDto,
     actor: AuthenticatedUser,
-  ): Promise<{ id: string; status: InboxStatus; error?: string | null }> {
+  ): Promise<IntakeResult> {
     const { clientRef, ...collection } = dto;
 
     // Same rule as a voucher: the money lands in the acting rep's settlement, so
@@ -113,24 +138,51 @@ export class SyncService {
       actor,
     );
     (collection as { repId?: string }).repId = acting.repId ?? undefined;
-    if (clientRef) {
-      const existing = await this.inbox.findOne({ where: { clientRef } });
-      if (existing) {
-        return { id: existing.id, status: existing.status, error: existing.error };
-      }
-    }
-    const row = await this.inbox.save(
-      this.inbox.create({
-        type: 'COLLECTION',
-        clientRef: clientRef ?? null,
-        repId: acting.repId,
-        payload: collection as unknown as Record<string, unknown>,
-        status: 'pending',
-      }),
-    );
-    await this.promoteCollection(row);
-    const fresh = await this.inbox.findOneByOrFail({ id: row.id });
-    return { id: fresh.id, status: fresh.status, error: fresh.error };
+
+    const claim = await this.claim({
+      type: 'COLLECTION',
+      clientRef: this.idempotencyKey(clientRef, 'collection'),
+      repId: acting.repId,
+      userCode: acting.userCode,
+      clientNumber: null,
+      payload: collection as unknown as Record<string, unknown>,
+    });
+    if (!claim.won) return this.resultFor(claim.row);
+
+    await this.promoteCollection(claim.row);
+    return this.resultFor(await this.inbox.findOneByOrFail({ id: claim.row.id }));
+  }
+
+  /**
+   * What the handset is told about documents it believes are in flight.
+   *
+   * This is the endpoint that makes the whole contract work. Without it the app
+   * cannot distinguish "the server never received this" from "the server has it
+   * and it posted", so it can only guess whether to re-send or to drop its local
+   * copy — and guessing wrong either duplicates a sale or loses one.
+   *
+   * A clientRef that is ABSENT from the reply never reached the server: re-post
+   * it.
+   */
+  async statusFor(
+    clientRefs: string[],
+    actor: AuthenticatedUser,
+  ): Promise<{ items: IntakeResult[] }> {
+    const refs = [...new Set(clientRefs.map((r) => r.trim()).filter(Boolean))];
+    if (refs.length === 0) return { items: [] };
+
+    // Scoped to the caller's own documents, on the same reasoning as the intake:
+    // a rep may reconcile their outbox, not read somebody else's. Refs are
+    // opaque device ids, so this is defence in depth rather than the only lock —
+    // but an unscoped lookup would let one handset enumerate another's errors.
+    const privileged =
+      actor.userType === 'ADMIN' || actor.role === 'admin' || actor.role === 'manager';
+    const rows = await this.inbox.find({
+      where: privileged
+        ? { clientRef: In(refs) }
+        : { clientRef: In(refs), repId: actor.repId ?? '' },
+    });
+    return { items: rows.map((r) => this.resultFor(r)) };
   }
 
   /**
@@ -229,14 +281,134 @@ export class SyncService {
   private async markPosted(id: string, resultRef: string | null): Promise<void> {
     await this.inbox.update(
       { id },
-      { status: 'posted', resultRef, error: null, processedAt: new Date() },
+      {
+        status: 'posted',
+        resultRef,
+        error: null,
+        processedAt: new Date(),
+        lastAttemptAt: new Date(),
+      },
     );
   }
 
   private async markFailed(id: string, e: unknown): Promise<void> {
     const error = e instanceof Error ? e.message : String(e);
     this.logger.warn(`Inbox ${id} promotion failed: ${error}`);
-    await this.inbox.update({ id }, { status: 'failed', error, processedAt: new Date() });
+    // `attempts` is counted here so the drain (SPEC §4.3) inherits a truthful
+    // number rather than starting every existing row from zero.
+    await this.inbox.update(
+      { id },
+      {
+        status: 'failed',
+        error,
+        processedAt: new Date(),
+        lastAttemptAt: new Date(),
+        attempts: () => '"attempts" + 1',
+      },
+    );
+  }
+
+  /**
+   * Claim a clientRef, atomically.
+   *
+   * `findOne` then `save` is a check-then-insert: two concurrent replays both
+   * missed and both inserted, and the unique index handed the loser a raw 23505
+   * that surfaced as a 500 — which the handset reads as "retry", forever.
+   *
+   * `ON CONFLICT DO NOTHING` collapses that into one statement. An empty
+   * `RETURNING` is not an error here, it is the replay path: somebody else owns
+   * this document, so read their row and answer from it.
+   */
+  private async claim(input: {
+    type: InboxType;
+    clientRef: string;
+    repId: string | null;
+    userCode: string | null;
+    clientNumber: string | null;
+    payload: Record<string, unknown>;
+  }): Promise<{ won: boolean; row: VoucherInbox }> {
+    const inserted = await this.inbox
+      .createQueryBuilder()
+      .insert()
+      .values({
+        type: input.type,
+        clientRef: input.clientRef,
+        repId: input.repId,
+        userCode: input.userCode,
+        clientNumber: input.clientNumber,
+        // The insert builder types jsonb as a deep-partial of its own shape;
+        // the payload is an opaque document body, so it is passed through.
+        payload: input.payload as VoucherInbox['payload'] & object,
+        status: 'pending',
+      })
+      .orIgnore()
+      .returning('*')
+      .execute();
+
+    const raw = (inserted.raw as VoucherInbox[] | undefined) ?? [];
+    if (raw.length > 0) {
+      // `returning('*')` gives snake_case straight from Postgres for columns
+      // TypeORM did not map on the way out, so re-read rather than trusting the
+      // shape. One indexed lookup, on the winning path only.
+      return { won: true, row: await this.inbox.findOneByOrFail({ id: raw[0].id }) };
+    }
+    return {
+      won: false,
+      row: await this.inbox.findOneByOrFail({ clientRef: input.clientRef }),
+    };
+  }
+
+  /**
+   * An idempotency key is mandatory now that the column is NOT NULL and is the
+   * conflict target.
+   *
+   * A request without one is given a synthetic key rather than refused: an
+   * installed APK that does not send `clientRef` would otherwise stop being able
+   * to sell the moment this deploys. Such a document cannot be deduped — which
+   * is exactly what the warning says, so the gap is visible in the logs of any
+   * site still running an old build instead of being inferred later from
+   * duplicate sales.
+   */
+  private idempotencyKey(clientRef: string | undefined, kind: string): string {
+    const trimmed = clientRef?.trim();
+    if (trimmed) return trimmed;
+    const synthetic = `auto:${randomUUID()}`;
+    this.logger.warn(
+      `A ${kind} arrived with no clientRef; assigned ${synthetic}. This document ` +
+        'cannot be deduplicated — the handset build is older than the sync contract.',
+    );
+    return synthetic;
+  }
+
+  /**
+   * Translate a stored row into the verdict the device acts on.
+   *
+   * `pending` means the server still intends to try, so the device keeps its
+   * copy. `failed` is terminal TODAY — only a dashboard retry revives it — so it
+   * is reported as `rejected` and the rep is shown the reason. When the drain
+   * lands (SPEC §4.3) a retryable failure stays `pending` and only a burnt-out
+   * row becomes `dead_letter`, at which point this mapping widens rather than
+   * changes.
+   */
+  private resultFor(row: VoucherInbox): IntakeResult {
+    const status: IntakeVerdict =
+      row.status === 'posted'
+        ? 'posted'
+        : row.status === 'failed' ||
+            row.status === 'rejected' ||
+            row.status === 'dead_letter'
+          ? 'rejected'
+          : 'accepted';
+    return {
+      id: row.id,
+      clientRef: row.clientRef,
+      voucherNumber: row.assignedNumber ?? '',
+      clientNumber: row.clientNumber ?? null,
+      status,
+      attempts: row.attempts ?? 0,
+      error: row.error ?? null,
+      retryable: status === 'accepted',
+    };
   }
 
   /**

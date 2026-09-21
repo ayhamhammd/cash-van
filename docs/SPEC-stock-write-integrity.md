@@ -65,8 +65,19 @@ silently becomes `0`. So the *only* signal that stock accounting has broken is e
 moment it occurs. Every diagnosis afterwards is a physical count against a number that was
 quietly rounded up.
 
-`vs.quantity` is `integer` (`van-stock.entity.ts:35`) with no CHECK constraint, so the
-database will not catch it either.
+**Correction, found while implementing.** An earlier draft of this spec said the database would
+not catch it either. It would: `ck_van_stock_qty_nonneg CHECK (quantity >= 0)` has existed since
+`van_stock` was created (`1716100000000-ExtendItemsAndAddPricingVanStock.ts:99`). The clamp was
+therefore *load-bearing* — it is what kept that constraint from firing. The defect is not a
+negative row in the database; it is that an overdraft of three was written as **0 instead of
+being refused**, leaving a legal number that is wrong and a pool that reads "empty" when it has
+been oversold.
+
+`reserved` is the column with no constraint, and unlike `quantity` it is reachable — which is
+precisely what the `van_stock_inconsistent` health check (`1722500000000-AiChecks.ts:107`) was
+built to detect after the fact. `damaged_stock` (`1725900000000`) has no constraint either.
+Those two are what §3 adds; re-adding `quantity >= 0` would be a second identical rule and a
+scan on every write.
 
 ### 1.3 The availability check reads a different table than the write
 
@@ -96,7 +107,7 @@ made to serialise against it**.
 |---|---|---|
 | `van_stock` write | read → mutate → save | **`INSERT … ON CONFLICT DO UPDATE` with a guarded `WHERE`** |
 | Negative result | clamped to 0, silently | **`InsufficientStockError`, document rejected** |
-| DB guarantee | none | **`CHECK (quantity >= 0)`, `CHECK (reserved >= 0)`** |
+| DB guarantee | `quantity` only | **+ `CHECK (reserved >= 0)`, + `damaged_stock`** |
 | Availability check source | `item_balance` view | unchanged — but read under a lock |
 | Serialisation | none | **`pg_advisory_xact_lock` per (store, item, pool)** |
 | Reconciliation | manual ERP recalculate | **scheduled drift check with an alarm** (§5) |
@@ -310,7 +321,9 @@ instead of by running an ERP Inventory Recalculate and hoping.
    van holding 10. Final `quantity` is exactly 3. Repeat 100× with no divergence.
 2. **Overdraft is refused, not clamped.** Van holds 2; sell 5. `409 INSUFFICIENT_STOCK`; no
    voucher row; `quantity` still 2.
-3. **The constraint holds.** `UPDATE van_stock SET quantity = -1` is rejected by the database.
+3. **The constraints hold.** `UPDATE van_stock SET quantity = -1` is rejected (it always was);
+   `UPDATE van_stock SET reserved = -1` and `UPDATE damaged_stock SET quantity = -1` are now
+   rejected too.
 4. **No deadlock.** Two vouchers with lines `[A,B]` and `[B,A]` promoted in parallel, 200
    iterations, zero deadlock errors.
 5. **Reserve releases.** Create an ORDER (reserves 5), fulfil it. `reserved` returns to its
@@ -327,5 +340,7 @@ strictly worse. §4.2 (the advisory lock) is independent of both and can ship al
 before. §4.4's cancel-path release and §5 follow independently.
 
 Before the migration runs on a client, capture `SELECT count(*) FROM van_stock WHERE
-quantity < 0` — a non-zero count is the measured size of the problem at that site and is
-worth recording in `stock_integrity_findings` for the conversation with the owner.
+reserved > quantity` — that, not a negative quantity, is the measured size of the problem at
+that site, and it is worth recording in `stock_integrity_findings` for the conversation with
+the owner. (The migration records it automatically; take the number first so you know it
+before the repair.)
