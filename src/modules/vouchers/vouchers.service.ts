@@ -179,6 +179,42 @@ export function saleLocationOf(dto: {
   return ok ? { saleLat: lat, saleLng: lng } : { saleLat: null, saleLng: null };
 }
 
+/**
+ * Field separator for the stock-pool composite key.
+ *
+ * ASCII Unit Separator (0x1F), and specifically NOT NUL (0x00).
+ *
+ * The key identifies a pool by (store, itemNumber, stockUnitCode), and one of its
+ * uses is the advisory-lock call below, where it travels to Postgres as a bind
+ * parameter. Postgres `text` cannot represent a NUL byte, so a key built with one
+ * is rejected outright:
+ *
+ *   invalid byte sequence for encoding "UTF8": 0x00
+ *
+ * That killed EVERY voucher drawing on a van store — the lock is taken before the
+ * stock check, so the whole POST failed and the handset's offline sale sat in its
+ * outbox retrying forever with nothing the rep could see.
+ *
+ * 0x1F carries the same guarantee that made NUL attractive — no store number, item
+ * number or unit code can contain it, so the parts cannot run together and alias
+ * two different pools onto one key — while being ordinary text on the wire.
+ */
+export const POOL_KEY_SEP = '\u001f';
+
+/**
+ * A stock pool's identity: one store, one item, one unit pool.
+ *
+ * Built in one place because it is used twice — the in-memory aggregation map and
+ * the advisory-lock key — and the two must name the same pool. They were separate
+ * template literals, which is how one of them kept a NUL after the other's use
+ * changed (see [POOL_KEY_SEP]). Note the two call sites pass the fields in
+ * different orders; that is harmless as long as each is internally consistent,
+ * and it is why this takes named parts rather than a spread.
+ */
+export function poolKey(...parts: Array<string | null | undefined>): string {
+  return parts.map((p) => p ?? '').join(POOL_KEY_SEP);
+}
+
 @Injectable()
 export class VouchersService implements OnModuleInit {
   constructor(
@@ -937,7 +973,11 @@ export class VouchersService implements OnModuleInit {
       >();
       for (const p of prepared) {
         if (!p.move.fromStoreNumber) continue;
-        const key = `${p.line.itemNumber}\u0000${p.stockUnitCode}\u0000${p.move.fromStoreNumber}`;
+        const key = poolKey(
+          p.line.itemNumber,
+          p.stockUnitCode,
+          p.move.fromStoreNumber,
+        );
         const acc = need.get(key);
         if (acc) {
           acc.qty += p.baseQty;
@@ -988,7 +1028,7 @@ export class VouchersService implements OnModuleInit {
       // two items in opposite order would otherwise deadlock.
       const lockKeys = [...need.values()]
         .filter((n) => vanStores.has(n.store))
-        .map((n) => `${n.store}\u0000${n.itemNumber}\u0000${n.stockUnitCode}`)
+        .map((n) => poolKey(n.store, n.itemNumber, n.stockUnitCode))
         .sort();
       for (const key of lockKeys) {
         await em.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
