@@ -1,0 +1,52 @@
+# Build context for the combined VanFlow image (backend + dashboard).
+#
+# The context is the PARENT of the two projects, because one image needs both
+# sources. That parent also holds unrelated repos and ~GB of build output, so
+# this file is deny-by-default: ignore everything, then re-admit only the two
+# project directories, then strip their heavy subdirectories.
+#
+# Named Dockerfile.vanflow.dockerignore so BuildKit picks it up automatically
+# from beside the Dockerfile, whatever the context root is — no copying it to
+# the parent directory before a build.
+#
+# Sibling of suite.dockerignore, which also admits ERP/. Every rule below is
+# there for the reason recorded in that file — read it before changing one.
+*
+
+!cash-van-dashboard/
+!cash-van-dashboard-frontend/
+
+# NOTE: no re-admit for the entrypoint. Unlike suite.dockerignore, the Dockerfile
+# copies it from cash-van-dashboard/deploy/, which the line above already admits,
+# so there is nothing to stage at the context root and nothing to forget.
+
+# Re-admitted above, now strip what must never enter an image: dependencies are
+# installed inside the build, and build output is produced there.
+**/node_modules
+**/.next
+**/dist
+**/.git
+**/.gradle
+**/coverage
+**/.turbo
+
+# Local-only and secret-bearing files. An .env baked into an image is a
+# credential shipped to whoever can pull it.
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/.DS_Store
+**/.claude
+**/*.log
+
+# The image tarballs this repo builds — 100 MB each, and dist-*/ also holds live
+# client .env files.
+/cash-van-dashboard/dist-*
+/cash-van-dashboard-frontend/dist-*
+
+# Runtime data, anchored to the exact directories that hold it. A bare ** glob on
+# a common word eventually matches SOURCE — see suite.dockerignore for the three
+# directories that happened to.
+/cash-van-dashboard/storage
