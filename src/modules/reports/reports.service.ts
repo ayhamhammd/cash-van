@@ -73,8 +73,13 @@ export interface BestItemRow {
   itemNumber: string;
   itemName: string;
   qty: string;
+  /** Of [qty], how much was given away by an offer (priced at zero). */
+  freeQty: string;
   amount: string;
   lines: number;
+  /** Present only when the caller grouped by unit. */
+  unitCode?: string;
+  unitName?: string | null;
 }
 
 export interface VisitRow {
@@ -626,49 +631,90 @@ export class ReportsService {
   }
 
   /** Best-selling items from posted SALE voucher lines (by quantity), optionally within N days. */
+  /**
+   * Items ranked by quantity sold, over a lookback window OR an explicit date range.
+   *
+   * `days` is the dashboard's rolling window ("last 30 days"). `dateFrom`/`dateTo`
+   * are the handset's: a rep searching a report picks two dates, and a rolling
+   * window cannot express "the first week of last month". Both are supported, and
+   * an explicit range wins where both arrive, because it is the more specific
+   * request.
+   *
+   * Placeholders are bound through a counter rather than written literally: the
+   * filters are all optional, so their positions shift, and the previous version
+   * recomputed `$3` by hand in four places.
+   */
   async bestItems(
     offset = 0,
     limit = 25,
     days?: number,
     visibleRepIds: string[] | null = null,
+    range: { dateFrom?: string; dateTo?: string; byUnit?: boolean } = {},
   ): Promise<Paged<BestItemRow>> {
-    const dateFilter = days ? `AND h.in_date >= CURRENT_DATE - ($3::int - 1)` : '';
-    const params: unknown[] = days ? [offset, limit, days] : [offset, limit];
-    // Placeholder position depends on whether `days` was supplied, so it is
-    // computed rather than written literally.
-    let scopeFilter = '';
-    if (visibleRepIds !== null) {
-      params.push(visibleRepIds);
-      scopeFilter =
-        ` AND h.user_code IN (SELECT code FROM reps WHERE id = ANY($${params.length}::uuid[]))`;
-    }
+    /** Builds the WHERE tail and its params, so the list and count queries agree. */
+    const buildFilters = (params: unknown[]): string => {
+      const bind = (v: unknown): string => {
+        params.push(v);
+        return `$${params.length}`;
+      };
+      let sql = '';
+      if (range.dateFrom) sql += ` AND h.in_date >= ${bind(range.dateFrom)}::date`;
+      if (range.dateTo) sql += ` AND h.in_date <= ${bind(range.dateTo)}::date`;
+      // The rolling window only applies when no explicit range was named.
+      if (!range.dateFrom && !range.dateTo && days) {
+        sql += ` AND h.in_date >= CURRENT_DATE - (${bind(days)}::int - 1)`;
+      }
+      if (visibleRepIds !== null) {
+        sql += ` AND h.user_code IN (SELECT code FROM reps WHERE id = ANY(${bind(visibleRepIds)}::uuid[]))`;
+      }
+      return sql;
+    };
+
+    // ONE ROW PER UNIT, when the caller asks for it.
+    //
+    // The dashboard's widget ranks items and wants one row each. The handset's
+    // report cannot: an item sells in several units, and an offer commonly gives a
+    // piece free against a carton sold, so grouping on the item alone turns those
+    // into ONE row that is part-free at a blended rate — which is neither of the two
+    // things that happened. Opt-in, so the dashboard's existing rows do not move.
+    const groupBy = range.byUnit
+      ? 't.item_number, COALESCE(t.unit_code, \'\')'
+      : 't.item_number';
+    const unitCols = range.byUnit
+      ? `COALESCE(t.unit_code, '') AS "unitCode",
+              MAX(t.unit_name) AS "unitName",`
+      : '';
+
+    const listParams: unknown[] = [offset, limit];
+    const listFilters = buildFilters(listParams);
     const items: BestItemRow[] = await this.ds.query(
       `SELECT t.item_number AS "itemNumber",
               MAX(t.item_name) AS "itemName",
+              ${unitCols}
               COALESCE(SUM(t.item_qty::numeric), 0) AS "qty",
+              -- What was GIVEN AWAY. A gift line is priced at zero, which is the only
+              -- mark it carries; reporting 15 sold when 3 were giveaways misstates the
+              -- item's real rate to anyone judging performance off this screen.
+              COALESCE(SUM(t.item_qty::numeric) FILTER (WHERE t.unit_price::numeric = 0), 0) AS "freeQty",
               COALESCE(SUM(t.net_total::numeric), 0) AS "amount",
               COUNT(*)::int AS "lines"
          FROM voucher_transactions t
          JOIN voucher_headers h ON h.voucher_number = t.voucher_number
-        WHERE h.is_posted = true AND t.trans_kind = 'SALE' ${dateFilter}${scopeFilter}
-        GROUP BY t.item_number
+        WHERE h.is_posted = true AND t.trans_kind = 'SALE'${listFilters}
+        GROUP BY ${groupBy}
         ORDER BY SUM(t.item_qty::numeric) DESC
         OFFSET $1 LIMIT $2`,
-      params,
+      listParams,
     );
-    const countParams: unknown[] = days ? [days] : [];
-    let countScope = '';
-    if (visibleRepIds !== null) {
-      countParams.push(visibleRepIds);
-      countScope =
-        ` AND h.user_code IN (SELECT code FROM reps WHERE id = ANY($${countParams.length}::uuid[]))`;
-    }
+
+    const countParams: unknown[] = [];
+    const countFilters = buildFilters(countParams);
     const totalRows: Array<{ c: number }> = await this.ds.query(
       `SELECT COUNT(*)::int AS c FROM (
          SELECT 1 FROM voucher_transactions t
          JOIN voucher_headers h ON h.voucher_number = t.voucher_number
-         WHERE h.is_posted = true AND t.trans_kind = 'SALE' ${days ? 'AND h.in_date >= CURRENT_DATE - ($1::int - 1)' : ''}${countScope}
-         GROUP BY t.item_number) x`,
+         WHERE h.is_posted = true AND t.trans_kind = 'SALE'${countFilters}
+         GROUP BY ${groupBy}) x`,
       countParams,
     );
     return { items, total: totalRows[0]?.c ?? 0 };
@@ -732,11 +778,41 @@ export class ReportsService {
     return { totals, byRep };
   }
 
-    async visits(
+  /**
+   * Customer visits, newest first, optionally within a date range.
+   *
+   * The range exists for the handset: a rep's visit report asks "which of my
+   * customers did I call on between these two dates", and without it the only
+   * answer the server could give was "the most recent N, whenever they were" —
+   * which is not a report, and is why that screen was still built from the
+   * device's own invoices.
+   *
+   * Bounds are inclusive days compared against the timestamp, so `dateTo` is
+   * taken to the END of its day; a bare date would otherwise drop everything
+   * visited during the last day, today's included.
+   */
+  async visits(
     offset = 0,
     limit = 25,
     visibleRepIds: string[] | null = null,
+    range: { dateFrom?: string; dateTo?: string } = {},
   ): Promise<Paged<VisitRow>> {
+    /** WHERE tail + params, built once so the list and the count cannot disagree. */
+    const buildFilters = (params: unknown[]): string => {
+      const bind = (v: unknown): string => {
+        params.push(v);
+        return `$${params.length}`;
+      };
+      let sql = ` AND (${bind(visibleRepIds ?? null)}::uuid[] IS NULL OR v.rep_id = ANY($${params.length}::uuid[]))`;
+      if (range.dateFrom) sql += ` AND v.visited_at >= ${bind(range.dateFrom)}::date`;
+      if (range.dateTo) {
+        sql += ` AND v.visited_at < (${bind(range.dateTo)}::date + INTERVAL '1 day')`;
+      }
+      return sql;
+    };
+
+    const listParams: unknown[] = [offset, limit];
+    const listFilters = buildFilters(listParams);
     const items: VisitRow[] = await this.ds.query(
       `SELECT v.id::text AS id,
               v.visited_at AS "visitedAt",
@@ -748,16 +824,18 @@ export class ReportsService {
          FROM customer_visits v
          LEFT JOIN customers c ON c.id = v.customer_id
          LEFT JOIN reps r ON r.id = v.rep_id
-        WHERE ($3::uuid[] IS NULL OR v.rep_id = ANY($3::uuid[]))
+        WHERE TRUE${listFilters}
         ORDER BY v.visited_at DESC
         OFFSET $1 LIMIT $2`,
-      [offset, limit, visibleRepIds ?? null],
+      listParams,
     );
-    // Count scoped too: an unscoped total would page a supervisor into empty rows.
+    // Count scoped and ranged too: either one left off would page a rep into
+    // empty rows, or promise more than the list can show.
+    const countParams: unknown[] = [];
+    const countFilters = buildFilters(countParams);
     const totalRows: Array<{ c: number }> = await this.ds.query(
-      `SELECT COUNT(*)::int AS c FROM customer_visits
-        WHERE ($1::uuid[] IS NULL OR rep_id = ANY($1::uuid[]))`,
-      [visibleRepIds ?? null],
+      `SELECT COUNT(*)::int AS c FROM customer_visits v WHERE TRUE${countFilters}`,
+      countParams,
     );
     return { items, total: totalRows[0]?.c ?? 0 };
   }

@@ -287,7 +287,13 @@ export class ReportsController {
   })
   @ApiOkResponse({ description: 'Paginated best-selling items' })
   async bestItems(@Query() q: ReportsQueryDto, @CurrentUser() user: AuthenticatedUser) {
-    return this.reports.bestItems(q.offset ?? 0, q.limit ?? 25, q.days, await this.repScope.visibleRepIds(user));
+    return this.reports.bestItems(
+      q.offset ?? 0,
+      q.limit ?? 25,
+      q.days,
+      await this.repScope.visibleRepIds(user),
+      { dateFrom: q.dateFrom, dateTo: q.dateTo, byUnit: q.byUnit },
+    );
   }
 
 @Get('new-customers')
@@ -316,7 +322,12 @@ export class ReportsController {
   })
   @ApiOkResponse({ description: 'Paginated visits' })
   async visits(@Query() q: ReportsQueryDto, @CurrentUser() user: AuthenticatedUser) {
-    return this.reports.visits(q.offset ?? 0, q.limit ?? 25, await this.repScope.visibleRepIds(user));
+    return this.reports.visits(
+      q.offset ?? 0,
+      q.limit ?? 25,
+      await this.repScope.visibleRepIds(user),
+      { dateFrom: q.dateFrom, dateTo: q.dateTo },
+    );
   }
 
   @Get('visits-no-transaction')

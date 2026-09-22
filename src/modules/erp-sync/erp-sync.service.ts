@@ -870,10 +870,76 @@ export class ErpSyncService {
         map?.erpId ?? null,
       );
       if (!erp) return { source: 'unavailable', reason: 'not_found' };
+      // Reading the statement is also the freshest reading of the balance we will
+      // get, so keep it rather than throw it away — see mirrorStatementBalance.
+      await this.mirrorStatementBalance(customer.id, erp, range);
       return erp;
     } catch {
       return { source: 'unavailable', reason: 'fetch_failed' };
     }
+  }
+
+  /**
+   * Write a just-fetched ERP closing balance onto `customers.total_debt`.
+   *
+   * WHY, AND WHY IT IS SAFE TO DO ON A READ
+   *
+   * `pullCustomerBalances()` already mirrors the ERP's AR aging onto this column,
+   * but it runs on an interval over the whole book. A rep opening one customer's
+   * statement has just paid for the freshest possible reading of exactly that
+   * customer, and dropping it means the board beside the statement — and every
+   * handset that syncs next — keeps showing a figure the statement already
+   * contradicts. So the read updates it, and the dashboard and the vans converge
+   * on what the ERP just said instead of waiting out the interval.
+   *
+   * ONLY WHEN THE WINDOW ENDS AT THE PRESENT.
+   *
+   * A closing balance is the balance ON THE LAST DAY OF ITS WINDOW. A rep browsing
+   * last month's statement would otherwise write last month's figure over the live
+   * one, and it would then flow to every handset on the next catalogue refresh —
+   * turning an idle look at history into a fleet-wide wrong number. An open-ended
+   * window, or one running to today or later, is the only case where the closing
+   * balance IS the current balance.
+   *
+   * Best-effort: a statement that displayed correctly must never fail because the
+   * mirror could not be written.
+   */
+  private async mirrorStatementBalance(
+    customerId: string,
+    erp: ErpStatement,
+    range: { from?: string; to?: string },
+  ): Promise<void> {
+    const to = range.to ?? erp.to ?? null;
+    if (!this.windowEndsNow(to)) return;
+    if (!Number.isFinite(erp.closingBalance)) return;
+    try {
+      await this.customers.update(
+        { id: customerId },
+        // total_credit is never written by anything and stays 0, so the handset's
+        // `totalDebt - totalCredit` is exactly this figure. Writing the net closing
+        // balance into total_debt therefore lands whole rather than half.
+        { totalDebt: erp.closingBalance.toFixed(2) },
+      );
+    } catch (e) {
+      this.logger.warn(
+        `statement balance mirror failed for ${customerId}: ${(e as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * True when a statement window runs to the present, so its closing balance is
+   * the customer's balance right now.
+   *
+   * Dates are compared as `YYYY-MM-DD` strings, which sort correctly and sidestep
+   * the timezone question: the handset sends its own local day, the server keeps
+   * its own, and a one-day disagreement at a midnight boundary can only make this
+   * skip a mirror it could have done — never write a stale figure.
+   */
+  private windowEndsNow(to: string | null): boolean {
+    if (!to) return true; // open-ended: everything up to now
+    const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local
+    return to.slice(0, 10) >= today;
   }
 
   /** Live ERP balance for a rep id — the rep's linked "cash with salesman" GL account. */

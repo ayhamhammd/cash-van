@@ -1505,6 +1505,7 @@ export class VouchersService implements OnModuleInit {
         storeNumber: string | null;
         customerName: string | null;
         creditTotal: string;
+        paymentType: string | null;
       }
     >
   > {
@@ -1528,6 +1529,21 @@ export class VouchersService implements OnModuleInit {
         `COALESCE((SELECT SUM(p.amount) FROM payments p
            WHERE p.voucher_number = h.voucher_number AND p.payment_type = 'CREDIT'), 0)`,
         'creditTotal',
+      )
+      // HOW it was settled — CASH | CHEQUE | TRANSFER | CREDIT.
+      //
+      // creditTotal says how much stayed on account, which answers the statement's
+      // question but not the report's: a rep filtering their vouchers by "cheque"
+      // cannot get there from an amount. The header carries no payment type of its
+      // own, so it comes from the payment lines, largest first — the handset writes
+      // exactly one line per voucher, so for anything a van created this is that
+      // line, and for a split posted at the office it is the dominant one rather
+      // than an arbitrary pick.
+      .addSelect(
+        `(SELECT p.payment_type FROM payments p
+           WHERE p.voucher_number = h.voucher_number
+           ORDER BY p.amount DESC LIMIT 1)`,
+        'paymentType',
       )
       .groupBy('h.id')
       .orderBy('h.in_date', 'DESC');
@@ -1583,6 +1599,7 @@ export class VouchersService implements OnModuleInit {
       storeNumber: (raw[i]?.storeNumber as string | null) ?? null,
       customerName: (raw[i]?.customerName as string | null) ?? null,
       creditTotal: String(raw[i]?.creditTotal ?? '0'),
+      paymentType: (raw[i]?.paymentType as string | null) ?? null,
     }));
   }
 
