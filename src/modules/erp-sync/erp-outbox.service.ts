@@ -11,6 +11,7 @@ import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity'
 import { Collection } from '../collections/entities/collection.entity';
 import { Cheque } from '../collections/entities/cheque.entity';
 import { Customer } from '../customers/entities/customer.entity';
+import { erpCustomerBody } from './erp-customer-payload';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { StockRequest } from '../stock-requests/entities/stock-request.entity';
 import { Rep } from '../reps/entities/rep.entity';
@@ -454,18 +455,24 @@ export class ErpOutboxService {
   ): Promise<{ path: string; body: Record<string, unknown>; idem?: string } | null> {
     const c = await this.customers.findOne({ where: { customerNumber: ref } });
     if (!c) return null;
+    // The rep read NOW, not when the row was queued: a customer handed to
+    // another van while the ERP was down should arrive as his.
+    const rep = c.repId
+      ? await this.reps.findOne({ where: { id: c.repId }, select: { id: true, code: true } })
+      : null;
     return {
       path: 'customers',
       idem: ref,
-      body: {
+      body: erpCustomerBody({
         code: c.customerNumber,
         name: c.nameAr || c.customerName || c.customerNumber,
-        ...(c.phone ? { phone: c.phone } : {}),
-        ...(c.email ? { email: c.email } : {}),
-        ...(c.tin ? { taxNumber: c.tin } : {}),
+        phone: c.phone,
+        email: c.email,
+        taxNumber: c.tin,
         // JOD major here; the ERP scales it on receipt.
-        ...(c.creditLimit != null ? { creditLimit: Number(c.creditLimit) } : {}),
-      },
+        creditLimit: c.creditLimit != null ? Number(c.creditLimit) : null,
+        repCode: rep?.code ?? null,
+      }),
     };
   }
 

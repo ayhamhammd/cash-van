@@ -143,6 +143,17 @@ export class CustomersService {
     const isSalesman = user.repId != null;
     if (!isSalesman) return this.create(dto);
 
+    // A customer a salesman creates is HIS — decided here from the login, not
+    // from whatever the phone sent. The app fills `repId` from its session
+    // only when that session has one, so a blank field used to leave the
+    // customer unassigned: invisible to his own van's customer list, and
+    // exported to the ERP with no salesman. A caller naming a different rep
+    // would have handed the customer to someone else.
+    //
+    // Before both paths below, so a customer waiting on approval carries its
+    // rep in the request payload and is created with him when approved.
+    dto = { ...dto, repId: user.repId! };
+
     if (!dto.photoId) {
       throw new BadRequestException(
         'A customer document photo is required when a salesman creates a customer',
@@ -276,6 +287,7 @@ export class CustomersService {
       email: saved.email ?? null,
       taxNumber: saved.tin ?? null,
       creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
+      repId: saved.repId ?? null,
     });
     return saved;
   }
@@ -354,6 +366,7 @@ export class CustomersService {
       email: saved.email ?? null,
       taxNumber: saved.tin ?? null,
       creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
+      repId: saved.repId ?? null,
     });
     return saved;
   }
@@ -397,6 +410,7 @@ export class CustomersService {
         taxNumber: customer.tin ?? null,
         creditLimit:
           customer.creditLimit != null ? Number(customer.creditLimit) : null,
+        repId: customer.repId ?? null,
       });
     }
     return customer;

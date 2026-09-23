@@ -31,6 +31,7 @@ import { SettingsService } from '../settings/settings.service';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { ErpHttpClient } from './erp-http.client';
 import { OUTBOX_KIND_BY_TRANS } from './outbox-enqueue';
+import { erpCustomerBody, erpWarnings } from './erp-customer-payload';
 import { ErpOutboxService } from './erp-outbox.service';
 import { ErpOutbox } from './entities/erp-outbox.entity';
 import { ErpIdMap } from './entities/erp-id-map.entity';
@@ -974,13 +975,26 @@ export class ErpSyncService {
     email?: string | null;
     taxNumber?: string | null;
     creditLimit?: number | null;
+    repId?: string | null;
   }): Promise<void> {
     return this.pushCustomer(p.code, p.name, {
       phone: p.phone ?? undefined,
       email: p.email ?? undefined,
       taxNumber: p.taxNumber ?? undefined,
       creditLimit: p.creditLimit ?? undefined,
+      repId: p.repId ?? null,
     });
+  }
+
+  /**
+   * The ERP salesman code for a rep — his own code, the same identity his van
+   * warehouse and every one of his receipts carry. Null when there is no rep or
+   * he has no code, and the customer then goes to the ERP unassigned.
+   */
+  private async repCodeOf(repId: string | null | undefined): Promise<string | null> {
+    if (!repId) return null;
+    const rep = await this.reps.findOne({ where: { id: repId }, select: { id: true, code: true } });
+    return rep?.code?.trim() || null;
   }
 
   /** A cash-van customer EDIT → PATCH the mapped ERP customer (or create if unmapped). */
@@ -992,17 +1006,22 @@ export class ErpSyncService {
     email?: string | null;
     taxNumber?: string | null;
     creditLimit?: number | null;
+    repId?: string | null;
   }): Promise<void> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
     if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return;
     const map = await this.idmap.findOne({ where: { entity: 'customer', localId: p.code } });
     if (!map?.erpId) {
-      // Not mirrored yet → create it (push handles id-map).
+      // Not mirrored yet → create it (push handles id-map). A CREATE, so it
+      // carries the rep like any other. The PATCH below deliberately does
+      // not: the ERP can now assign salesmen itself, and every van-side edit
+      // of a phone number would otherwise overwrite that choice.
       return this.pushCustomer(p.code, p.name, {
         phone: p.phone ?? undefined,
         email: p.email ?? undefined,
         taxNumber: p.taxNumber ?? undefined,
         creditLimit: p.creditLimit ?? undefined,
+        repId: p.repId ?? null,
       });
     }
     try {
@@ -1258,26 +1277,38 @@ export class ErpSyncService {
   async pushCustomer(
     code: string,
     name: string,
-    extra: { phone?: string; email?: string; taxNumber?: string; creditLimit?: number } = {},
+    extra: {
+      phone?: string;
+      email?: string;
+      taxNumber?: string;
+      creditLimit?: number;
+      /** The rep the customer belongs to; sent as the ERP `salesmanCode`. */
+      repId?: string | null;
+    } = {},
   ): Promise<void> {
     const cfg = await this.settings.getErpConfig();
     if (!cfg.enabled || !cfg.baseUrl || !cfg.apiKey) return;
     try {
       const res = await this.erp.post(
         'customers',
-        {
+        erpCustomerBody({
           code,
           name,
-          ...(extra.phone ? { phone: extra.phone } : {}),
-          ...(extra.email ? { email: extra.email } : {}),
-          ...(extra.taxNumber ? { taxNumber: extra.taxNumber } : {}),
-          ...(extra.creditLimit != null ? { creditLimit: extra.creditLimit } : {}), // JOD major; ERP ×1000
-        },
+          phone: extra.phone,
+          email: extra.email,
+          taxNumber: extra.taxNumber,
+          creditLimit: extra.creditLimit, // JOD major; ERP ×1000
+          repCode: await this.repCodeOf(extra.repId),
+        }),
         code,
       );
       if (res.ok) {
         const erpId = (res.data as { data?: { id?: string } } | null)?.data?.id ?? code;
         await this.upsertIdMap('customer', erpId, code, code);
+        // The ERP created the customer but could not assign him — a rep whose
+        // code is missing from its salesmen list. Not a failure, and not worth
+        // a retry that would change nothing; said where it will be looked for.
+        for (const w of erpWarnings(res.data)) this.logger.warn(`pushCustomer ${code}: ${w}`);
       } else {
         // Rejected (validation, auth, 5xx) — queue it. The push used to stop
         // here with a log line nobody reads, and the customer was never exported.
