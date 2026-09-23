@@ -329,6 +329,14 @@ export class CollectionsService {
           ),
         );
       }
+      // AR: a confirmed receipt REDUCES what the customer owes. Inside the
+      // transaction, for the same reason the voucher path applies a credit sale
+      // inside its own: a receipt whose effect on the balance is not recorded is
+      // not a receipt.
+      if (initialStatus === 'confirmed') {
+        await this.applyCollectionToDebt(em, dto.customerId, amount);
+      }
+
       return em.getRepository(Collection).findOneOrFail({
         where: { id: collection.id },
         relations: { cheques: true },
@@ -340,6 +348,48 @@ export class CollectionsService {
       this.events.emit('erp.collection.confirmed', { collectionId: created.id });
     }
     return created;
+  }
+
+  /**
+   * Apply a confirmed receipt to the customer's outstanding debt, immediately.
+   *
+   * THE MISSING HALF OF A PAIR. `VouchersService.applyCreditVoucherToDebt` already
+   * moves `total_debt` the moment a credit sale posts, precisely so the balance is
+   * right without waiting for the next ERP pull. Collections had no equivalent, so
+   * the number only ever went UP between ERP syncs: a rep took money, the customer
+   * still showed the full debt, and the credit headroom derived from that balance
+   * stayed collapsed until the interval happened to run.
+   *
+   * On the handset that surfaced as a rep having to leave a customer and come back
+   * before a credit sale would be accepted — they had collected the money, the
+   * device had counted it, and then the server's untouched figure overwrote it.
+   *
+   * NOT clamped at zero, unlike the voucher path. That clamp's comment says debt
+   * below zero "is a credit note question, and this is not the place to invent an
+   * answer" — but a receipt for more than is owed is exactly that question, and the
+   * answer the business already gives is that the customer is in credit and may
+   * spend it. Clamping here would delete the difference: collect 100 against a debt
+   * of 30 and 70 of the customer's money would simply cease to exist.
+   *
+   * Amount arrives in FILS and `total_debt` is in major units, so it is divided by
+   * 1000 — mixing the two would move the balance a thousandfold.
+   */
+  private async applyCollectionToDebt(
+    em: EntityManager,
+    customerId: string,
+    amountFils: number,
+  ): Promise<void> {
+    if (!customerId || !amountFils) return;
+    const major = (amountFils / 1000).toFixed(2);
+    // One statement, no read-modify-write: two receipts for one customer at once
+    // would otherwise both read the old balance and one would overwrite the other,
+    // and the number that goes missing is money the customer has already handed over.
+    await em.query(
+      `UPDATE customers
+          SET total_debt = COALESCE(total_debt, 0) - $2::numeric
+        WHERE id = $1`,
+      [customerId, major],
+    );
   }
 
   async confirm(id: string): Promise<Collection> {
@@ -356,9 +406,16 @@ export class CollectionsService {
         );
       }
     }
-    collection.status = 'confirmed';
-    collection.confirmedAt = new Date();
-    await this.collections.save(collection);
+    // The status change and the balance move together, or neither happens. A
+    // receipt that reads 'confirmed' while the customer still shows the full debt
+    // is the same defect create had, just reached by a different door: a cheque
+    // held back for a words mismatch is confirmed HERE rather than on create.
+    await this.collections.manager.transaction(async (em) => {
+      collection.status = 'confirmed';
+      collection.confirmedAt = new Date();
+      await em.getRepository(Collection).save(collection);
+      await this.applyCollectionToDebt(em, collection.customerId, Number(collection.amount) || 0);
+    });
     // Mirror the confirmed receipt to the ERP (best-effort; no-op when ERP off).
     this.events.emit('erp.collection.confirmed', { collectionId: id });
     return this.findOne(id);
