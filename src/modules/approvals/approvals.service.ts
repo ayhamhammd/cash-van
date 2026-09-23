@@ -36,6 +36,7 @@ const TYPE_LABEL: Record<ApprovalType, { ar: string; en: string }> = {
   VOUCHER_DISCOUNT: { ar: 'خصم', en: 'Discount' },
   PRICE_OVERRIDE: { ar: 'تغيير سعر', en: 'Price change' },
   CUSTOMER_CREATE: { ar: 'إضافة عميل', en: 'New customer' },
+  VOUCHER_FREE_ITEM: { ar: 'أصناف مجانية', en: 'Free items' },
 };
 
 @Injectable()
@@ -257,6 +258,60 @@ export class ApprovalsService {
    * reviewing manager (their CLS context), so the salesman-permission gate in
    * VouchersService passes; attribution stays with the rep via payload.userCode.
    */
+  /**
+   * A supervisor cuts (or clears) a requested free quantity before agreeing.
+   *
+   * WHY THE WHOLE PAYLOAD COMES BACK, AND IS THEN DISTRUSTED
+   *
+   * `approve` executes the stored payload verbatim, which is what makes an approval
+   * mean something: the salesman cannot change the document after a supervisor has
+   * seen it. Amendment has to preserve that property in the other direction — a
+   * supervisor may say "one free, not five", and may NOT quietly reprice the paid
+   * lines on the way past. That is a different power, nobody asked for it, and it
+   * would arrive unaudited.
+   *
+   * So the incoming payload is compared field by field against the stored one, and
+   * the ONLY difference tolerated is the quantity of a line already marked
+   * `isFree`. Anything else is a rejection, not a merge.
+   *
+   * A free quantity set to zero removes the line outright — "reverse it" is the
+   * supervisor saying no to that giveaway while still allowing the sale, and a
+   * zero-quantity line has no business reaching the ERP.
+   */
+  async amendPayload(
+    id: string,
+    payload: Record<string, unknown>,
+    reviewerUserId: string,
+    reviewer?: AuthenticatedUser,
+  ): Promise<ApprovalRequest> {
+    const row = await this.findOneOrThrow(id);
+    if (reviewer && row.repId) await this.repScope.assertCanSeeRep(reviewer, row.repId);
+    if (reviewer) this.assertReviewerMayDecide(reviewer, row);
+    if (row.status !== 'pending') {
+      throw new ConflictException(`Request is already ${row.status}`);
+    }
+    if (row.type !== 'VOUCHER_FREE_ITEM') {
+      // Only a giveaway is negotiable. A discount or a return is approved as filed.
+      throw new ConflictException(
+        `Only VOUCHER_FREE_ITEM requests can be amended, not ${row.type}`,
+      );
+    }
+
+    const changes = diffFreeQuantities(row.payload, payload);
+    if (!changes.ok) throw new BadRequestException(changes.reason);
+
+    // Keep what the salesman actually asked for, once. A second amendment must not
+    // overwrite the original with the first supervisor's version.
+    if (!row.originalPayload) row.originalPayload = row.payload;
+
+    row.payload = changes.cleaned;
+    row.amendedBy = reviewerUserId;
+    row.amendedAt = new Date();
+    row.amendmentNote = [row.amendmentNote, changes.note].filter(Boolean).join('; ');
+    await this.repo.save(row);
+    return row;
+  }
+
   async approve(
     id: string,
     reviewerUserId: string,
@@ -394,4 +449,78 @@ export class ApprovalsService {
       throw new BadRequestException(`Invalid voucher payload: ${detail}`);
     }
   }
+}
+
+/** One line of a proposed voucher, as far as amendment cares. */
+interface Txn {
+  itemNumber?: string;
+  itemQty?: string;
+  isFree?: boolean;
+  unitCode?: string;
+  [k: string]: unknown;
+}
+
+/**
+ * Compare a supervisor's edit against the stored request.
+ *
+ * Returns the cleaned payload (zero-quantity free lines dropped) and a
+ * human-readable note, or the reason it was refused. Deliberately positional: the
+ * transactions must arrive in the same order they were filed, because matching them
+ * up by item number would silently accept a reordered or substituted cart.
+ */
+function diffFreeQuantities(
+  stored: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+):
+  | { ok: true; cleaned: Record<string, unknown>; note: string }
+  | { ok: false; reason: string } {
+  const a = { ...stored };
+  const b = { ...incoming };
+  const aTxns = (a.transactions as Txn[]) ?? [];
+  const bTxns = (b.transactions as Txn[]) ?? [];
+  delete a.transactions;
+  delete b.transactions;
+
+  // Everything outside the lines — customer, payments, dates, totals — must match.
+  if (JSON.stringify(a) !== JSON.stringify(b)) {
+    return { ok: false, reason: 'Only free-line quantities may be amended' };
+  }
+  if (aTxns.length !== bTxns.length) {
+    return { ok: false, reason: 'Lines may not be added or removed, only re-quantified' };
+  }
+
+  const notes: string[] = [];
+  const cleaned: Txn[] = [];
+  for (let i = 0; i < aTxns.length; i += 1) {
+    const before = aTxns[i];
+    const after = bTxns[i];
+    const qtyChanged = String(before.itemQty ?? '') !== String(after.itemQty ?? '');
+
+    if (qtyChanged && !before.isFree) {
+      return { ok: false, reason: 'A paid line\'s quantity may not be amended' };
+    }
+    // Compare every OTHER field, so a repriced free line is refused too — the
+    // supervisor is agreeing to a quantity, not setting a price.
+    const strippedBefore = { ...before, itemQty: null };
+    const strippedAfter = { ...after, itemQty: null };
+    if (JSON.stringify(strippedBefore) !== JSON.stringify(strippedAfter)) {
+      return { ok: false, reason: 'Only a free line\'s quantity may be amended' };
+    }
+
+    if (qtyChanged) {
+      const unit = before.unitCode ? ` ${before.unitCode}` : '';
+      notes.push(`free ${before.itemNumber ?? '?'}${unit}: ${before.itemQty} -> ${after.itemQty}`);
+    }
+    // Zero means the supervisor reversed this giveaway. Drop it rather than post a
+    // zero-quantity line to the ERP.
+    if (after.isFree && Number(after.itemQty ?? 0) <= 0) continue;
+    cleaned.push(after);
+  }
+
+  if (notes.length === 0) return { ok: false, reason: 'Nothing was amended' };
+  return {
+    ok: true,
+    cleaned: { ...b, transactions: cleaned },
+    note: notes.join('; '),
+  };
 }

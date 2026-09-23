@@ -17,6 +17,7 @@ export const APPROVAL_TYPES: ApprovalType[] = [
   'RETURN_VOUCHER',
   'VOUCHER_DISCOUNT',
   'PRICE_OVERRIDE',
+  'VOUCHER_FREE_ITEM',
 ];
 
 export class CreateApprovalDto {
@@ -75,4 +76,22 @@ export class ListApprovalsQueryDto {
   @Min(1)
   @Max(100)
   limit?: number;
+}
+
+/**
+ * A supervisor's edit to a pending free-item request.
+ *
+ * The whole payload comes back rather than a quantity, because the service
+ * validates it against the stored one field by field: anything other than a free
+ * line's quantity having moved is a rejection, not a merge. See
+ * ApprovalsService.amendPayload for why that check is the point of this endpoint.
+ */
+export class AmendApprovalPayloadDto {
+  @ApiProperty({
+    description: 'The full proposed voucher, with only free-line quantities changed.',
+    type: Object,
+  })
+  @IsObject()
+  @IsNotEmpty()
+  payload!: Record<string, unknown>;
 }

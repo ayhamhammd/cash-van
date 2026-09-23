@@ -93,6 +93,21 @@ export class VoucherLineDto {
   @IsNumberString()
   discountValue?: string;
 
+  /**
+   * This line is a GIVEAWAY, not a discounted sale.
+   *
+   * Declared explicitly rather than inferred from a 100% discount. The handset
+   * sends discounts as exact VALUES, never percentages (a rounded percentage
+   * corrupted the amount), so "fully discounted" is a sum comparison on money —
+   * and a line that happens to discount to zero is not the same fact as a line
+   * the supervisor approved as free. The amendment endpoint has to tell them
+   * apart to know which quantities it may change.
+   */
+  @ApiPropertyOptional({ description: 'True when this line is an approved giveaway.' })
+  @IsOptional()
+  @IsBoolean()
+  isFree?: boolean;
+
   @ApiPropertyOptional({
     description:
       'Single store affected by this line (SALE source / RETURN target). For a TRANSFER use fromStoreNumber + toStoreNumber instead.',

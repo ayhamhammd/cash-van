@@ -1,5 +1,6 @@
 import {
   Body,
+  Patch,
   Controller,
   Get,
   Param,
@@ -18,7 +19,7 @@ import {
 } from '@nestjs/swagger';
 
 import { ApprovalsService } from './approvals.service';
-import {
+import { AmendApprovalPayloadDto,
   CreateApprovalDto,
   ListApprovalsQueryDto,
   RejectApprovalDto,
@@ -89,6 +90,26 @@ export class ApprovalsController {
     // Scoped, unlike before: the queue was filtered per supervisor and this
     // route was not, so any id could be read by anyone who reached it.
     return this.approvals.findOneForReviewer(id, reviewer);
+  }
+
+  @Patch(':id/payload')
+  @Roles('admin', 'manager', 'supervisor')
+  @ApiOperation({
+    summary: 'Amend a pending free-item request',
+    description:
+      "Cut or clear the free quantities on a VOUCHER_FREE_ITEM request before approving it. " +
+      'Only a free line\'s quantity may change; a free quantity of zero removes that ' +
+      'giveaway. The salesman\'s original request is preserved and the change is audited.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ description: 'The amended request' })
+  amendPayload(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AmendApprovalPayloadDto,
+    @CurrentUser('sub') reviewerId: string,
+    @CurrentUser() reviewer: AuthenticatedUser,
+  ) {
+    return this.approvals.amendPayload(id, dto.payload, reviewerId, reviewer);
   }
 
   @Post(':id/approve')

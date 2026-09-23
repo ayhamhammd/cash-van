@@ -125,6 +125,19 @@ export const PERM_RETURN_CREATE = 'vouchers.return.create';
 /** When set (with create), each return needs admin approval before it posts. */
 export const PERM_RETURN_APPROVAL = 'vouchers.return.approval';
 export const PERM_PRICE_OVERRIDE = 'vouchers.priceOverride';
+/**
+ * The salesman may ASK a supervisor to put free items on a voucher.
+ *
+ * OPT-IN, unlike the capability keys. SYSTEM-OVERVIEW §4.4 records two deliberate
+ * defaults: capabilities that always existed are opt-out, so an older server cannot
+ * hide a tile a rep needs; `requireLocation` is a requirement, so a missing key is
+ * false and an out-of-date server can never lock a rep out. This is the second kind.
+ * It gives stock away, and a server that has not heard of it must not hand a rep
+ * that power by omission.
+ */
+export const PERM_FREE_ITEM_REQUEST = 'vouchers.freeItem.request';
+/** Optional ceiling on a single request, e.g. `vouchers.freeItem.max:5`. */
+export const PERM_FREE_ITEM_MAX_PREFIX = 'vouchers.freeItem.max:';
 // The discount keys moved to common/constants/permissions.ts when discounts were
 // ungated — re-exported so existing importers keep working.
 export {
