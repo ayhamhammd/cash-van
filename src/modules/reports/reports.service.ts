@@ -692,10 +692,22 @@ export class ReportsService {
               MAX(t.item_name) AS "itemName",
               ${unitCols}
               COALESCE(SUM(t.item_qty::numeric), 0) AS "qty",
-              -- What was GIVEN AWAY. A gift line is priced at zero, which is the only
-              -- mark it carries; reporting 15 sold when 3 were giveaways misstates the
-              -- item's real rate to anyone judging performance off this screen.
-              COALESCE(SUM(t.item_qty::numeric) FILTER (WHERE t.unit_price::numeric = 0), 0) AS "freeQty",
+              -- What was GIVEN AWAY. Reporting 15 sold when 3 were giveaways
+              -- misstates the item's real rate to anyone judging performance off
+              -- this screen.
+              --
+              -- Keyed off the line NET, not a zero unit price. An offer's gift is
+              -- priced at zero, but a bonus a supervisor approved is priced normally
+              -- and fully discounted — so the old filter counted it as sold, while
+              -- the handset (which reads the same report offline off a full
+              -- discount) counted it as free. total is the post-discount net, so
+              -- both kinds of free land on the same side of it. Guarded on qty so a
+              -- zero-quantity line is not a giveaway of nothing.
+              COALESCE(
+                SUM(t.item_qty::numeric)
+                  FILTER (WHERE t.total::numeric = 0 AND t.item_qty::numeric > 0),
+                0
+              ) AS "freeQty",
               COALESCE(SUM(t.net_total::numeric), 0) AS "amount",
               COUNT(*)::int AS "lines"
          FROM voucher_transactions t

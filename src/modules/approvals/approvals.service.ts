@@ -350,9 +350,7 @@ export class ApprovalsService {
         );
         resultVoucher = customer.customerNumber;
       } else {
-        const created = await this.vouchers.create(
-          row.payload as unknown as CreateVoucherDto,
-        );
+        const created = await this.vouchers.create(await this.postable(row));
         resultVoucher = created.voucherNumber;
       }
     } catch (e) {
@@ -373,6 +371,54 @@ export class ApprovalsService {
 
     await this.notifyDecision(row);
     return row;
+  }
+
+  /**
+   * The filed payload, as a document that actually leaves the building.
+   *
+   * `vouchers.create` defaults `isPosted` to false and the handset cannot say
+   * otherwise: its request encoder omits every field equal to its default, so the
+   * `isPosted = true` on CreateVoucherRequest never reaches the wire. The mobile
+   * sync path has always re-stamped it on promotion — see sync.service
+   * `promoteVoucher` — but this path did not, so an approved sale was filed as a
+   * DRAFT. A draft moves no stock and, because the outbox enqueue is guarded by
+   * `header.isPosted`, is never exported: the supervisor saw an approval, the
+   * customer had the goods, and the ERP knew nothing about either.
+   *
+   * The store comes with it for the same reason. The app sends no `storeNumber`
+   * (sync injects the rep's van store on promotion), and without one the serial is
+   * keyed to the literal store `'NA'` and the lines leave no van behind.
+   *
+   * An approved request is a completed sale exactly like a synced one, so it is
+   * promoted exactly like one. Deliberately not narrowed to VOUCHER_FREE_ITEM: a
+   * discount, a price override and a return were all sitting in the same drawer.
+   */
+  private async postable(row: ApprovalRequest): Promise<CreateVoucherDto> {
+    const dto = { ...(row.payload as unknown as CreateVoucherDto) };
+    dto.isPosted = true;
+    const store = await this.vanStoreFor(row, dto);
+    dto.transactions = (dto.transactions ?? []).map((l) => ({
+      ...l,
+      storeNumber: l.storeNumber ?? l.fromStoreNumber ?? store,
+    }));
+    return dto;
+  }
+
+  /** A line's own store, else the requesting rep's van, else `'NA'` as sync does. */
+  private async vanStoreFor(
+    row: ApprovalRequest,
+    dto: CreateVoucherDto,
+  ): Promise<string> {
+    const line = (dto.transactions ?? []).find(
+      (l) => l.storeNumber || l.fromStoreNumber || l.toStoreNumber,
+    );
+    const onLine = line?.storeNumber ?? line?.fromStoreNumber ?? line?.toStoreNumber;
+    if (onLine) return onLine;
+    if (row.repId) {
+      const van = await this.vouchers.resolveRepVanStore(row.repId);
+      if (van) return van;
+    }
+    return 'NA';
   }
 
   async reject(
