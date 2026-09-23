@@ -189,6 +189,8 @@ export class AuthService {
       canAddCustomer: user.canAddCustomer,
       canCreateCustomerDirect: user.canCreateCustomerDirect,
       canPrintLineDiscount: user.canPrintLineDiscount,
+      // Read by the app to decide whether a sale offers فيزا at all.
+      canUseCardPayment: user.canUseCardPayment,
       canRequestStock: user.canRequestStock,
       // A dashboard manager/admin decides stock requests as part of running the
       // office; a "stock manager" holds only this flag. Granting it to

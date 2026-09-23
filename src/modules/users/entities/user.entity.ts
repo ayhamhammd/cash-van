@@ -100,6 +100,14 @@ export class User extends BaseEntity {
   @Column({ name: 'can_print_line_discount', type: 'boolean', default: false })
   canPrintLineDiscount!: boolean;
 
+  /**
+   * May this salesman take a sale on Visa? Off by default — it needs a card
+   * terminal in the van and a card-clearing account on the ERP, neither of
+   * which every company has.
+   */
+  @Column({ name: 'can_use_card_payment', type: 'boolean', default: false })
+  canUseCardPayment!: boolean;
+
   @Column({ name: 'can_create_customer_direct', type: 'boolean', default: false })
   canCreateCustomerDirect!: boolean;
 

@@ -115,6 +115,12 @@ export class CreateUserDto {
   })
   @IsOptional() @IsBoolean() canPrintLineDiscount?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'May take a sale on Visa (card). Off by default — needs a terminal in the van and a card-clearing account on the ERP.',
+  })
+  @IsOptional() @IsBoolean() canUseCardPayment?: boolean;
+
   @ApiPropertyOptional({ description: 'May raise a van stock request.' })
   @IsOptional() @IsBoolean() canRequestStock?: boolean;
 
