@@ -1694,11 +1694,20 @@ export class ReportsService {
       // total — including them made the net disagree with the day's takings.
       where.push(`h.trans_kind IN ('SALE', 'RETURN', 'ORDER')`);
     }
-    // CREDIT = at least one on-account payment; CASH = everything else. The same
-    // reading the offers engine uses, so the two never disagree on a voucher.
+    // CREDIT = at least one on-account payment. CARD = paid by card and nothing
+    // on account. CASH = everything else (cash, cheque, transfer).
+    //
+    // Credit wins over card: a sale that is part card, part on account is a sale
+    // with money still owed, and that is what the credit filter is opened to
+    // find. Card is its own bucket rather than part of CASH, because the rep does
+    // not hold that money — it went to the bank through the terminal — and a
+    // report that lists a Visa sale under cash sends someone looking for it in
+    // the rep's drawer.
     const isCredit = `EXISTS (SELECT 1 FROM payments p WHERE p.voucher_number = h.voucher_number AND p.payment_type = 'CREDIT')`;
+    const isCard = `EXISTS (SELECT 1 FROM payments p WHERE p.voucher_number = h.voucher_number AND p.payment_type = 'CARD')`;
     if (q.payment === 'CREDIT') where.push(isCredit);
-    else if (q.payment === 'CASH') where.push(`NOT ${isCredit}`);
+    else if (q.payment === 'CARD') where.push(`${isCard} AND NOT ${isCredit}`);
+    else if (q.payment === 'CASH') where.push(`NOT ${isCredit} AND NOT ${isCard}`);
 
     // Per-voucher line roll-up.
     //
@@ -1775,7 +1784,7 @@ export class ReportsService {
               COALESCE(r.name_ar, r.name_en)                  AS "repName",
               h.customer_number                               AS "customerNumber",
               COALESCE(c.name_ar, c.customer_name, c.name_en) AS "customerName",
-              CASE WHEN ${isCredit} THEN 'CREDIT' ELSE 'CASH' END AS "payment",
+              CASE WHEN ${isCredit} THEN 'CREDIT' WHEN ${isCard} THEN 'CARD' ELSE 'CASH' END AS "payment",
               ${subTotalExpr}        AS "subTotal",
               h.total_tax            AS "totalTax",
               COALESCE(ld.tobacco_tax, 0) AS "tobaccoTax",
@@ -1875,6 +1884,9 @@ export class ReportsService {
     }
     if (payment === 'CASH') where.push(`col.method = 'cash'`);
     else if (payment === 'CREDIT') where.push(`col.method <> 'cash'`);
+    // A collection is never taken by card, so the Visa filter shows none — left
+    // unhandled it fell through to no condition and listed every collection.
+    else if (payment === 'CARD') where.push('1 = 0');
 
     const rows: Array<Record<string, string | null>> = await this.ds.query(
       `SELECT col.id::text          AS "id",
@@ -1997,7 +2009,7 @@ export interface VoucherSummaryRow {
   repName: string | null;
   customerNumber: string | null;
   customerName: string | null;
-  /** CASH / CREDIT for a voucher; the method (cash, cheque, transfer) for a collection. */
+  /** CASH / CARD / CREDIT for a voucher; the method (cash, cheque, transfer) for a collection. */
   payment: string;
   /** Before discount and before ANY tax: netTotal + totalDiscount - totalTax. */
   subTotal: number;

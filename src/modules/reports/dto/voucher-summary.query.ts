@@ -10,7 +10,7 @@ export const VOUCHER_SUMMARY_KINDS = [
 ] as const;
 export type VoucherSummaryKind = (typeof VOUCHER_SUMMARY_KINDS)[number];
 
-export const VOUCHER_SUMMARY_PAYMENTS = ['CASH', 'CREDIT', 'ALL'] as const;
+export const VOUCHER_SUMMARY_PAYMENTS = ['CASH', 'CARD', 'CREDIT', 'ALL'] as const;
 export type VoucherSummaryPayment = (typeof VOUCHER_SUMMARY_PAYMENTS)[number];
 
 export class VoucherSummaryQuery {
@@ -41,7 +41,7 @@ export class VoucherSummaryQuery {
     enum: VOUCHER_SUMMARY_PAYMENTS,
     default: 'ALL',
     description:
-      'CREDIT = the voucher carries at least one on-account payment. CASH = everything else (cash, cheque, transfer), matching how the offers engine reads payment condition.',
+      'CREDIT = the voucher carries at least one on-account payment. CARD = paid by card (Visa) and nothing on account. CASH = everything else (cash, cheque, transfer).',
   })
   @IsOptional()
   @IsIn(VOUCHER_SUMMARY_PAYMENTS)
