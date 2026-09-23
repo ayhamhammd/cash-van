@@ -88,8 +88,11 @@ export class CollectionsController {
       'Record a cash or cheque collection against a customer/invoice. Requires canMakeCollection.',
   })
   @ApiCreatedResponse({ description: 'Collection recorded' })
-  create(@Body() dto: CreateCollectionDto) {
-    return this.collections.create(dto);
+  create(@Body() dto: CreateCollectionDto, @CurrentUser() user: AuthenticatedUser) {
+    // An office user is typing the cheque in with the paper in front of him
+    // and a date field on the form, so a missing due date is an oversight to
+    // stop now — not, as it is for an old handset, a field he never had.
+    return this.collections.create(dto, { requireChequeDueDate: user.repId == null });
   }
 
   @Post('batch-deposit')

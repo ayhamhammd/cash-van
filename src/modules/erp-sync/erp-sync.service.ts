@@ -10,6 +10,8 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Repository } from 'typeorm';
+import { Cheque } from '../collections/entities/cheque.entity';
+import { chequeGaps, describeMissing, type ChequeGap } from '../collections/cheque-gaps';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
@@ -1084,6 +1086,12 @@ export class ErpSyncService {
       amount: number;
       method: string;
       collectedAt: Date;
+      /**
+       * Cheques the ERP cannot register yet, and what each lacks. Present only
+       * when non-empty: the dashboard offers "Complete cheque" instead of an
+       * Export button that can only fail.
+       */
+      chequeGaps?: ChequeGap[];
     }>;
     /**
      * Customers created in the van or the dashboard that have not reached the
@@ -1143,6 +1151,10 @@ export class ErpSyncService {
       ).map((c) => [c.customerNumber, c.nameAr || c.customerName || c.customerNumber]),
     );
 
+    const gapsByCollection = await this.chequeGapsFor(
+      collections.filter((c) => c.method === 'cheque').map((c) => c.id),
+    );
+
     return {
       vouchers: vouchers.map((v) => ({
         voucherNumber: v.voucherNumber,
@@ -1158,6 +1170,7 @@ export class ErpSyncService {
         amount: c.amount,
         method: c.method,
         collectedAt: c.collectedAt,
+        ...(gapsByCollection.get(c.id)?.length ? { chequeGaps: gapsByCollection.get(c.id) } : {}),
       })),
       customers: pendingCustomers.map((r) => ({
         customerNumber: r.ref,
@@ -1183,12 +1196,55 @@ export class ErpSyncService {
     return { queued: true };
   }
 
-  /** Manually queue ONE confirmed collection for ERP export. */
+  /**
+   * Every cheque gap on the given collections, keyed by collection id — one
+   * query however many collections, since the pending list asks about up to 500.
+   */
+  private async chequeGapsFor(collectionIds: string[]): Promise<Map<string, ChequeGap[]>> {
+    const out = new Map<string, ChequeGap[]>();
+    if (!collectionIds.length) return out;
+    const rows = await this.dataSource.getRepository(Cheque).find({
+      where: { collectionId: In(collectionIds) },
+      select: { id: true, collectionId: true, chequeNumber: true, dueDate: true },
+    });
+    const byCol = new Map<string, Cheque[]>();
+    for (const r of rows) byCol.set(r.collectionId, [...(byCol.get(r.collectionId) ?? []), r]);
+    for (const [colId, cheques] of byCol) {
+      const gaps = chequeGaps(cheques);
+      if (gaps.length) out.set(colId, gaps);
+    }
+    return out;
+  }
+
+  /**
+   * Manually queue ONE confirmed collection for ERP export.
+   *
+   * A cheque the ERP cannot identify is refused HERE, before it is queued.
+   * Queueing it only postponed the same refusal to the next drain, where it
+   * surfaced as a dead-letter line an office user had to decode into "go and
+   * find the paper cheque". Refused now, with a code and the cheques' ids, the
+   * dashboard opens the form to complete them on the spot.
+   */
   async exportCollection(id: string): Promise<{ queued: boolean }> {
     const c = await this.collections.findOne({ where: { id } });
     if (!c) throw new NotFoundException(`Collection ${id} not found`);
     if (c.status !== 'confirmed') {
       throw new BadRequestException('Only confirmed collections can be exported');
+    }
+    if (c.method === 'cheque') {
+      const gaps = (await this.chequeGapsFor([id])).get(id) ?? [];
+      if (gaps.length) {
+        const missing = [...new Set(gaps.flatMap((g) => g.missing))];
+        throw new BadRequestException({
+          code: 'cheque_details_missing',
+          message:
+            `Cheque collection ${c.collectionNumber ?? id} is missing its ` +
+            `${describeMissing(missing)}. Complete the cheque, and it is sent to the ERP.`,
+          collectionId: id,
+          collectionNumber: c.collectionNumber ?? null,
+          chequeGaps: gaps,
+        });
+      }
     }
     await this.outbox.enqueue('PAYMENT', id);
     return { queued: true };
@@ -1199,13 +1255,19 @@ export class ErpSyncService {
     vouchers: number;
     collections: number;
     customers: number;
+    /** Cheque collections held back until their details are completed. */
+    chequesIncomplete: number;
   }> {
     const pending = await this.listPendingExports();
     for (const v of pending.vouchers) {
       const kind = OUTBOX_KIND_BY_TRANS[v.transKind];
       if (kind) await this.outbox.enqueue(kind, v.voucherNumber);
     }
+    // Skipped, not queued: a cheque with no due date would only dead-letter on
+    // the next drain. It stays in the pending list, flagged, until completed.
+    let chequesIncomplete = 0;
     for (const c of pending.collections) {
+      if (c.chequeGaps?.length) { chequesIncomplete++; continue; }
       await this.outbox.enqueue('PAYMENT', c.id);
     }
     // Customers are ALREADY queued — pushCustomer enqueues them the moment the
@@ -1215,8 +1277,11 @@ export class ErpSyncService {
     await this.outbox.drain().catch(() => undefined);
     return {
       vouchers: pending.vouchers.length,
-      collections: pending.collections.length,
+      // What was actually queued — a count that included the held-back cheques
+      // would tell the office they had gone when they had not.
+      collections: pending.collections.length - chequesIncomplete,
       customers: pending.customers.length,
+      chequesIncomplete,
     };
   }
 

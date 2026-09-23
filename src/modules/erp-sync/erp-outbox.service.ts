@@ -10,6 +10,7 @@ import { ItemUnit } from '../units/entities/item-unit.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { Collection } from '../collections/entities/collection.entity';
 import { Cheque } from '../collections/entities/cheque.entity';
+import { chequeGaps, describeMissing, type ChequeGap } from '../collections/cheque-gaps';
 import { Customer } from '../customers/entities/customer.entity';
 import { erpCustomerBody } from './erp-customer-payload';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
@@ -110,11 +111,54 @@ export class ErpOutboxService {
     return this.outbox.findOne({ where: { kind, ref } });
   }
 
-  list(status?: ErpOutboxStatus): Promise<ErpOutbox[]> {
-    return this.outbox.find({
+  /**
+   * The queue, with each unposted receipt that is waiting on cheque details
+   * flagged as such.
+   *
+   * The flag is what lets the dashboard offer "Complete cheque" on the row
+   * instead of Retry. Retrying one of these can only fail the same way — the
+   * date is on a piece of paper in the office, not anywhere a retry can reach —
+   * and a Retry button on it teaches people that the queue is broken.
+   *
+   * `collectionNumber` because `ref` is the collection's UUID, and nobody in
+   * the office knows a collection by that.
+   */
+  async list(status?: ErpOutboxStatus): Promise<
+    Array<ErpOutbox & { collectionNumber?: string | null; chequeGaps?: ChequeGap[] }>
+  > {
+    const rows = await this.outbox.find({
       where: status ? { status } : {},
       order: { createdAt: 'DESC' },
       take: 200,
+    });
+    const paymentIds = rows
+      .filter((r) => r.kind === 'PAYMENT' && r.status !== 'posted')
+      .map((r) => r.ref);
+    if (!paymentIds.length) return rows;
+
+    const [cols, cheques] = await Promise.all([
+      this.collections.find({
+        where: { id: In(paymentIds) },
+        select: { id: true, collectionNumber: true, method: true },
+      }),
+      this.cheques.find({
+        where: { collectionId: In(paymentIds) },
+        select: { id: true, collectionId: true, chequeNumber: true, dueDate: true },
+      }),
+    ]);
+    const colById = new Map(cols.map((c) => [c.id, c]));
+    const chequesBy = new Map<string, Cheque[]>();
+    for (const ch of cheques) {
+      chequesBy.set(ch.collectionId, [...(chequesBy.get(ch.collectionId) ?? []), ch]);
+    }
+    return rows.map((r) => {
+      const col = r.kind === 'PAYMENT' ? colById.get(r.ref) : undefined;
+      if (!col) return r;
+      const gaps = col.method === 'cheque' ? chequeGaps(chequesBy.get(col.id) ?? []) : [];
+      return Object.assign(r, {
+        collectionNumber: col.collectionNumber ?? null,
+        ...(gaps.length ? { chequeGaps: gaps } : {}),
+      });
     });
   }
 
@@ -612,7 +656,12 @@ export class ErpOutboxService {
     col: Collection,
     customerName: string | null | undefined,
   ): Promise<Record<string, string>> {
-    const rows = await this.cheques.find({ where: { collectionId: col.id } });
+    // Ordered, so "the first cheque" is the same cheque on every attempt — an
+    // unordered find could key one retry's receipt on a different paper.
+    const rows = await this.cheques.find({
+      where: { collectionId: col.id },
+      order: { createdAt: 'ASC', id: 'ASC' },
+    });
     const first = rows[0];
     if (!first) return {};
     const out: Record<string, string> = {};
@@ -629,15 +678,18 @@ export class ErpOutboxService {
     // Named precisely, because this string is what the office reads in
     // GET /erp/outbox?status=dead_letter and what tells them which field to
     // fill via PATCH /cheques/:id/details.
-    const unidentified: string[] = [];
-    if (!number) unidentified.push('cheque number');
-    if (!due) unidentified.push('due date');
-    if (unidentified.length) {
+    //
+    // Every cheque, by the same rule the Export button and the dashboard's
+    // "Complete cheque" form use (collections/cheque-gaps), so the three can
+    // never disagree about whether a collection is ready to go.
+    const gaps = chequeGaps(rows);
+    if (gaps.length) {
+      const missing = [...new Set(gaps.flatMap((g) => g.missing))];
       throw new TerminalPayloadError(
         `Cheque collection ${col.collectionNumber ?? col.id} is missing its ` +
-          `${unidentified.join(' and ')}. The ERP will not register a cheque it ` +
-          `cannot identify — complete it with PATCH /cheques/:id/details, which ` +
-          `pushes the receipt again.`,
+          `${describeMissing(missing)}. The ERP will not register a cheque it ` +
+          `cannot identify — open the collection and use "Complete cheque", ` +
+          `which saves the details and pushes the receipt again.`,
       );
     }
     if (number) out.checkNumber = number;

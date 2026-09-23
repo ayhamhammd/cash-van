@@ -17,6 +17,7 @@ import {
 } from 'typeorm';
 
 import { Collection } from './entities/collection.entity';
+import { chequeMissing } from './cheque-gaps';
 import { Cheque } from './entities/cheque.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
@@ -169,7 +170,17 @@ export class CollectionsService {
     });
   }
 
-  async create(dto: CreateCollectionDto): Promise<Collection> {
+  async create(
+    dto: CreateCollectionDto,
+    opts: {
+      /**
+       * Refuse a cheque with no due date. Set for the dashboard, whose form has
+       * a date field; NOT for the sync path, where a refusal lands after the
+       * salesman has left the shop and takes the money off the books.
+       */
+      requireChequeDueDate?: boolean;
+    } = {},
+  ): Promise<Collection> {
     /**
      * A retry must not credit the customer twice.
      *
@@ -259,10 +270,15 @@ export class CollectionsService {
       // naming the date as what is missing) and the office completes it from
       // the paper cheque via PATCH /cheques/:id/details, which re-pushes. Make
       // the date required again once the handsets can ask for it.
+      //
+      // The dashboard is the exception — see `requireChequeDueDate`. Its form
+      // has always had a date field; a cheque saved from it without one is a
+      // cheque that will dead-letter for no reason but an empty box.
       const unidentified = dto.cheques
         .map((c, i) => {
-          const missing: string[] = [];
-          if (!c.chequeNumber || !c.chequeNumber.trim()) missing.push('chequeNumber');
+          const missing = chequeMissing(c).filter(
+            (f) => f === 'chequeNumber' || opts.requireChequeDueDate,
+          );
           return missing.length ? `cheque ${i + 1}: ${missing.join(', ')}` : null;
         })
         .filter((x): x is string => x !== null);

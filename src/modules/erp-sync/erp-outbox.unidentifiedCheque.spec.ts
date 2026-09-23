@@ -63,9 +63,22 @@ describe('buildPayment — a cheque that cannot identify itself', () => {
     await expect(build([{ chequeNumber: '4893', dueDate: null }])).rejects.toThrow(
       /C-203-000024/,
     );
+    // Where to fix it is the dashboard's button, not the API route it calls:
+    // the people reading this line do not send PATCH requests.
     await expect(build([{ chequeNumber: '4893', dueDate: null }])).rejects.toThrow(
-      /cheques\/:id\/details/,
+      /Complete cheque/,
     );
+  });
+
+  it('checks EVERY cheque on the collection, not only the first', async () => {
+    // The first is complete; the second is not. The paper for the second could
+    // not be chased or cleared, so the receipt waits for it too.
+    await expect(
+      build([
+        { chequeNumber: '4893', dueDate: '2026-11-30' },
+        { chequeNumber: '4894', dueDate: null },
+      ]),
+    ).rejects.toThrow(/due date/);
   });
 
   it('names BOTH fields when neither is present', async () => {
