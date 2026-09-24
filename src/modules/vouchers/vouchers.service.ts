@@ -914,6 +914,7 @@ export class VouchersService implements OnModuleInit {
         totalDiscountValue: filsToJod(calc.headerDiscountFils),
         totalDiscountPercentage: (dto.totalDiscountPercentage ?? '0').toString(),
         appliedOfferIds: dto.appliedOfferIds ?? [],
+        notes: dto.notes?.trim() || null,
         isPosted: dto.isPosted ?? false,
         isEdit: false,
         // Frozen here and never recalculated — the document keeps the tax

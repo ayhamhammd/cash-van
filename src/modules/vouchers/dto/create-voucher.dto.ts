@@ -14,6 +14,7 @@ import {
   IsUUID,
   Length,
   Max,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -236,6 +237,12 @@ export class CreateVoucherDto {
   @IsOptional()
   @IsNumberString()
   totalDiscountPercentage?: string;
+
+  @ApiPropertyOptional({ description: "The rep's note on this voucher. Shown on the dashboard and sent to the ERP." })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notes?: string;
 
   @ApiPropertyOptional({ default: false })
   @IsOptional()

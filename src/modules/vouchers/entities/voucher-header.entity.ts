@@ -97,6 +97,10 @@ export class VoucherHeader extends BaseEntity {
   @Column({ name: 'applied_offer_ids', type: 'jsonb', default: () => "'[]'::jsonb" })
   appliedOfferIds!: string[];
 
+  /** The rep's free-text note on the sale, as typed on the handset. */
+  @Column({ type: 'text', nullable: true })
+  notes?: string | null;
+
   @Column({ name: 'is_posted', type: 'boolean', default: false })
   isPosted!: boolean;
 

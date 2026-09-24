@@ -1045,6 +1045,7 @@ export class ErpOutboxService {
         ...(await this.customerRef(header.customerNumber)),
         warehouseCode: this.vanStoreOf(lines, header.userCode), // attribute to the van
         invoiceDate: header.inDate,
+        ...(header.notes ? { notes: header.notes } : {}),
         ...payment,
         items,
       },
