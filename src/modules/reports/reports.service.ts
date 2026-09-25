@@ -18,7 +18,7 @@ export interface EodRow {
   creditSalesFils: number;
   cashReturnsFils: number;
   totalDiscountFils: number;
-  expectedCashFils: number; // cashSales + collectedCash − cashReturns
+  expectedCashFils: number; // cashSales + collectedCash — returns are the customer's credit, not cash
   previousBalanceFils: number; // carried from prior settlements
   totalDueFils: number; // expectedCash + previousBalance
   visitCount: number; // customer visits in range
@@ -340,7 +340,11 @@ export class ReportsService {
         SELECT r.id AS rep_id,
           COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CASH'   AND h.trans_kind='SALE'),0)   AS cash_sales,
           COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CREDIT' AND h.trans_kind='SALE'),0)   AS credit_sales,
-          COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CASH'   AND h.trans_kind='RETURN'),0) AS cash_returns
+          -- Every return, whatever it was recorded as: it is the customer's credit,
+          -- shown for the day's picture and never taken off expected cash. (Only
+          -- CASH-typed returns used to count, and be subtracted — new returns are
+          -- all CREDIT, so that column would now read zero.)
+          COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE h.trans_kind='RETURN'),0) AS cash_returns
         FROM payments p
         JOIN voucher_headers h ON h.voucher_number = p.voucher_number
         JOIN users u ON u.user_number = h.user_code
@@ -434,8 +438,9 @@ export class ReportsService {
     );
     return rows.map((r) => {
       const n = (k: string) => Number(r[k] ?? 0);
-      const expectedCashFils =
-        n('cashSalesFils') + n('collectedCashFils') - n('cashReturnsFils');
+      // Returns are NOT subtracted: a return is credited to the customer and hands
+      // no money back, so it takes nothing out of the rep's drawer.
+      const expectedCashFils = n('cashSalesFils') + n('collectedCashFils');
       const previousBalanceFils = n('previousBalanceFils');
       return {
         repId: r.repId,

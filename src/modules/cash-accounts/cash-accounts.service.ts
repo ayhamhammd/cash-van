@@ -335,8 +335,8 @@ export class CashAccountsService {
   ): Promise<{ externalId: string; description: string; date?: string; lines: Array<{ accountCode: string; debit: number; credit: number; description: string }> } | null> {
     const [s] = await this.ds.query(
       `SELECT rep_id AS "repId", to_char(period_to,'YYYY-MM-DD') AS "periodTo",
-              cash_sales_fils AS "cashSales", cash_returns_fils AS "cashReturns",
-              collected_cash_fils AS "collectedCash", collected_cheque_fils AS "collectedCheque",
+              expected_cash_fils AS "expectedCash",
+              collected_cheque_fils AS "collectedCheque",
               received_fils AS "received"
          FROM salesman_settlement WHERE id = $1`,
       [settlementId],
@@ -358,10 +358,13 @@ export class CashAccountsService {
     const chequeCode = acct.chequeCollectionAccount.code;
 
     const n = (v: unknown) => Number(v ?? 0);
-    const salesCash = n(s.cashSales) - n(s.cashReturns);
-    const collectionCash = n(s.collectedCash);
     const chequeBal = n(s.collectedCheque);
-    const expected = salesCash + collectionCash;
+    // The expected cash the settlement itself RECORDED — not re-derived from its
+    // parts. Re-deriving it here (as sales − returns + collections) would post a
+    // journal that disagrees with the settlement it is for whenever the rule
+    // changes; returns, for one, are no longer taken off it. Reading the stored
+    // figure keeps every journal, old or new, faithful to its own settlement.
+    const expected = n(s.expectedCash);
     const received = n(s.received);
     const shortfall = Math.max(0, expected - received);
     const overpay = Math.max(0, received - expected);

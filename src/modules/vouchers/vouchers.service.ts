@@ -1,3 +1,4 @@
+import { returnsAreCredit } from './returns/returns-are-credit';
 import {
   BadRequestException,
   ConflictException,
@@ -294,6 +295,10 @@ export class VouchersService implements OnModuleInit {
   }
 
   async create(dto: CreateVoucherDto): Promise<VoucherHeader> {
+    // First, before anything reads the payments: a return is the customer's
+    // credit, never a cash refund — whatever an old phone sent. See
+    // returns/returns-are-credit.
+    returnsAreCredit(dto);
     await this.requireCustomerForErp(dto);
     // F10 gate: salesmen need explicit permission for returns, discounts and
     // price overrides — otherwise the client must file an approval request
