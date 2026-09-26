@@ -44,6 +44,8 @@ export interface AppSettingsView {
   tobaccoTaxEnabled: boolean;
   damagedReturnsEnabled: boolean;
   damagedWarehouseCode: string | null;
+  targetsIncludeTax: boolean;
+  targetsSalesIncludeCash: boolean;
   accounting: {
     /** The three main settlement accounts (ERP GL refs). null = unset. */
     salesAccount: { id: string | null; code: string | null };
@@ -411,6 +413,8 @@ export class SettingsService {
       tobaccoTaxEnabled: row.tobaccoTaxEnabled,
       damagedReturnsEnabled: row.damagedReturnsEnabled,
       damagedWarehouseCode: row.damagedWarehouseCode ?? null,
+      targetsIncludeTax: row.targetsIncludeTax,
+      targetsSalesIncludeCash: row.targetsSalesIncludeCash,
       accounting: {
         salesAccount: { id: row.erpSalesAccountId ?? null, code: row.erpSalesAccountCode ?? null },
         cashCollectionAccount: { id: row.erpCashCollectionAccountId ?? null, code: row.erpCashCollectionAccountCode ?? null },

@@ -162,6 +162,61 @@ run('commission targets (real DB)', () => {
     expect(row.totalSalesFils).toBe(4_000_000);
   });
 
+  // ── Program features: what the sales figure measures ───────────────────────
+
+  async function withSettings(
+    flags: { includeTax?: boolean; includeCash?: boolean },
+    fn: () => Promise<void>,
+  ) {
+    const [before] = await q(
+      `SELECT targets_include_tax AS t, targets_sales_include_cash AS c FROM app_settings ORDER BY id LIMIT 1`,
+    );
+    await q(
+      `UPDATE app_settings SET targets_include_tax = $1, targets_sales_include_cash = $2
+        WHERE id = (SELECT id FROM app_settings ORDER BY id LIMIT 1)`,
+      [flags.includeTax ?? true, flags.includeCash ?? true],
+    );
+    try {
+      await fn();
+    } finally {
+      await q(
+        `UPDATE app_settings SET targets_include_tax = $1, targets_sales_include_cash = $2
+          WHERE id = (SELECT id FROM app_settings ORDER BY id LIMIT 1)`,
+        [before.t, before.c],
+      );
+    }
+  }
+
+  it('measures sales before tax when tax is switched off', async () => {
+    // V2 is a 2,000 credit sale; say 16% of it was tax, so 1,724.138 before tax.
+    await q(`UPDATE voucher_headers SET total = 1724.138 WHERE voucher_number = $1`, [`${P}-V2`]);
+    try {
+      await withSettings({ includeTax: true }, async () => {
+        const row = await targets.getForRep(repId, YEAR, MONTH);
+        expect(row.creditSalesFils).toBe(2_500_000);
+      });
+      await withSettings({ includeTax: false }, async () => {
+        const row = await targets.getForRep(repId, YEAR, MONTH);
+        expect(row.creditSalesFils).toBe(500_000 + 1_724_138);
+        expect(row.cashSalesFils).toBe(1_500_000);
+        expect(row.totalSalesFils).toBe(1_500_000 + 500_000 + 1_724_138);
+      });
+    } finally {
+      await q(`UPDATE voucher_headers SET total = net_total WHERE voucher_number = $1`, [`${P}-V2`]);
+    }
+  });
+
+  it('leaves cash sales out of the sales figure when told to, but still shows them', async () => {
+    await withSettings({ includeCash: false }, async () => {
+      await setTarget({ cashPct: 3, salesTargetFils: 5_000_000 });
+      const row = await targets.getForRep(repId, YEAR, MONTH);
+      expect(row.totalSalesFils).toBe(2_500_000);
+      expect(row.salesProgressPct).toBe(50);
+      expect(row.cashSalesFils).toBe(1_500_000);
+      expect(row.commissionOnCashFils).toBe(45_000);
+    });
+  });
+
   it('does not count invoices the office raised in the ERP', async () => {
     const row = await targets.getForRep(repId, YEAR, MONTH);
     expect(row.actualAmount).toBe(row.actualVanAmount);

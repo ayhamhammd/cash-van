@@ -120,6 +120,22 @@ export class UpdateAppSettingsDto {
   damagedReturnsEnabled?: boolean;
 
   @ApiPropertyOptional({
+    example: true,
+    description: 'Program feature: salesman target figures and progress include tax (OFF ⇒ before tax).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  targetsIncludeTax?: boolean;
+
+  @ApiPropertyOptional({
+    example: true,
+    description: 'Program feature: cash sales count in the salesman sales figure (OFF ⇒ credit sales only).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  targetsSalesIncludeCash?: boolean;
+
+  @ApiPropertyOptional({
     example: 'DMG',
     nullable: true,
     description: 'ERP warehouse code damaged/expired returns are pushed to (instead of the van).',

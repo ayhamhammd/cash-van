@@ -170,6 +170,14 @@ export class AppSettings {
   @Column({ name: 'damaged_returns_enabled', type: 'boolean', default: false })
   damagedReturnsEnabled!: boolean;
 
+  /** Program feature: salesman target figures and progress include tax. */
+  @Column({ name: 'targets_include_tax', type: 'boolean', default: true })
+  targetsIncludeTax!: boolean;
+
+  /** Program feature: cash sales count in a salesman's sales figure and progress. */
+  @Column({ name: 'targets_sales_include_cash', type: 'boolean', default: true })
+  targetsSalesIncludeCash!: boolean;
+
   /**
    * ERP warehouse code a damaged/expired return is pushed to (instead of the van),
    * so the ERP quarantines the goods. Null → fall back to the van. See

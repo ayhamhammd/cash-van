@@ -81,6 +81,15 @@ export interface TargetHistoryRow extends TargetRow {
  * multiplied by 1000 here once, which made every collection and its commission
  * a thousand times too large.
  */
+/**
+ * A payment row carries the grand total WITH tax. With targets_include_tax off,
+ * each voucher's payments are scaled by its own net/gross ratio, so a figure is
+ * the amount before tax for exactly that document.
+ */
+const TAX_FACTOR = `(CASE WHEN COALESCE((SELECT s.targets_include_tax FROM app_settings s ORDER BY s.id LIMIT 1), true)
+       THEN 1
+       ELSE COALESCE(h.total::numeric / NULLIF(h.net_total::numeric, 0), 1) END)`;
+
 const ACTUALS_JOINS = `
   LEFT JOIN (
     SELECT h.user_code, COALESCE(SUM(ROUND(h.total * 1000)), 0)::bigint AS amount_fils
@@ -107,8 +116,10 @@ const ACTUALS_JOINS = `
     -- and part on account — paying the whole of a half-paid sale at the cash
     -- rate is a real overpayment, and it is invisible in a monthly total.
     SELECT h.user_code,
-           SUM(CASE WHEN p.payment_type = 'CREDIT' THEN 0 ELSE ROUND(p.amount::numeric * 1000) END)::bigint AS cash_fils,
-           SUM(CASE WHEN p.payment_type = 'CREDIT' THEN ROUND(p.amount::numeric * 1000) ELSE 0 END)::bigint AS credit_fils
+           SUM(CASE WHEN p.payment_type = 'CREDIT' THEN 0
+                    ELSE ROUND(p.amount::numeric * 1000 * ${TAX_FACTOR}) END)::bigint AS cash_fils,
+           SUM(CASE WHEN p.payment_type = 'CREDIT'
+                    THEN ROUND(p.amount::numeric * 1000 * ${TAX_FACTOR}) ELSE 0 END)::bigint AS credit_fils
       FROM voucher_headers h
       JOIN payments p ON p.voucher_number = h.voucher_number
      WHERE h.trans_kind = 'SALE' AND h.is_posted = true AND h.deleted_at IS NULL
@@ -151,7 +162,9 @@ const SELECT_COLS = `
   COALESCE(t.collection_pct, 0)     AS "collectionPct",
   COALESCE(sp.cash_fils, 0)         AS "cashSalesFils",
   COALESCE(sp.credit_fils, 0)       AS "creditSalesFils",
-  COALESCE(co.amount_fils, 0)       AS "collectedFils"
+  COALESCE(co.amount_fils, 0)       AS "collectedFils",
+  COALESCE((SELECT s.targets_sales_include_cash FROM app_settings s ORDER BY s.id LIMIT 1), true)
+                                    AS "salesIncludeCash"
 `;
 
 @Injectable()
@@ -327,7 +340,11 @@ function commission(r: Record<string, string | null>) {
 
   const cashSalesFils = n('cashSalesFils');
   const creditSalesFils = n('creditSalesFils');
-  const totalSalesFils = cashSalesFils + creditSalesFils;
+  // Cash sales always keep their own figure and commission; the setting only
+  // decides whether they also count in the sales total the target measures.
+  const includeCashRaw = r.salesIncludeCash as unknown;
+  const salesIncludeCash = includeCashRaw !== false && includeCashRaw !== 'false';
+  const totalSalesFils = (salesIncludeCash ? cashSalesFils : 0) + creditSalesFils;
   const collectedFils = n('collectedFils');
 
   const cashPct = n('cashPct');
