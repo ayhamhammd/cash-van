@@ -75,7 +75,7 @@ export interface ErpStatementLine {
    * that branched on "INVOICE or else" therefore called a debit voucher a
    * payment, which says the opposite of what it is.
    */
-  type: 'INVOICE' | 'PAYMENT' | 'JOURNAL';
+  type: 'INVOICE' | 'PAYMENT' | 'CREDIT_NOTE' | 'JOURNAL';
   reference: string;
   description: string;
   debit: number;
