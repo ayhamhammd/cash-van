@@ -141,6 +141,23 @@ const ACTUALS_JOINS = `
        AND c.collected_at >= $1::date AND c.collected_at < $2::date
      GROUP BY c.rep_id
   ) co ON co.rep_id = r.id
+  LEFT JOIN (
+    -- The salesman's own tax share this month, as net/gross of his sales. A
+    -- collection names no invoice, so its tax is taken out at this share.
+    SELECT h.user_code,
+           SUM(h.total::numeric) / NULLIF(SUM(h.net_total::numeric), 0) AS ratio
+      FROM voucher_headers h
+     WHERE h.trans_kind = 'SALE' AND h.is_posted = true AND h.deleted_at IS NULL
+       AND h.in_date >= $1::date AND h.in_date < $2::date
+     GROUP BY h.user_code
+  ) tr ON tr.user_code = u.user_number
+  LEFT JOIN (
+    -- The company's, for a salesman who sold nothing this month.
+    SELECT SUM(h.total::numeric) / NULLIF(SUM(h.net_total::numeric), 0) AS ratio
+      FROM voucher_headers h
+     WHERE h.trans_kind = 'SALE' AND h.is_posted = true AND h.deleted_at IS NULL
+       AND h.in_date >= $1::date AND h.in_date < $2::date
+  ) tall ON true
 `;
 
 const SELECT_COLS = `
@@ -162,7 +179,10 @@ const SELECT_COLS = `
   COALESCE(t.collection_pct, 0)     AS "collectionPct",
   COALESCE(sp.cash_fils, 0)         AS "cashSalesFils",
   COALESCE(sp.credit_fils, 0)       AS "creditSalesFils",
-  COALESCE(co.amount_fils, 0)       AS "collectedFils",
+  ROUND(COALESCE(co.amount_fils, 0) *
+        CASE WHEN COALESCE((SELECT s.targets_include_tax FROM app_settings s ORDER BY s.id LIMIT 1), true)
+             THEN 1 ELSE COALESCE(tr.ratio, tall.ratio, 1) END)::bigint
+                                    AS "collectedFils",
   COALESCE((SELECT s.targets_sales_include_cash FROM app_settings s ORDER BY s.id LIMIT 1), true)
                                     AS "salesIncludeCash"
 `;

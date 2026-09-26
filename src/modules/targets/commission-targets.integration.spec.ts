@@ -206,6 +206,23 @@ run('commission targets (real DB)', () => {
     }
   });
 
+  it('takes tax out of collections at the salesman own tax share when tax is off', async () => {
+    // His sales this month: 4,000 gross, of which V2's 2,000 is 1,724.138 net,
+    // so his net/gross share is 3,724.138 / 4,000.
+    await q(`UPDATE voucher_headers SET total = 1724.138 WHERE voucher_number = $1`, [`${P}-V2`]);
+    try {
+      await withSettings({ includeTax: true }, async () => {
+        expect((await targets.getForRep(repId, YEAR, MONTH)).collectedFils).toBe(800_000);
+      });
+      await withSettings({ includeTax: false }, async () => {
+        const row = await targets.getForRep(repId, YEAR, MONTH);
+        expect(row.collectedFils).toBe(Math.round(800_000 * (3724.138 / 4000)));
+      });
+    } finally {
+      await q(`UPDATE voucher_headers SET total = net_total WHERE voucher_number = $1`, [`${P}-V2`]);
+    }
+  });
+
   it('leaves cash sales out of the sales figure when told to, but still shows them', async () => {
     await withSettings({ includeCash: false }, async () => {
       await setTarget({ cashPct: 3, salesTargetFils: 5_000_000 });
