@@ -87,6 +87,25 @@ export interface ErpStatement {
   lines: ErpStatementLine[];
 }
 
+/**
+ * ERP `GET accounts/by-code/{code}/statement` — one GL account's movements with
+ * a running balance, major units, debit-positive. Same line shape as a customer
+ * statement, so one parser reads both.
+ */
+export interface ErpAccountStatement {
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  accountType: string;
+  from: string | null;
+  to: string | null;
+  openingBalance: number;
+  closingBalance: number;
+  totalDebit: number;
+  totalCredit: number;
+  lines: ErpStatementLine[];
+}
+
 /** ERP `GET accounts/by-code/{code}/balance` — one GL account, major units. */
 export interface ErpAccountBalance {
   accountId: string;
@@ -814,6 +833,22 @@ export class ErpSyncService {
     );
   }
 
+  /** A GL account's statement from the ERP, keyed by chart-of-accounts code. */
+  async getErpAccountStatement(
+    code: string,
+    range: { from?: string; to?: string } = {},
+  ): Promise<ErpAccountStatement | null> {
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey || !code) return null;
+    const q = new URLSearchParams();
+    if (range.from) q.set('from', range.from);
+    if (range.to) q.set('to', range.to);
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return this.erp.getOne<ErpAccountStatement>(
+      `accounts/by-code/${encodeURIComponent(code)}/statement${suffix}`,
+    );
+  }
+
   // ── Id-resolving wrappers (what controllers call) ───────────────────────────
   // Each returns a small envelope with `source: 'erp' | 'unavailable'` so the UI
   // can label a live figure vs. a gap (ERP off, not linked, or fetch failed)
@@ -847,6 +882,37 @@ export class ErpSyncService {
       return { source: 'erp', reason: null, balance: erp.balance, creditLimit: erp.creditLimit };
     } catch {
       return { source: 'unavailable', reason: 'fetch_failed', balance: null };
+    }
+  }
+
+  /**
+   * A salesman's account statement, from the ERP — the only statement of his
+   * account there is.
+   *
+   * His account is the GL account `reps.erp_account_code`. cash-van used to show
+   * that account's ERP balance beside a figure of its own (the cash-box custody,
+   * built from its own vouchers), and a salesman had two different answers to
+   * "what do I owe". Now both the balance and the movements come from the ERP.
+   *
+   * Same envelope as a customer's: `unavailable` with a reason (unlinked |
+   * erp_off | not_found | fetch_failed) so a screen can say why, never a guess.
+   */
+  async repErpStatementById(
+    repId: string,
+    range: { from?: string; to?: string } = {},
+  ): Promise<ErpAccountStatement | { source: 'unavailable'; reason: string }> {
+    const rep = await this.reps.findOne({
+      where: { id: repId },
+      select: { id: true, erpAccountCode: true },
+    });
+    if (!rep?.erpAccountCode) return { source: 'unavailable', reason: 'unlinked' };
+    if (!(await this.erpConfigReady())) return { source: 'unavailable', reason: 'erp_off' };
+    try {
+      const erp = await this.getErpAccountStatement(rep.erpAccountCode, range);
+      if (!erp) return { source: 'unavailable', reason: 'not_found' };
+      return erp;
+    } catch {
+      return { source: 'unavailable', reason: 'fetch_failed' };
     }
   }
 

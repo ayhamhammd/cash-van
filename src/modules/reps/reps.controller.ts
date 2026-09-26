@@ -19,6 +19,7 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiParam,
+  ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
 
@@ -107,6 +108,27 @@ export class RepsController {
     return this.erp.repErpBalanceById(rep.id);
   }
 
+  @Get('me/erp-statement')
+  @ApiOperation({
+    summary: 'My account statement from the ERP (live)',
+    description:
+      "The signed-in salesman's account statement — his linked ERP GL account's " +
+      'movements with a running balance, read live from the ERP. The same book as ' +
+      'me/erp-balance. Optional from/to (YYYY-MM-DD). Returns the statement, or ' +
+      '{ source: "unavailable", reason }.',
+  })
+  @ApiQuery({ name: 'from', required: false, description: 'YYYY-MM-DD, inclusive' })
+  @ApiQuery({ name: 'to', required: false, description: 'YYYY-MM-DD, inclusive' })
+  @ApiOkResponse({ description: 'ERP account statement, or an unavailable envelope' })
+  async myErpStatement(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const rep = await this.reps.findByUserIdOrThrow(user.sub);
+    return this.erp.repErpStatementById(rep.id, { from, to });
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get rep', description: 'Fetch a single rep by id.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
@@ -150,6 +172,28 @@ export class RepsController {
   ) {
     await this.repScope.assertCanSeeRep(user, id);
     return this.erp.repErpBalanceById(id);
+  }
+
+  @Get(':id/erp-statement')
+  @ApiOperation({
+    summary: "A rep's account statement from the ERP (live)",
+    description:
+      "The rep's linked ERP GL account movements with a running balance, read live " +
+      'from the ERP. Rep-scoped. Optional from/to (YYYY-MM-DD). Returns the statement, ' +
+      'or { source: "unavailable", reason }.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Rep id' })
+  @ApiQuery({ name: 'from', required: false, description: 'YYYY-MM-DD, inclusive' })
+  @ApiQuery({ name: 'to', required: false, description: 'YYYY-MM-DD, inclusive' })
+  @ApiOkResponse({ description: 'ERP account statement, or an unavailable envelope' })
+  async erpStatement(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    await this.repScope.assertCanSeeRep(user, id);
+    return this.erp.repErpStatementById(id, { from, to });
   }
 
   @Get(':id/kpis')
