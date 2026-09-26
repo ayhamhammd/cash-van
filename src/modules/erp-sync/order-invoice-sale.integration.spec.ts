@@ -73,7 +73,7 @@ run('an invoiced order becomes the salesman sale (real DB)', () => {
       await q(`DELETE FROM payments WHERE voucher_number = $1`, [v]);
       await q(`DELETE FROM voucher_transactions WHERE voucher_number = $1`, [v]);
     }
-    await q(`DELETE FROM voucher_headers WHERE voucher_number IN ($1,$2,$3)`, [`RET-${P}-1`, SALE, ORDER]);
+    await q(`DELETE FROM voucher_headers WHERE voucher_number IN ($1,$2,$3,$4)`, [`RET-${P}-1`, `SAL-${P}-1`, SALE, ORDER]);
     await q(`DELETE FROM erp_id_map WHERE erp_id = $1 OR local_id = $1`, [SALE]);
     await q(`DELETE FROM erp_invoices WHERE erp_id = $1`, [ERP_ID]);
     await q(`DELETE FROM van_stock WHERE product_id IN (SELECT id FROM item_cart WHERE item_number = $1)`, [ITEM]);
@@ -276,6 +276,22 @@ run('an invoiced order becomes the salesman sale (real DB)', () => {
     await apply(invoice({ status: 'voided' }));
     const [n] = await q(`SELECT count(*)::int AS n FROM voucher_headers WHERE voucher_number = $1`, [SALE]);
     expect(n.n).toBe(0);
+  });
+
+  it('leaves the invoice alone when the order was already sold from the dashboard', async () => {
+    await q(`DELETE FROM erp_invoices WHERE erp_id = $1`, [ERP_ID]);
+    await q(
+      `INSERT INTO voucher_headers (voucher_number, trans_kind, user_code, customer_number, reference_voucher_number, in_date, is_posted)
+       VALUES ($1,'SALE',$2,$3,$4,'2026-03-10',TRUE)`,
+      [`SAL-${P}-1`, userCode, customerNumber, ORDER],
+    );
+    await apply(invoice());
+    const [n] = await q(`SELECT count(*)::int AS n FROM voucher_headers WHERE voucher_number = $1`, [SALE]);
+    expect(n.n).toBe(0);
+    const [row] = await q(`SELECT count(*)::int AS n FROM erp_invoices WHERE erp_id = $1`, [ERP_ID]);
+    expect(row.n).toBe(1);
+    await q(`DELETE FROM erp_invoices WHERE erp_id = $1`, [ERP_ID]);
+    await q(`DELETE FROM voucher_headers WHERE voucher_number = $1`, [`SAL-${P}-1`]);
   });
 
   it('leaves an office invoice that no order produced exactly as before', async () => {

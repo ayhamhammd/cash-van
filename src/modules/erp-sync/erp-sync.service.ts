@@ -2782,7 +2782,7 @@ export class ErpSyncService {
           where: { voucherNumber: inv.salesOrderExternalRef, transKind: 'ORDER' },
         })
       : null;
-    if (order) {
+    if (order && !(await this.soldInVanflow(order.voucherNumber, inv.invoiceNumber))) {
       if (existing) await this.erpInvoices.delete(existing.id);
       if ((inv.status ?? '').toLowerCase() === 'voided') {
         await this.dropOrderSale(inv);
@@ -2913,6 +2913,22 @@ export class ErpSyncService {
     this.logger.log(
       `Order ${order.voucherNumber} invoiced in the ERP as ${inv.invoiceNumber} → ${voucherNumber} for ${order.userCode}`,
     );
+  }
+
+  /**
+   * The order was already turned into a sale here (the dashboard's convert
+   * button), so the salesman has his sale and it already counts. An ERP invoice
+   * raised from the same order as well is a second invoice for the same goods;
+   * making it a second sale would count it twice, so it stays an office invoice
+   * as before.
+   */
+  private async soldInVanflow(orderNumber: string, invoiceNumber?: string | null): Promise<boolean> {
+    const own = invoiceNumber ? orderSaleNumber(invoiceNumber) : null;
+    const sales = await this.headers.find({
+      where: { referenceVoucherNumber: orderNumber, transKind: 'SALE' },
+      select: { voucherNumber: true },
+    });
+    return sales.some((s) => s.voucherNumber !== own);
   }
 
   /**
