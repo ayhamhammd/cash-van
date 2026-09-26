@@ -9,9 +9,8 @@
  *
  *  - cash and credit are told apart by the PAYMENTS, not the voucher, so a
  *    half-paid sale is not rewarded entirely at the cash rate;
- *  - an office invoice earns its rate too, and one with no payment type counts
- *    as credit — the lower rate — because guessing in the salesman's favour is
- *    how commission gets overpaid without anyone noticing;
+ *  - only what the salesman sold from the van counts: an invoice the office
+ *    raised in the ERP is not his selling, even for a customer he services;
  *  - only CONFIRMED collections count: commission on a cheque that may bounce is
  *    money paid out for money not received;
  *  - the rates come from the MONTH'S row, so changing a rate today cannot
@@ -68,12 +67,12 @@ run('commission targets (real DB)', () => {
     }
   }
 
-  /** A confirmed collection, in MAJOR units. */
-  async function collection(date: string, amount: number, status = 'confirmed') {
+  /** A collection of `jod` dinars. collections.amount is stored in FILS. */
+  async function collection(date: string, jod: number, status = 'confirmed') {
     await q(
       `INSERT INTO collections (customer_id, rep_id, amount, method, status, collected_at)
        VALUES ((SELECT id FROM customers WHERE customer_number=$1), $2, $3, 'cash', $4, $5::date)`,
-      [customerNumber, repId, amount, status, date],
+      [customerNumber, repId, jod * 1000, status, date],
     );
   }
 
@@ -138,7 +137,8 @@ run('commission targets (real DB)', () => {
     // Bounced money came back — it must not earn commission either.
     await collection('2026-03-15', 300, 'bounced');
 
-    // Office invoices: 600 cash, 400 credit, 200 with no type stated.
+    // Office invoices for his customer: 600 cash, 400 credit, 200 untyped.
+    // None of it is his van selling, so none of it may count.
     await erpInvoice(`${P}-E1`, '2026-03-12', 600_000, 'CASH');
     await erpInvoice(`${P}-E2`, '2026-03-13', 400_000, 'CREDIT');
     await erpInvoice(`${P}-E3`, '2026-03-14', 200_000, null);
@@ -155,26 +155,18 @@ run('commission targets (real DB)', () => {
   it('splits van sales on the payments, not on the voucher', async () => {
     await setTarget({ cashPct: 3, creditPct: 1.5, collectionPct: 1.5 });
     const row = await targets.getForRep(repId, YEAR, MONTH);
-    // Van cash 1,000 + 500 = 1,500, plus the ERP's 600 cash → 2,100.
-    expect(row.cashSalesFils).toBe(2_100_000);
-    // Van credit 2,000 + 500 = 2,500, plus ERP 400 + the untyped 200 → 3,100.
-    expect(row.creditSalesFils).toBe(3_100_000);
-    expect(row.totalSalesFils).toBe(5_200_000);
+    // Van cash 1,000 + 500 = 1,500.
+    expect(row.cashSalesFils).toBe(1_500_000);
+    // Van credit 2,000 + 500 = 2,500.
+    expect(row.creditSalesFils).toBe(2_500_000);
+    expect(row.totalSalesFils).toBe(4_000_000);
   });
 
-  it('counts an office invoice with no payment type as credit, the lower rate', async () => {
-    // Guessing in the salesman's favour is how commission gets overpaid quietly.
-    await setTarget({ cashPct: 3, creditPct: 1.5, collectionPct: 0 });
+  it('does not count invoices the office raised in the ERP', async () => {
     const row = await targets.getForRep(repId, YEAR, MONTH);
-    const withUntyped = row.creditSalesFils;
-    await q(`UPDATE erp_invoices SET payment_type='CASH' WHERE erp_id=$1`, [`${P}-E3`]);
-    try {
-      const after = await targets.getForRep(repId, YEAR, MONTH);
-      expect(withUntyped - after.creditSalesFils).toBe(200_000);
-      expect(after.cashSalesFils - row.cashSalesFils).toBe(200_000);
-    } finally {
-      await q(`UPDATE erp_invoices SET payment_type=NULL WHERE erp_id=$1`, [`${P}-E3`]);
-    }
+    expect(row.actualAmount).toBe(row.actualVanAmount);
+    expect(row.actualErpAmount).toBe(0);
+    expect(row.totalSalesFils).toBe(4_000_000);
   });
 
   it('counts collected money only — not pending, not bounced', async () => {
@@ -192,8 +184,8 @@ run('commission targets (real DB)', () => {
   it('pays each component at its own rate', async () => {
     await setTarget({ cashPct: 3, creditPct: 1.5, collectionPct: 1.5 });
     const row = await targets.getForRep(repId, YEAR, MONTH);
-    expect(row.commissionOnCashFils).toBe(Math.round(2_100_000 * 0.03));       // 63,000
-    expect(row.commissionOnCreditFils).toBe(Math.round(3_100_000 * 0.015));    // 46,500
+    expect(row.commissionOnCashFils).toBe(Math.round(1_500_000 * 0.03));       // 45,000
+    expect(row.commissionOnCreditFils).toBe(Math.round(2_500_000 * 0.015));    // 37,500
     expect(row.commissionOnCollectionFils).toBe(Math.round(800_000 * 0.015));  // 12,000
   });
 
@@ -203,7 +195,7 @@ run('commission targets (real DB)', () => {
     expect(r.commissionTotalFils).toBe(
       r.commissionOnCashFils + r.commissionOnCreditFils + r.commissionOnCollectionFils,
     );
-    expect(r.commissionTotalFils).toBe(121_500);
+    expect(r.commissionTotalFils).toBe(94_500);
   });
 
   it('pays nothing when no rate is set', async () => {
@@ -212,13 +204,13 @@ run('commission targets (real DB)', () => {
     expect(row.commissionTotalFils).toBe(0);
     // …but still reports what was sold, so the figures are visible before the
     // rates are agreed.
-    expect(row.totalSalesFils).toBe(5_200_000);
+    expect(row.totalSalesFils).toBe(4_000_000);
   });
 
   // ── Targets: optional, independent ─────────────────────────────────────────
 
   it('measures each target against its own achievement', async () => {
-    await setTarget({ salesTargetFils: 10_400_000, collectionTargetFils: 1_600_000 });
+    await setTarget({ salesTargetFils: 8_000_000, collectionTargetFils: 1_600_000 });
     const row = await targets.getForRep(repId, YEAR, MONTH);
     expect(row.salesProgressPct).toBe(50);
     expect(row.collectionProgressPct).toBe(50);

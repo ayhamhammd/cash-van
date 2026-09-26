@@ -73,20 +73,13 @@ export interface TargetHistoryRow extends TargetRow {
  * `sa` = van sale amount in fils, `sq` = van item qty. Both key on
  * users.user_number == voucher_headers.user_code.
  *
- * `ea` = invoices the OFFICE raised in the ERP for customers this rep services.
- * A shop invoiced in the ERP produces no voucher here, so without this a rep
- * could serve a customer all month and show zero against their target. It keys
- * on the rep stored on the mirrored invoice, resolved when it was synced — not
- * on the customer's assignment today, which would rewrite last month's figure
- * the moment a customer changed hands.
+ * Invoices the office raises in the ERP are NOT counted: a target measures what
+ * the salesman sold from the van. An office invoice generated from his own ORDER
+ * is already here, as the ERP- sale it became (erp-sync/order-invoice-sale.ts).
  *
- * DOUBLE COUNTING IS PREVENTED UPSTREAM, NOT HERE. Invoices cash-van pushed to
- * the ERP come back marked VAN_SALES and are never mirrored, so `sa` and `ea`
- * cannot describe the same sale. See ErpSyncService.applyErpInvoice.
- *
- * ONLY THE AMOUNT METRIC IS AFFECTED. `sq` counts item quantities from voucher
- * lines; the mirror holds invoice headers, not lines, so a QTY target still
- * measures what the van itself moved.
+ * `co` = what he collected. collections.amount is integer FILS already; it was
+ * multiplied by 1000 here once, which made every collection and its commission
+ * a thousand times too large.
  */
 const ACTUALS_JOINS = `
   LEFT JOIN (
@@ -104,16 +97,6 @@ const ACTUALS_JOINS = `
       AND h.in_date >= $1::date AND h.in_date < $2::date
     GROUP BY h.user_code
   ) sq ON sq.user_code = u.user_number
-  LEFT JOIN (
-    SELECT ei.rep_id,
-           COALESCE(SUM(ei.total_fils), 0)::bigint AS amount_fils,
-           COALESCE(SUM(CASE WHEN ei.payment_type = 'CASH' THEN ei.total_fils ELSE 0 END), 0)::bigint AS cash_fils,
-           COALESCE(SUM(CASE WHEN ei.payment_type = 'CASH' THEN 0 ELSE ei.total_fils END), 0)::bigint AS credit_fils
-    FROM erp_invoices ei
-    WHERE ei.deleted_at IS NULL
-      AND ei.issued_at >= $1::date AND ei.issued_at < $2::date
-    GROUP BY ei.rep_id
-  ) ea ON ea.rep_id = r.id
   LEFT JOIN (
     -- Van sales split by how they were PAID FOR, because cash and credit earn
     -- different rates. A voucher's payment rows say which: anything booked
@@ -141,7 +124,7 @@ const ACTUALS_JOINS = `
     --
     -- 'pending' is money that has not arrived and 'bounced' is money that came
     -- back; paying commission on either is paying for money not received.
-    SELECT c.rep_id, COALESCE(SUM(ROUND(c.amount::numeric * 1000)), 0)::bigint AS amount_fils
+    SELECT c.rep_id, COALESCE(SUM(c.amount), 0)::bigint AS amount_fils
       FROM collections c
      WHERE c.status IN ('confirmed', 'deposited')
        AND c.collected_at >= $1::date AND c.collected_at < $2::date
@@ -157,9 +140,9 @@ const SELECT_COLS = `
   t.metric                          AS "metric",
   t.target_value                    AS "targetValue",
   t.notes                           AS "notes",
-  (COALESCE(sa.amount_fils, 0) + COALESCE(ea.amount_fils, 0)) AS "actualAmount",
+  COALESCE(sa.amount_fils, 0)       AS "actualAmount",
   COALESCE(sa.amount_fils, 0)       AS "actualVanAmount",
-  COALESCE(ea.amount_fils, 0)       AS "actualErpAmount",
+  0                                 AS "actualErpAmount",
   COALESCE(sq.qty, 0)               AS "actualQty",
   t.sales_target_fils               AS "salesTargetFils",
   t.collection_target_fils          AS "collectionTargetFils",
@@ -167,10 +150,7 @@ const SELECT_COLS = `
   COALESCE(t.credit_pct, 0)         AS "creditPct",
   COALESCE(t.collection_pct, 0)     AS "collectionPct",
   COALESCE(sp.cash_fils, 0)         AS "cashSalesFils",
-  -- An ERP invoice with no payment type counts as CREDIT: the lower rate.
-  -- Guessing in the salesman's favour is how commission gets overpaid quietly.
-  (COALESCE(sp.credit_fils, 0) + COALESCE(ea.credit_fils, 0)) AS "creditSalesFils",
-  COALESCE(ea.cash_fils, 0)         AS "erpCashFils",
+  COALESCE(sp.credit_fils, 0)       AS "creditSalesFils",
   COALESCE(co.amount_fils, 0)       AS "collectedFils"
 `;
 
@@ -345,7 +325,7 @@ function mapRow(r: Record<string, string | null>): TargetRow {
 function commission(r: Record<string, string | null>) {
   const n = (k: string) => Number(r[k] ?? 0) || 0;
 
-  const cashSalesFils = n('cashSalesFils') + n('erpCashFils');
+  const cashSalesFils = n('cashSalesFils');
   const creditSalesFils = n('creditSalesFils');
   const totalSalesFils = cashSalesFils + creditSalesFils;
   const collectedFils = n('collectedFils');

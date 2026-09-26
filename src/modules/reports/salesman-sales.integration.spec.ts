@@ -1,18 +1,14 @@
 /**
- * Real-DB tests for the salesman sales report and the ERP invoices feeding it.
+ * Real-DB tests for the salesman sales report and the target figure.
  *
- * These queries decide what a salesman is shown to have sold, and a target is
- * measured against the same figures — so the behaviours pinned here are the ones
- * that would either cheat a rep or flatter one:
+ * Both measure what the salesman sold FROM THE VAN. Invoices the office raised
+ * in the ERP are not his selling and are left out of both, even for customers
+ * he services. The fixtures still create office invoices, so these tests prove
+ * they are ignored rather than merely absent.
  *
- *  - an invoice the OFFICE raised in the ERP credits the rep who services that
- *    customer, because it produces no voucher here and was previously invisible;
- *  - a van sale is NEVER counted twice, even though the same sale exists as a
- *    voucher here and as an ERP invoice there;
- *  - van money and ERP money stay in separate columns, so a figure can be
- *    explained rather than merely asserted;
  *  - every active salesman appears, including the ones who sold nothing;
- *  - the two sources are reported in the same unit — fils — on both sides.
+ *  - unposted vouchers, returns and other dates never count;
+ *  - the documents behind a row add up to that row.
  *
  * Skipped unless DB_HOST/DB_NAME point at a database with the schema applied.
  */
@@ -176,23 +172,20 @@ run('salesman sales (real DB)', () => {
 
   // ── The report ─────────────────────────────────────────────────────────────
 
-  it('reports van sales and ERP invoices in separate columns', async () => {
+  it('reports what each salesman sold from the van', async () => {
     const rows = await reports.salesmanSales(FROM, TO);
     const sami = forRep(rows, samiRepId);
-    expect(sami.vanTotalFils).toBe(174_000);   // 116 + 58 major → fils, tax-inclusive
+    expect(sami.vanTotalFils).toBe(174_000);
     expect(sami.vanVouchers).toBe(2);
-    expect(sami.erpTotalFils).toBe(70_000);
-    expect(sami.erpInvoices).toBe(1);
-    expect(sami.totalFils).toBe(244_000);
+    expect(sami.totalFils).toBe(174_000);
   });
 
-  it('credits a rep who only has office invoices', async () => {
-    // The whole point: before this, Laila showed zero for a month's work.
+  it('leaves out invoices the office raised in the ERP', async () => {
     const rows = await reports.salesmanSales(FROM, TO);
+    expect(forRep(rows, samiRepId).erpTotalFils).toBe(0);
+    expect(forRep(rows, samiRepId).erpInvoices).toBe(0);
     const laila = forRep(rows, lailaRepId);
-    expect(laila.vanTotalFils).toBe(0);
-    expect(laila.erpTotalFils).toBe(30_000);
-    expect(laila.totalFils).toBe(30_000);
+    expect(laila.totalFils).toBe(0);
   });
 
   it('lists a salesman who sold nothing rather than omitting them', async () => {
@@ -201,30 +194,20 @@ run('salesman sales (real DB)', () => {
     expect(quiet.totalFils).toBe(0);
   });
 
-  it('ignores unposted vouchers, returns, other dates and deleted invoices', async () => {
+  it('ignores unposted vouchers, returns and other dates', async () => {
     const rows = await reports.salesmanSales(FROM, TO);
-    const sami = forRep(rows, samiRepId);
-    // Any leak is 9,999 and impossible to mistake for a rounding difference.
-    expect(sami.vanTotalFils).toBe(174_000);
-    expect(sami.erpTotalFils).toBe(70_000);
-  });
-
-  it('never credits an ERP invoice that has no rep', async () => {
-    const rows = await reports.salesmanSales(FROM, TO);
-    expect(rows.every((r) => r.erpTotalFils < 9_999_000)).toBe(true);
+    expect(forRep(rows, samiRepId).vanTotalFils).toBe(174_000);
   });
 
   it('includes both boundary days', async () => {
-    const rows = await reports.salesmanSales('2026-03-05', '2026-03-07');
-    const sami = forRep(rows, samiRepId);
-    expect(sami.vanVouchers).toBe(2);
-    expect(sami.erpInvoices).toBe(1);   // the 7th must be inside the window
+    const rows = await reports.salesmanSales('2026-03-05', '2026-03-06');
+    expect(forRep(rows, samiRepId).vanVouchers).toBe(2);
   });
 
-  it('ranks by the combined total', async () => {
+  it('ranks by what was sold', async () => {
     const rows = (await reports.salesmanSales(FROM, TO))
       .filter((r) => [samiRepId, lailaRepId, quietRepId].includes(r.repId));
-    expect(rows.map((r) => r.repId)).toEqual([samiRepId, lailaRepId, quietRepId]);
+    expect(rows[0].repId).toBe(samiRepId);
   });
 
   it('shows only the salesmen a scoped user may see', async () => {
@@ -232,152 +215,62 @@ run('salesman sales (real DB)', () => {
     expect(rows.map((r) => r.repId)).toEqual([lailaRepId]);
   });
 
-  // ── Double counting: the expensive mistake ─────────────────────────────────
+  // ── The documents behind a row ─────────────────────────────────────────────
 
-  it('does not count a van sale twice when the ERP mirrors it back', async () => {
-    // A van sale pushed to the ERP returns over the same endpoint. If the sync
-    // ever stored one, this row would appear on BOTH sides of the report and the
-    // rep's target would read double — and nobody questions a flattering number.
-    await makeErpInvoice({ id: `${P}-E-MIRROR`, repId: samiRepId, customerId: samiCustomerId,
-      date: '2026-03-05', totalFils: 116_000, origin: 'VAN_SALES' });
-    try {
-      const rows = await reports.salesmanSales(FROM, TO);
-      const sami = forRep(rows, samiRepId);
-      // The report itself does not filter on origin — the SYNC refuses to store
-      // these at all. This test exists so that if that guard is ever removed,
-      // something fails loudly here rather than silently paying a rep twice.
-      expect(sami.erpTotalFils).toBe(186_000);
-      expect(sami.erpTotalFils).not.toBe(70_000 + 116_000 - 116_000);
-    } finally {
-      await q(`DELETE FROM erp_invoices WHERE erp_id = $1`, [`${P}-E-MIRROR`]);
-    }
-  });
-
-  // ── The documents behind the figure ────────────────────────────────────────
-
-  it('lists both van vouchers and ERP invoices, labelled', async () => {
+  it('lists only van sales behind a salesman', async () => {
     const docs = await reports.salesmanDocuments(samiRepId, FROM, TO);
-    const numbers = docs.map((d) => d.number).sort();
-    expect(numbers).toEqual([`${P}-E1`, `${P}-V1`, `${P}-V2`]);
-    expect(docs.find((d) => d.number === `${P}-V1`)!.source).toBe('VAN');
-    expect(docs.find((d) => d.number === `${P}-E1`)!.source).toBe('ERP');
-  });
-
-  it('reports both sources in fils, so the columns are comparable', async () => {
-    const docs = await reports.salesmanDocuments(samiRepId, FROM, TO);
-    expect(docs.find((d) => d.number === `${P}-V1`)!.totalFils).toBe(116_000);
-    expect(docs.find((d) => d.number === `${P}-E1`)!.totalFils).toBe(70_000);
-    // ERP net is total less tax.
-    expect(docs.find((d) => d.number === `${P}-E1`)!.netFils).toBe(60_000);
+    expect(docs.map((d) => d.number).sort()).toEqual([`${P}-V1`, `${P}-V2`]);
+    expect(docs.every((d) => d.source === 'VAN')).toBe(true);
   });
 
   it('adds the documents up to the row they came from', async () => {
     const rows = await reports.salesmanSales(FROM, TO);
-    const sami = forRep(rows, samiRepId);
     const docs = await reports.salesmanDocuments(samiRepId, FROM, TO);
-    const van = docs.filter((d) => d.source === 'VAN');
-    const erp = docs.filter((d) => d.source === 'ERP');
-    expect(van.reduce((s, d) => s + d.totalFils, 0)).toBe(sami.vanTotalFils);
-    expect(erp.reduce((s, d) => s + d.totalFils, 0)).toBe(sami.erpTotalFils);
-  });
-
-  it('names the customer on both kinds of document', async () => {
-    const docs = await reports.salesmanDocuments(samiRepId, FROM, TO);
-    expect(docs.every((d) => d.customerName.includes(`${P}-C1`))).toBe(true);
+    expect(docs.reduce((s, d) => s + d.totalFils, 0)).toBe(forRep(rows, samiRepId).vanTotalFils);
   });
 
   it('scopes the documents the same way the report does', async () => {
-    const docs = await reports.salesmanDocuments(samiRepId, FROM, TO);
-    const numbers = docs.map((d) => d.number);
+    const numbers = (await reports.salesmanDocuments(samiRepId, FROM, TO)).map((d) => d.number);
     expect(numbers).not.toContain(`${P}-V-UNPOSTED`);
     expect(numbers).not.toContain(`${P}-V-RETURN`);
     expect(numbers).not.toContain(`${P}-V-EARLY`);
-    expect(numbers).not.toContain(`${P}-E-DELETED`);
   });
 
   it('returns nothing for a salesman with no documents', async () => {
     expect(await reports.salesmanDocuments(quietRepId, FROM, TO)).toEqual([]);
   });
 
-  it('carries the id each system needs to open the document', async () => {
-    // The two systems identify a document differently — a voucher NUMBER here, the
-    // ERP's own invoice id there — and asking one with the other's identifier
-    // returns nothing rather than an error, which is how a detail view ends up
-    // silently blank.
-    const docs = await reports.salesmanDocuments(samiRepId, FROM, TO);
-    const van = docs.find((d) => d.source === 'VAN')!;
-    const erp = docs.find((d) => d.source === 'ERP')!;
-    expect(van.docId).toBe(van.number);
-    expect(erp.docId).toBe(`${P}-E1`);
-    expect(docs.every((d) => Boolean(d.docId))).toBe(true);
-  });
-
   it('orders documents newest first', async () => {
-    const docs = await reports.salesmanDocuments(samiRepId, FROM, TO);
-    const dates = docs.map((d) => d.docDate);
+    const dates = (await reports.salesmanDocuments(samiRepId, FROM, TO)).map((d) => d.docDate);
     expect([...dates].sort().reverse()).toEqual(dates);
   });
 
   // ── The target, which is what people are paid on ───────────────────────────
 
-  it('counts office invoices toward the rep target', async () => {
+  it('measures the target on van sales only', async () => {
     const row = await targets.getForRep(samiRepId, 2026, 3);
     expect(row.actualVanAmount).toBe(174_000);
-    expect(row.actualErpAmount).toBe(70_000);
-    expect(row.actualAmount).toBe(244_000);
+    expect(row.actualErpAmount).toBe(0);
+    expect(row.actualAmount).toBe(174_000);
   });
 
-  it('gives a rep with only office invoices a real achieved figure', async () => {
+  it('gives a rep with only office invoices nothing', async () => {
     const row = await targets.getForRep(lailaRepId, 2026, 3);
-    expect(row.actualAmount).toBe(30_000);
+    expect(row.actualAmount).toBe(0);
   });
 
-  it('measures progress against the combined figure', async () => {
+  it('measures progress against van sales', async () => {
     await q(
       `INSERT INTO sales_targets (rep_id, year, month, metric, target_value)
-       VALUES ($1, 2026, 3, 'AMOUNT', 488000)`,
+       VALUES ($1, 2026, 3, 'AMOUNT', 348000)`,
       [samiRepId],
     );
     try {
       const row = await targets.getForRep(samiRepId, 2026, 3);
-      // 244,000 of 488,000. Van sales alone would read 36%, and a rep paid on
-      // that number is being paid on part of their work.
       expect(row.progressPct).toBe(50);
-      expect(row.remaining).toBe(244_000);
+      expect(row.remaining).toBe(174_000);
     } finally {
       await q(`DELETE FROM sales_targets WHERE rep_id = $1`, [samiRepId]);
     }
-  });
-
-  it('keeps a QTY target measuring what the van itself moved', async () => {
-    // The mirror holds invoice headers, not lines, so it cannot contribute a
-    // quantity — and silently counting money toward a quantity target would be
-    // worse than counting nothing.
-    await q(
-      `INSERT INTO sales_targets (rep_id, year, month, metric, target_value)
-       VALUES ($1, 2026, 3, 'QTY', 10)`,
-      [samiRepId],
-    );
-    try {
-      const row = await targets.getForRep(samiRepId, 2026, 3);
-      expect(row.actualQty).toBe(0);
-      expect(row.actualErpAmount).toBe(70_000);   // still reported, just not counted
-    } finally {
-      await q(`DELETE FROM sales_targets WHERE rep_id = $1`, [samiRepId]);
-    }
-  });
-
-  it('bills an office invoice to its own month and no other', async () => {
-    // The 28 Feb and 1 Apr fixtures are deliberately just outside March. Each
-    // must appear in exactly one month: absent from March (asserted above) and
-    // present in its own. A boundary that leaked would show in both.
-    const feb = await targets.getForRep(samiRepId, 2026, 2);
-    expect(feb.actualErpAmount).toBe(9_999_000);
-
-    const mar = await targets.getForRep(samiRepId, 2026, 3);
-    expect(mar.actualErpAmount).toBe(70_000);
-
-    const apr = await targets.getForRep(samiRepId, 2026, 4);
-    expect(apr.actualErpAmount).toBe(9_999_000);
   });
 });
