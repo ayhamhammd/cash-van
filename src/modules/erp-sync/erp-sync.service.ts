@@ -39,7 +39,16 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
 import { ErpInvoice } from './entities/erp-invoice.entity';
+import { Payment } from '../vouchers/entities/payment.entity';
+import {
+  buildOrderSale,
+  orderSaleNumber,
+  type ErpInvoiceDetail,
+  type ResolvedItem,
+} from './order-invoice-sale';
 import { ErpOutboxKind } from './entities/erp-outbox.entity';
+
+const ORDER_INVOICE_REREAD = 'erp_invoice_order_reread';
 
 /** cash-van voucher kind → ERP outbox kind (per-kind outbound, same kind preserved). */
 // Read from process.env for the same reason as ERP_OUTBOX_DRAIN_MS: @Interval()
@@ -382,6 +391,8 @@ interface ErpInvoiceDto {
   /** "VAN_SALES" when cash-van pushed it there; "ERP" when the office raised it. */
   origin?: string | null;
   externalId?: string | null;
+  /** The van ORDER this invoice was generated from, by its voucher number. */
+  salesOrderExternalRef?: string | null;
 }
 
 /** One row of the ERP's `GET /api/v1/customer-prices` — a raw contract price. */
@@ -2700,7 +2711,9 @@ export class ErpSyncService {
    */
   private async pullErpInvoices(): Promise<number> {
     const cursor = await this.cursors.findOne({ where: { entity: 'erp_invoice' } });
-    const since = cursor?.updatedSince ? cursor.updatedSince.toISOString() : undefined;
+    const rereadForOrders = await this.needsOrderInvoiceReread();
+    const since =
+      !rereadForOrders && cursor?.updatedSince ? cursor.updatedSince.toISOString() : undefined;
 
     let processed = 0;
     let maxTs: Date | null = cursor?.updatedSince ?? null;
@@ -2734,13 +2747,50 @@ export class ErpSyncService {
       c.updatedSince = maxTs;
       await this.cursors.save(c);
     }
+    if (rereadForOrders) {
+      await this.cursors.save(
+        this.cursors.create({ entity: ORDER_INVOICE_REREAD, updatedSince: new Date() }),
+      );
+    }
     return processed;
+  }
+
+  /**
+   * Whether every ERP invoice must be read again, once, to find the ones that
+   * were a salesman's order.
+   *
+   * Invoices already mirrored before the ERP could name their order sit behind
+   * the cursor and would never be looked at again. The re-read waits until the
+   * ERP actually sends `salesOrderExternalRef` — deployed before the ERP, a
+   * re-read would find nothing and then never run again.
+   */
+  private async needsOrderInvoiceReread(): Promise<boolean> {
+    if (await this.cursors.findOne({ where: { entity: ORDER_INVOICE_REREAD } })) return false;
+    const { data } = await this.erp.list<ErpInvoiceDto>('sales-invoices', { page: 1, pageSize: 1 });
+    return data.length > 0 && 'salesOrderExternalRef' in data[0];
   }
 
   /** Store, update or remove one mirrored ERP invoice. */
   private async applyErpInvoice(inv: ErpInvoiceDto): Promise<void> {
     if (!inv.id) return;
     const existing = await this.erpInvoices.findOne({ where: { erpId: String(inv.id) } });
+
+    // A salesman's ORDER, invoiced by the office. It becomes his SALE rather
+    // than an office invoice, so it is counted once, and for him.
+    const order = inv.salesOrderExternalRef
+      ? await this.headers.findOne({
+          where: { voucherNumber: inv.salesOrderExternalRef, transKind: 'ORDER' },
+        })
+      : null;
+    if (order) {
+      if (existing) await this.erpInvoices.delete(existing.id);
+      if ((inv.status ?? '').toLowerCase() === 'voided') {
+        await this.dropOrderSale(inv);
+      } else {
+        await this.mirrorOrderSale(inv, order);
+      }
+      return;
+    }
 
     // Ours already, or cancelled upstream — either way it must not be counted.
     // Delete rather than skip: it may already be here from before it was voided
@@ -2790,6 +2840,141 @@ export class ErpSyncService {
     row.paidFils = String(toFils(inv.amountPaid));
     row.syncedAt = new Date();
     await this.erpInvoices.save(row);
+  }
+
+  /**
+   * Write the SALE an invoiced ORDER became, release the order's hold on the
+   * van, and close the order. See order-invoice-sale.ts for why it is shaped
+   * the way it is. Idempotent on the SALE's number.
+   */
+  private async mirrorOrderSale(inv: ErpInvoiceDto, order: VoucherHeader): Promise<void> {
+    if (!inv.invoiceNumber) return;
+    const voucherNumber = orderSaleNumber(inv.invoiceNumber);
+    if (await this.headers.exist({ where: { voucherNumber } })) return;
+
+    const detail = await this.erp.getOne<ErpInvoiceDetail>(`sales-invoices/${inv.id}`);
+    if (!detail) return;
+    const orderLines = await this.txns.find({ where: { voucherNumber: order.voucherNumber } });
+    const vanStore =
+      orderLines.map((l) => l.storeNumber ?? l.fromStoreNumber ?? null).find((s) => !!s) ?? null;
+
+    const resolved = new Map<string, ResolvedItem | null>();
+    for (const it of detail.items ?? []) {
+      if (it.skuCode && !resolved.has(it.skuCode)) {
+        resolved.set(it.skuCode, await this.itemForSku(it.skuCode));
+      }
+    }
+    const sale = buildOrderSale(
+      { ...detail, paymentType: detail.paymentType ?? inv.paymentType },
+      {
+        voucherNumber: order.voucherNumber,
+        userCode: order.userCode,
+        customerNumber: order.customerNumber,
+        isTaxExempt: order.isTaxExempt,
+        taxExemptionSource: order.taxExemptionSource,
+        taxExemptionNumber: order.taxExemptionNumber,
+        taxExemptionReason: order.taxExemptionReason,
+        taxExemptionType: order.taxExemptionType,
+        notes: order.notes,
+      },
+      vanStore,
+      (sku) => resolved.get(sku) ?? null,
+    );
+    if (!sale) return;
+    if (sale.unresolvedSkus.length) {
+      this.logger.warn(
+        `${voucherNumber}: SKU(s) ${sale.unresolvedSkus.join(', ')} have no cash-van item — ` +
+          'those lines are left off, so they cannot be returned from the van',
+      );
+    }
+
+    await this.dataSource.transaction(async (em) => {
+      await em.getRepository(VoucherHeader).save(em.getRepository(VoucherHeader).create(sale.header));
+      if (sale.lines.length) {
+        await em.getRepository(VoucherTransaction).save(
+          sale.lines.map((l) => em.getRepository(VoucherTransaction).create(l)),
+        );
+      }
+      await em.getRepository(Payment).save(em.getRepository(Payment).create(sale.payment));
+
+      const map = await em.getRepository(ErpIdMap).findOne({
+        where: { entity: 'voucher', erpId: voucherNumber },
+      });
+      const m = map ?? em.getRepository(ErpIdMap).create({ entity: 'voucher', erpId: voucherNumber });
+      m.localId = voucherNumber;
+      m.erpCode = inv.invoiceNumber!;
+      await em.getRepository(ErpIdMap).save(m);
+
+      if (!order.isFulfilled) {
+        await this.releaseOrderHold(em, order.userCode, orderLines);
+        await em.getRepository(VoucherHeader).update({ id: order.id }, { isFulfilled: true });
+      }
+    });
+    this.logger.log(
+      `Order ${order.voucherNumber} invoiced in the ERP as ${inv.invoiceNumber} → ${voucherNumber} for ${order.userCode}`,
+    );
+  }
+
+  /**
+   * The ERP voided the invoice an order became. Its SALE goes too, unless a
+   * RETURN already stands against it — that return is real, and removing the
+   * sale under it would leave it pointing at nothing.
+   */
+  private async dropOrderSale(inv: ErpInvoiceDto): Promise<void> {
+    if (!inv.invoiceNumber) return;
+    const voucherNumber = orderSaleNumber(inv.invoiceNumber);
+    if (!(await this.headers.exist({ where: { voucherNumber } }))) return;
+    if (await this.headers.exist({ where: { referenceVoucherNumber: voucherNumber, transKind: 'RETURN' } })) {
+      this.logger.warn(`${voucherNumber}: its ERP invoice was voided but a return stands against it; kept`);
+      return;
+    }
+    await this.dataSource.transaction(async (em) => {
+      await em.getRepository(Payment).delete({ voucherNumber });
+      await em.getRepository(VoucherTransaction).delete({ voucherNumber });
+      await em.getRepository(VoucherHeader).delete({ voucherNumber });
+      await em.getRepository(ErpIdMap).delete({ entity: 'voucher', erpId: voucherNumber });
+    });
+  }
+
+  /**
+   * Release what the ORDER reserved on the salesman's van, without taking it
+   * off the van: the ERP shipped these goods from its own warehouse.
+   */
+  private async releaseOrderHold(
+    em: import('typeorm').EntityManager,
+    userCode: string,
+    lines: VoucherTransaction[],
+  ): Promise<void> {
+    const rows: Array<{ id: string }> = await em.query(
+      `SELECT r.id FROM reps r JOIN users u ON u.id = r.user_id WHERE u.user_number = $1 LIMIT 1`,
+      [userCode],
+    );
+    const repId = rows[0]?.id;
+    if (!repId) return;
+    for (const l of lines) {
+      const qty = Math.round(Number(l.itemQty) || 0);
+      if (qty <= 0) continue;
+      await em.query(
+        `UPDATE van_stock vs
+            SET reserved = GREATEST(0, vs.reserved - $3), snapshot_at = now()
+           FROM item_cart ic
+          WHERE ic.item_number = $2 AND vs.product_id = ic.id
+            AND vs.rep_id = $1 AND vs.stock_unit_code = $4`,
+        [repId, l.itemNumber, qty, l.stockUnitCode ?? ''],
+      );
+    }
+  }
+
+  /** The cash-van item behind an ERP SKU: a colour/variant unit first, then the item itself. */
+  private async itemForSku(sku: string): Promise<ResolvedItem | null> {
+    const unit = await this.itemUnits.findOne({ where: { erpSkuCode: sku } });
+    if (unit) {
+      const item = await this.items.findOne({ where: { id: unit.itemId } });
+      if (item) return { itemNumber: item.itemNumber, itemName: item.nameAr || item.name, itemUnitId: unit.id };
+    }
+    const map = await this.idmap.findOne({ where: { entity: 'item', erpCode: sku } });
+    const item = await this.items.findOne({ where: { itemNumber: map?.localId ?? sku } });
+    return item ? { itemNumber: item.itemNumber, itemName: item.nameAr || item.name, itemUnitId: null } : null;
   }
 
   /**

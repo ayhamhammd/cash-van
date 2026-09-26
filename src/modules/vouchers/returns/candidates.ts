@@ -16,7 +16,10 @@ import { DataSource } from 'typeorm';
  *   with a negative allowance
  * - `ERP-%` voucher numbers — mirrored from the ERP, not raised here. Returning
  *   against one would create a cash van return whose source the ERP already
- *   owns, and the push would reference a document the ERP did not issue
+ *   owns, and the push would reference a document the ERP did not issue.
+ *   The exception is a salesman's ORDER that the office invoiced: that sale is
+ *   id-mapped to the ERP invoice it became, so a return against it names a
+ *   document the ERP did issue (see erp-sync/order-invoice-sale.ts)
  */
 export interface ReturnCandidate {
   voucherNumber: string;
@@ -93,7 +96,11 @@ export class ReturnCandidatesService {
        WHERE h.trans_kind = 'SALE'
          AND h.is_posted = true
          AND h.deleted_at IS NULL
-         AND h.voucher_number NOT LIKE 'ERP-%'
+         AND (h.voucher_number NOT LIKE 'ERP-%'
+              OR EXISTS (SELECT 1 FROM erp_id_map m
+                          WHERE m.entity = 'voucher'
+                            AND m.erp_id = h.voucher_number
+                            AND m.erp_code IS NOT NULL))
          AND t.item_number = ANY($1::text[])
          AND t.qty_returned < t.item_qty
          AND ($2::text IS NULL OR h.customer_number = $2::text)
