@@ -292,6 +292,20 @@ export class ErpSyncController {
     return this.outbox.list(status);
   }
 
+  // Declared before outbox/:id/retry, which would otherwise read "dead-letters" as an id.
+  @Post('outbox/dead-letters/retry')
+  @ApiOperation({
+    summary: 'Re-queue every dead letter',
+    description:
+      'Puts every dead-letter row back in the queue for the drain to send. Safe to repeat: ' +
+      'each push is idempotent on its externalId, and a document the ERP already holds is ' +
+      'treated as sent. Admin only.',
+  })
+  @ApiOkResponse({ description: '{ requeued }' })
+  outboxRetryDeadLetters() {
+    return this.outbox.retryDeadLetters();
+  }
+
   @Post('outbox/:id/retry')
   @ApiOperation({ summary: 'Retry an outbound push', description: 'Re-attempt one queued/failed/dead-letter row. Admin only.' })
   @ApiOkResponse({ description: 'The updated outbox row' })

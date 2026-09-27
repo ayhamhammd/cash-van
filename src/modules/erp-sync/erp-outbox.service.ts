@@ -29,7 +29,31 @@ import {
   ErpOutboxStatus,
 } from './entities/erp-outbox.entity';
 
+/**
+ * Attempts before a document the ERP REJECTED (a 4xx) is dead-lettered.
+ *
+ * Only a rejection spends them. An outage used to as well — a timeout, a refused
+ * connection, a 502 while the ERP restarted — and six attempts on this backoff
+ * are about 55 minutes. So an hour of ERP downtime dead-lettered every sale made
+ * in it, and a dead letter is never retried: the goods had left the van in
+ * cash-van and never left it in the ERP, the invoice never reached the customer's
+ * account, and nothing said so except a row on the status page.
+ */
 const MAX_ATTEMPTS = 6;
+/**
+ * A voucher line's base quantity as the ERP should receive it: exact to the three
+ * places both sides store (the ERP keeps quantities ×1000).
+ *
+ * It was `Math.round`ed to a whole piece, so 2.5 kg left the van in cash-van and
+ * 3 kg left it in the ERP — a small drift on every weighed item, in both
+ * directions, forever. The ERP's stock-adjustments accept decimals.
+ */
+export function exactQty(itemQty: string | number | null | undefined): number {
+  return Math.round((Number(itemQty) || 0) * 1000) / 1000;
+}
+
+/** Backoff ceiling for a document waiting out an outage — it retries forever at this rate. */
+const TRANSIENT_BACKOFF_CAP_MS = 3_600_000;
 // Read from process.env, not ConfigService: @Interval() is evaluated when the
 // class is defined, before DI exists. Validated in validation.schema.ts.
 const DRAIN_INTERVAL_MS = parseInt(process.env.ERP_OUTBOX_DRAIN_MS ?? '30000', 10);
@@ -172,6 +196,29 @@ export class ErpOutboxService {
         ...(gaps.length ? { chequeGaps: gaps } : {}),
       });
     });
+  }
+
+  /**
+   * Put every dead letter back in the queue.
+   *
+   * For the documents an outage killed before transient failures stopped
+   * counting: each is a sale, return or transfer the ERP has never seen. Re-queued
+   * rather than pushed inline, so the drain sends them at its own pace. Replaying
+   * one is safe — every push carries its externalId and Idempotency-Key, and the
+   * ERP answers a document it already holds with DUPLICATE_EXTERNAL_ID, which is
+   * treated as sent. One the ERP genuinely refuses dead-letters again after
+   * MAX_ATTEMPTS, with its reason.
+   */
+  async retryDeadLetters(): Promise<{ requeued: number }> {
+    const res = await this.outbox
+      .createQueryBuilder()
+      .update(ErpOutbox)
+      .set({ status: 'pending', attempts: 0, nextAttemptAt: () => 'now()' })
+      .where('status = :s', { s: 'dead_letter' })
+      .execute();
+    const requeued = res.affected ?? 0;
+    if (requeued > 0) this.logger.warn(`re-queued ${requeued} dead-letter outbox row(s)`);
+    return { requeued };
   }
 
   async retry(id: string): Promise<ErpOutbox> {
@@ -332,8 +379,11 @@ export class ErpOutboxService {
       }
       if (!calls || calls.length === 0) {
         // Still the "not yet" case — a prerequisite that may arrive on a later
-        // sync. Retries with backoff are the right behaviour here.
-        return this.fail(row, 'waiting on a prerequisite that has not synced yet');
+        // sync. Waiting for it is not a failure of the document, so it never
+        // runs the document out of attempts.
+        return this.fail(row, 'waiting on a prerequisite that has not synced yet', {
+          transient: true,
+        });
       }
       // A document may map to >1 call; each carries its own externalId, so a
       // retry replays them idempotently. (Most kinds are a single call.)
@@ -343,7 +393,10 @@ export class ErpOutboxService {
         if (!res.ok) {
           // Rate limited: back off past the window and retry, no attempt spent.
           if (res.status === 429) return this.softRetry(row, res.error ?? 'RATE_LIMITED');
-          return this.fail(row, res.error ?? 'ERP rejected the document');
+          // A 5xx or a 408 is the ERP unwell, not the document wrong.
+          return this.fail(row, res.error ?? 'ERP rejected the document', {
+            transient: res.status >= 500 || res.status === 408,
+          });
         }
         lastData = res.data;
       }
@@ -386,7 +439,9 @@ export class ErpOutboxService {
         }
       }
     } catch (e) {
-      await this.fail(row, e instanceof Error ? e.message : String(e));
+      // Thrown, not answered: a timeout, a refused or reset connection, DNS. The
+      // ERP never said anything about this document.
+      await this.fail(row, e instanceof Error ? e.message : String(e), { transient: true });
     }
   }
 
@@ -441,14 +496,26 @@ export class ErpOutboxService {
     this.logger.warn(`outbox ${row.kind} ${row.ref} DEAD (terminal): ${error}`);
   }
 
-  private async fail(row: ErpOutbox, error: string): Promise<void> {
+  /**
+   * Record a failed attempt and schedule the next.
+   *
+   * [transient] failures — the ERP unreachable or erroring — retry for as long as
+   * it takes, hourly at worst: a sale does not stop having happened because the
+   * ERP was down. Only a document the ERP answered and refused is dead-lettered,
+   * after MAX_ATTEMPTS.
+   */
+  private async fail(
+    row: ErpOutbox,
+    error: string,
+    opts: { transient?: boolean } = {},
+  ): Promise<void> {
     row.attempts += 1;
     row.error = error;
-    if (row.attempts >= MAX_ATTEMPTS) {
+    if (!opts.transient && row.attempts >= MAX_ATTEMPTS) {
       row.status = 'dead_letter';
     } else {
       row.status = 'pending';
-      const backoffMs = Math.min(60_000 * row.attempts * row.attempts, 3_600_000);
+      const backoffMs = Math.min(60_000 * row.attempts * row.attempts, TRANSIENT_BACKOFF_CAP_MS);
       row.nextAttemptAt = new Date(Date.now() + backoffMs);
     }
     await this.outbox.save(row);
@@ -1164,7 +1231,7 @@ export class ErpOutboxService {
         type: header.transKind === 'IN' ? 'IN' : 'OUT',
         items: lines.map((l) => ({
           skuCode: skuOf(l),
-          quantity: Math.round(Number(l.itemQty) || 0),
+          quantity: exactQty(l.itemQty),
         })),
       },
     };
@@ -1192,7 +1259,7 @@ export class ErpOutboxService {
     const skuOf = await this.erpSkuResolver(lines);
     const items = lines.map((l) => ({
       skuCode: skuOf(l),
-      quantity: Math.round(Number(l.itemQty) || 0),
+      quantity: exactQty(l.itemQty),
     }));
     return [
       {

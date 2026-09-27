@@ -38,6 +38,7 @@ import { ErpOutboxService } from './erp-outbox.service';
 import { ErpOutbox } from './entities/erp-outbox.entity';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
+import { ErpMovementRetry } from './entities/erp-movement-retry.entity';
 import { ErpInvoice } from './entities/erp-invoice.entity';
 import { Payment } from '../vouchers/entities/payment.entity';
 import {
@@ -272,7 +273,30 @@ interface ErpMovement {
   warehouseCode: string;
   reason?: string | null;
   createdAt?: string | null;
+  /**
+   * The ERP's monotonic movement number — the lossless cursor. Absent from an ERP
+   * older than f8cf4ec, in which case the feed stays on the timestamp cursor.
+   */
+  seq?: number | string | null;
 }
+
+/**
+ * How far behind its cursor the stock-movement feed re-reads, in ERP `seq` units.
+ *
+ * `seq` is a bigserial: handed out when a row is INSERTED, visible only when its
+ * transaction COMMITS. An ERP invoice that took `seq` 500 and committed after a
+ * quick adjustment took 501 was invisible when the hub read 501 — and a plain
+ * `seq > 501` would then never return it. So every run starts this far back and
+ * lets the `movement` id-map discard what it has already mirrored.
+ *
+ * Counted org-wide, the window is thousands of ERP movements wide: far longer than
+ * any posting stays open. What a long bulk job still slips past it, the nightly
+ * reconciliation corrects to the ERP's absolute figure.
+ */
+const MOVEMENT_SEQ_OVERLAP = parseInt(process.env.ERP_MOVEMENT_SEQ_OVERLAP ?? '2000', 10);
+
+/** Unmirrorable movements retried per store per run — a backlog must not stall the feed. */
+const MOVEMENT_RETRY_BATCH = 200;
 
 /** A category row from the ERP `GET /api/v1/categories`. */
 interface ErpCategory {
@@ -488,6 +512,21 @@ const HEAVY_SYNC_HOUR = parseInt(process.env.ERP_HEAVY_SYNC_HOUR ?? '2', 10);
 const HEAVY_SYNC_CHECK_MS = 15 * 60 * 1000;
 
 /**
+ * Correct every van to the ERP's absolute stock once a night, after the heavy pull.
+ *
+ * The ERP is the book of record for stock; cash-van's figure is a sum of the
+ * movements it has been told about, and a sum can only drift. The feed is now
+ * lossless for everything it can see, but a correction to an absolute figure is
+ * what guarantees convergence whatever went wrong — and until now it only ran when
+ * someone pressed the button. It refuses a short or empty snapshot and leaves alone
+ * any store with documents still on their way to the ERP (reconcileStockToErp), so
+ * running it unattended is the same operation, at 2 a.m., with nobody selling.
+ * ERP_STOCK_RECONCILE_NIGHTLY=off turns it back into a manual one.
+ */
+const NIGHTLY_STOCK_RECONCILE =
+  (process.env.ERP_STOCK_RECONCILE_NIGHTLY ?? 'on').toLowerCase() !== 'off';
+
+/**
  * Where one ERP SKU's stock lands in cash-van: an item, and a POOL inside it.
  *
  * The ERP keys stock by `(sku_id, warehouse_id)`; cash-van keys it by
@@ -542,6 +581,8 @@ export class ErpSyncService {
     @InjectRepository(VoucherTransaction) private readonly txns: Repository<VoucherTransaction>,
     @InjectRepository(ErpIdMap) private readonly idmap: Repository<ErpIdMap>,
     @InjectRepository(ErpSyncCursor) private readonly cursors: Repository<ErpSyncCursor>,
+    @InjectRepository(ErpMovementRetry)
+    private readonly movementRetries: Repository<ErpMovementRetry>,
     private readonly vouchers: VouchersService,
     private readonly outbox: ErpOutboxService,
     @InjectRepository(ErpOutbox) private readonly outboxRepo: Repository<ErpOutbox>,
@@ -1762,6 +1803,26 @@ export class ErpSyncService {
       if (e.tier !== 'heavy') continue;
       this.logger.log(`nightly ERP pull: ${e.entity}`);
       await this.runEntity(e.entity, e.run);
+    }
+    // Last, once the feed and the catalogue are as current as they get tonight.
+    if (NIGHTLY_STOCK_RECONCILE) {
+      this.logger.log('nightly ERP stock reconciliation');
+      await this.runEntity('stock-reconcile', async () => {
+        const r = await this.reconcileStockToErp();
+        for (const a of r.applied) {
+          this.logger.log(
+            `stock reconciled: store ${a.storeNumber}, ${a.pools} pool(s), ` +
+              `${a.absQtyCorrected} piece(s) moved (${a.voucherNumber})`,
+          );
+        }
+        for (const k of r.skipped) {
+          this.logger.warn(`stock reconcile skipped store ${k.storeNumber}: ${k.reason}`);
+        }
+        return {
+          count: r.applied.reduce((t, a) => t + a.pools, 0),
+          skipped: r.skipped.reduce((t, k) => t + k.poolsDrifted, 0),
+        };
+      });
     }
   }
 
@@ -3151,24 +3212,47 @@ export class ErpSyncService {
 
   /**
    * Inbound mirror (ERP → cash-van) for ONE warehouse (van or normal). Pulls the
-   * ERP stock-movement ledger since the per-store cursor and creates a REAL,
+   * ERP stock-movement ledger past the store's cursor and creates a REAL,
    * stock-affecting cash-van voucher of the SAME kind for each movement (SALE,
    * RETURN, TRANSFER, IN, OUT). The ERP feed already excludes cash-van's own
-   * pushes (made by the integration user), so this never echoes our outbound
-   * documents; the `ERP-MV-` prefix + a 'movement' id-map row also dedup and
-   * stop the posted-event handler from pushing them back.
+   * pushes (tagged source='van'), so this never echoes our outbound documents;
+   * the `ERP-MV-` prefix + a 'movement' id-map row also dedup and stop the
+   * posted-event handler from pushing them back.
+   *
+   * **Nothing is lost on the way in.** Two holes let movements vanish for good,
+   * and each one left a van permanently short of what the ERP says it holds:
+   *
+   *  - The cursor was a `createdAt` timestamp, and a transaction's rows carry its
+   *    START time. A posting that committed late sat behind the cursor and was
+   *    never returned. The cursor is now the ERP's `seq`, re-read with an overlap
+   *    (see MOVEMENT_SEQ_OVERLAP) that the id-map makes free of double counting.
+   *  - A movement that failed to mirror was stepped over and the cursor moved on.
+   *    It now goes to `erp_movement_retry` and is retried every run until it
+   *    lands; the cursor still advances, so one bad row never stalls a store.
    */
-  private async pullMovementsForStore(store: string): Promise<number> {
+  private async pullMovementsForStore(store: string): Promise<EntityRunOutcome> {
     const entity = `movements:${store}`;
     const cursor = await this.cursors.findOne({ where: { entity } });
-    const since = cursor?.updatedSince ? cursor.updatedSince.toISOString() : undefined;
-    let n = 0;
+
+    // Old failures first: most were waiting on a catalogue sync that has since run.
+    let n = await this.retryUnmirroredMovements(store);
+    let skipped = 0;
+
+    const seqCursor = cursor?.seqCursor != null ? Number(cursor.seqCursor) : null;
+    // Seq when we have one. Otherwise — the first run after the upgrade, or an ERP
+    // that predates seq — the old timestamp, recording seq as it goes past.
+    const position =
+      seqCursor !== null
+        ? { sinceSeq: Math.max(0, seqCursor - MOVEMENT_SEQ_OVERLAP) }
+        : { since: cursor?.updatedSince ? cursor.updatedSince.toISOString() : undefined };
+
+    let maxSeq = seqCursor;
     let maxTs = cursor?.updatedSince ?? null;
     let page = 1;
     for (;;) {
       const { data } = await this.erp.list<ErpMovement>('stock-movements', {
         warehouseCode: store,
-        since,
+        ...position,
         page,
         // The ERP's real ceiling. Asking for 200 got 100 and the loop below then
         // read a FULL page as the last one, so a store never mirrored more than
@@ -3176,38 +3260,101 @@ export class ErpSyncService {
         pageSize: 100,
       });
       if (data.length === 0) break;
+
+      // One query per page, not per row: with the overlap most of a page is
+      // movements already mirrored.
+      const seen = new Set(
+        (
+          await this.idmap.find({
+            where: { entity: 'movement', erpId: In(data.map((mv) => mv.id)) },
+            select: { erpId: true },
+          })
+        ).map((m) => m.erpId),
+      );
+
       for (const mv of data) {
         const ts = mv.createdAt ? new Date(mv.createdAt) : null;
         if (ts && (!maxTs || ts > maxTs)) maxTs = ts;
-        const seen = await this.idmap.findOne({ where: { entity: 'movement', erpId: mv.id } });
-        if (seen) continue;
+        const seq = mv.seq != null && mv.seq !== '' ? Number(mv.seq) : NaN;
+        if (Number.isFinite(seq) && (maxSeq === null || seq > maxSeq)) maxSeq = seq;
+        if (seen.has(mv.id)) continue;
         try {
           await this.mirrorMovement(mv, store);
+          await this.movementRetries.delete({ erpId: mv.id });
           n += 1;
         } catch (err) {
-          // One unmirrorable movement must NOT stop the other 65. Before this,
-          // a single bad row aborted the store's batch, the cursor never
-          // advanced, and every later sync retried the same row and failed the
-          // same way — so no stock EVER reached cash-van. Log it, skip it, and
-          // let the rest through. The usual cause is a movement whose SKU has
-          // no matching item_cart row, which is a catalogue problem the sync
-          // cannot fix by retrying.
-          this.logger.warn(
-            `Skipped ERP movement ${mv.id} (${mv.skuCode ?? 'no sku'}) for store ` +
-              `${store}: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          // One unmirrorable movement must NOT stop the rest. It is parked, not
+          // dropped: the usual cause is a SKU the catalogue has not synced yet,
+          // which the next item sync fixes and the next run then applies.
+          skipped += 1;
+          await this.parkUnmirroredMovement(mv, store, err);
         }
       }
       if (data.length < 100) break;
       page += 1;
       if (page > 100) break; // safety cap (10k movements / run)
     }
-    if (maxTs) {
+
+    if (maxTs || maxSeq !== null) {
       const c = cursor ?? this.cursors.create({ entity });
-      c.updatedSince = maxTs;
+      if (maxTs) c.updatedSince = maxTs;
+      if (maxSeq !== null) c.seqCursor = String(maxSeq);
       await this.cursors.save(c);
     }
+    return { count: n, skipped };
+  }
+
+  /** Try the store's parked movements again; returns how many landed. */
+  private async retryUnmirroredMovements(store: string): Promise<number> {
+    const parked = await this.movementRetries.find({
+      where: { store },
+      order: { firstFailedAt: 'ASC' },
+      take: MOVEMENT_RETRY_BATCH,
+    });
+    let n = 0;
+    for (const row of parked) {
+      const already = await this.idmap.findOne({ where: { entity: 'movement', erpId: row.erpId } });
+      if (already) {
+        await this.movementRetries.delete({ erpId: row.erpId });
+        continue;
+      }
+      try {
+        await this.mirrorMovement(row.payload as unknown as ErpMovement, store);
+        await this.movementRetries.delete({ erpId: row.erpId });
+        n += 1;
+      } catch (err) {
+        row.attempts += 1;
+        row.lastError = err instanceof Error ? err.message : String(err);
+        row.lastTriedAt = new Date();
+        await this.movementRetries.save(row);
+      }
+    }
+    if (n > 0) this.logger.log(`Mirrored ${n} previously parked ERP movement(s) for store ${store}`);
     return n;
+  }
+
+  private async parkUnmirroredMovement(mv: ErpMovement, store: string, err: unknown): Promise<void> {
+    const message = err instanceof Error ? err.message : String(err);
+    this.logger.warn(
+      `Parked ERP movement ${mv.id} (${mv.skuCode ?? 'no sku'}) for store ${store} ` +
+        `until it can be mirrored: ${message}`,
+    );
+    const existing = await this.movementRetries.findOne({ where: { erpId: mv.id } });
+    if (existing) {
+      existing.attempts += 1;
+      existing.lastError = message;
+      existing.lastTriedAt = new Date();
+      await this.movementRetries.save(existing);
+      return;
+    }
+    await this.movementRetries.save(
+      this.movementRetries.create({
+        erpId: mv.id,
+        store,
+        payload: mv as unknown as Record<string, unknown>,
+        lastError: message,
+      }),
+    );
   }
 
   /**
@@ -3577,12 +3724,23 @@ export class ErpSyncService {
    * one thing worse than skipping a van is correcting the wrong one.
    */
   private async storesWithUnsentDocuments(): Promise<Map<string, string>> {
+    // Every store a queued document touches: a transfer moved stock at BOTH ends
+    // here and at neither end in the ERP. And a dead letter is the most unsent
+    // document of all — it was left out, so a reconciliation read the sale it
+    // stands for as drift and put the goods back on a van that no longer had them.
     const rows: Array<{ store_number: string | null; n: string }> = await this.dataSource.query(
-      `SELECT vt.store_number, COUNT(DISTINCT o.ref)::text AS n
+      `SELECT s.store_number, COUNT(DISTINCT o.ref)::text AS n
          FROM erp_outbox o
          LEFT JOIN voucher_transactions vt ON vt.voucher_number = o.ref
-        WHERE o.status IN ('pending', 'failed')
-        GROUP BY vt.store_number`,
+         LEFT JOIN LATERAL (
+           VALUES (vt.store_number), (vt.from_store_number), (vt.to_store_number)
+         ) AS s(store_number) ON TRUE
+        WHERE o.status IN ('pending', 'failed', 'dead_letter')
+          -- Only what moves stock. A queued customer or collection has no store,
+          -- and read as "unattributed" it held back every van at once.
+          AND o.kind IN ('SALE_INVOICE', 'SALES_RETURN', 'STOCK_ADJUSTMENT', 'STOCK_TRANSFER')
+          AND (s.store_number IS NOT NULL OR vt.voucher_number IS NULL)
+        GROUP BY s.store_number`,
     );
     const blocked = new Map<string, string>();
     let unattributed = 0;

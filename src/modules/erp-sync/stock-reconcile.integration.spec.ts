@@ -267,6 +267,42 @@ run('stock reconciliation to the ERP (real DB)', () => {
     expect(res.skipped[0].reason).toMatch(/on their way to the ERP/);
   });
 
+  it('leaves a store alone while one of its sales sits dead-lettered', async () => {
+    await makeItem(`${P}-DL`);
+    await stockIn(`${P}-SALE-DL`, `${P}-DL`, 12);
+    // A sale the outbox gave up on is a sale the ERP has never seen — its goods
+    // are still on the van THERE. Correcting to that would put them back here.
+    await q(
+      `INSERT INTO erp_outbox (kind, ref, status, attempts)
+       VALUES ('SALE_INVOICE', $1, 'dead_letter', 6)`,
+      [`${P}-SALE-DL`],
+    );
+    erpSnapshot = [{ skuCode: `${P}-DL`, warehouseName: WH_NAME, quantity: 99 }];
+
+    const res = await makeService().reconcileStockToErp();
+
+    expect(await onHand(`${P}-DL`)).toBe(12);
+    expect(res.applied).toHaveLength(0);
+    expect(res.skipped[0].storeNumber).toBe(STORE);
+  });
+
+  it('is not held back by a queued document that moves no stock', async () => {
+    await makeItem(`${P}-COL`);
+    await stockIn(`${P}-IN-COL`, `${P}-COL`, 3);
+    // A collection receipt has no store. Read as "unattributed", it used to hold back
+    // every van in the company until it was sent.
+    await q(
+      `INSERT INTO erp_outbox (kind, ref, status, attempts)
+       VALUES ('PAYMENT', $1, 'pending', 2)`,
+      [`${P}-COL-1`],
+    );
+    erpSnapshot = [{ skuCode: `${P}-COL`, warehouseName: WH_NAME, quantity: 7 }];
+
+    await makeService().reconcileStockToErp();
+
+    expect(await onHand(`${P}-COL`)).toBe(7);
+  });
+
   it('corrects again once the queue has drained', async () => {
     await makeItem(`${P}-G`);
     await stockIn(`${P}-SALE-G`, `${P}-G`, 12);
@@ -277,7 +313,7 @@ run('stock reconciliation to the ERP (real DB)', () => {
     );
     erpSnapshot = [{ skuCode: `${P}-G`, warehouseName: WH_NAME, quantity: 20 }];
 
-    // 'posted' is done and gone — only pending and failed hold a store back.
+    // 'posted' is done and gone — only unsent documents hold a store back.
     await makeService().reconcileStockToErp();
 
     expect(await onHand(`${P}-G`)).toBe(20);

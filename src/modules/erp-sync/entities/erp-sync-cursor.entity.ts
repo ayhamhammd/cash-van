@@ -11,6 +11,14 @@ export class ErpSyncCursor {
   @Column({ name: 'updated_since', type: 'timestamptz', nullable: true })
   updatedSince?: Date | null;
 
+  /**
+   * Stock-movement feeds only: the highest ERP movement `seq` mirrored so far.
+   * A bigint, so TypeORM hands it over as a string. NULL until the feed has been
+   * read once with seq support — see migration LosslessMovementFeed.
+   */
+  @Column({ name: 'seq_cursor', type: 'bigint', nullable: true })
+  seqCursor?: string | null;
+
   @Column({ name: 'last_run_at', type: 'timestamptz', nullable: true })
   lastRunAt?: Date | null;
 
