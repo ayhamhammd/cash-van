@@ -8,6 +8,8 @@ import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.ent
 import { Payment } from '../vouchers/entities/payment.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
+import { ItemCart } from '../items/entities/item-cart.entity';
+import { itemTaxPercent } from '../items/item-tax-rate';
 import { Collection } from '../collections/entities/collection.entity';
 import { Cheque } from '../collections/entities/cheque.entity';
 import { chequeGaps, describeMissing, type ChequeGap } from '../collections/cheque-gaps';
@@ -59,6 +61,15 @@ const ERP_PAYMENT_METHOD: Record<string, string> = {
  */
 export class TerminalPayloadError extends Error {}
 
+/**
+ * A tax-inclusive price rebuilt from the tax-free one cash-van stored for an
+ * exempt customer (stored = quoted ÷ (1 + rate), to 3 decimals). JOD major.
+ */
+export function quotedPrice(storedPrice: number, ratePct: number): number {
+  if (ratePct <= 0 || storedPrice <= 0) return storedPrice;
+  return Math.round(storedPrice * (1 + ratePct / 100) * 1000) / 1000;
+}
+
 @Injectable()
 export class ErpOutboxService {
   private readonly logger = new Logger(ErpOutboxService.name);
@@ -82,6 +93,7 @@ export class ErpOutboxService {
     @InjectRepository(StockRequest) private readonly stockRequests: Repository<StockRequest>,
     @InjectRepository(Rep) private readonly reps: Repository<Rep>,
     @InjectRepository(Cheque) private readonly cheques: Repository<Cheque>,
+    @InjectRepository(ItemCart) private readonly itemCarts: Repository<ItemCart>,
   ) {}
 
   /**
@@ -794,6 +806,7 @@ export class ErpOutboxService {
       sellingPrice: number;
       discountPercent: number;
     }> = [];
+    const quotedPrice = await this.quotedOrderPricer(header, lines);
     for (const l of lines) {
       // Also not terminal — items mirror on the next catalogue sync.
       const sku = await this.idmap.findOne({ where: { entity: 'item', localId: l.itemNumber } });
@@ -806,7 +819,11 @@ export class ErpOutboxService {
         // Carry the salesman's quoted price + discount (human units — the ERP
         // scales by MONEY_SCALE) so the sales order reflects what was offered,
         // not the ERP catalogue price.
-        sellingPrice: Number(l.unitPrice) || 0,
+        //
+        // For a tax-exempt customer that is the price BEFORE cash-van took the
+        // exemption out of it: the ERP applies the exemption itself, from its own
+        // customer record — see quotedOrderPricer.
+        sellingPrice: quotedPrice(l),
         discountPercent: Number(l.discountPercentage) || 0,
       });
     }
@@ -835,6 +852,42 @@ export class ErpOutboxService {
         lines: orderLines,
       },
     };
+  }
+
+  /**
+   * The price the salesman quoted on each order line, as the ERP should see it.
+   *
+   * For a tax-exempt customer on tax-INCLUSIVE prices, VouchersService.create
+   * takes the tax content out of every line's price before it stores the order
+   * (1.160 → 1.000), so the van's own totals are tax-free. Sending that stored
+   * price took the tax out TWICE on the ERP side: its order read 1.000 as a
+   * tax-inclusive price and extracted 16% from it again, and the invoice raised
+   * from the order applied the customer's exemption on top — the customer was
+   * billed 0.862 for a 1.000 item.
+   *
+   * So the order goes as the salesman quoted it, tax included, and the ERP does
+   * the whole calculation: the item's rate, the org's tax mode and the
+   * customer's exemption — the same way it prices an order typed at its desk.
+   *
+   * The quoted price is rebuilt from the stored one and the item's rate (the
+   * order keeps no copy of it). That lands on the quoted price to the fils, or
+   * one fils off it, and the ERP's own strip brings it back to the van's net.
+   * Nothing to rebuild when the voucher is not exempt, or the prices were
+   * exclusive of tax — the stored price was never touched.
+   */
+  private async quotedOrderPricer(
+    header: VoucherHeader,
+    lines: VoucherTransaction[],
+  ): Promise<(line: VoucherTransaction) => number> {
+    const stored = (l: VoucherTransaction) => Number(l.unitPrice) || 0;
+    if (!header.isTaxExempt) return stored;
+    const view = await this.settings.get().catch(() => null);
+    if (view?.taxCalcMethod !== 'INCLUSIVE') return stored;
+
+    const itemNumbers = [...new Set(lines.map((l) => l.itemNumber))];
+    const items = await this.itemCarts.find({ where: { itemNumber: In(itemNumbers) } });
+    const ratePct = new Map(items.map((i) => [i.itemNumber, itemTaxPercent(i)]));
+    return (l) => quotedPrice(stored(l), ratePct.get(l.itemNumber) ?? 0);
   }
 
   /**

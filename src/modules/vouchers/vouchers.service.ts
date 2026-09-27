@@ -19,6 +19,7 @@ import { PaymentCheque } from './entities/payment-cheque.entity';
 import { TransactionKind } from './entities/transaction-kind.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { ItemCart } from '../items/entities/item-cart.entity';
+import { itemTaxPercent } from '../items/item-tax-rate';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
 import { User } from '../users/entities/user.entity';
@@ -789,20 +790,10 @@ export class VouchersService implements OnModuleInit {
         items = await em.getRepository(ItemCart).find({
           where: { itemNumber: In(itemNumbers) },
         });
-        // An item carries the rate in TWO columns: the legacy `tax_percentage`
-        // (whole percent) and the VanFlow `tax_rate` (fraction, default 0.16).
-        // ERP sync sets NEITHER, so a synced item keeps the entity defaults —
-        // tax_rate 0.16 and tax_percentage 0 — and reading only the legacy column
-        // charged every sale 0% tax. That is what made every report print
-        // subTotal = netTotal: there was no tax content to strip out.
-        // Prefer the legacy column when it is actually set, fall back to the
-        // fraction, and honour EXEMPT over both.
-        const rateOf = (i: ItemCart): string => {
-          if (i.taxType === 'EXEMPT') return '0';
-          const legacy = Number(i.taxPercentage) || 0;
-          if (legacy > 0) return String(legacy);
-          return String((Number(i.taxRate) || 0) * 100);
-        };
+        // Read from both of the item's rate columns — see itemTaxPercent. Reading
+        // only the legacy one charged every sale 0% tax, which is what made every
+        // report print subTotal = netTotal: there was no tax content to strip out.
+        const rateOf = (i: ItemCart): string => String(itemTaxPercent(i));
         const taxByItem = new Map(items.map((i) => [i.itemNumber, rateOf(i)]));
         for (const line of dto.transactions) {
           const tax = taxByItem.get(line.itemNumber);
