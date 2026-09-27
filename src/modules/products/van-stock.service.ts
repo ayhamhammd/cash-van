@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 
 import { VanStock } from './entities/van-stock.entity';
 import { Rep } from '../reps/entities/rep.entity';
@@ -26,6 +26,12 @@ export interface VanStockRow {
   /** The item_units row behind the pool — null on a base-pool row. */
   itemUnitId: string | null;
   quantity: number;
+  /**
+   * [quantity] exactly, as integer thousandths of a base piece — the ERP's own
+   * fixed-point, and the figure a handset should count in. `quantity` stays for
+   * the builds already in the field.
+   */
+  quantityMilli: number;
   reserved: number;
   reorderQty: number;
   status: 'sufficient' | 'borderline' | 'stockout';
@@ -50,15 +56,62 @@ export class VanStockService {
    * `item_balance` for the rep's store — the same source the dashboard shows.
    * Falls back to the legacy `van_stock` table for reps with no linked store.
    */
-  async forRep(repId: string): Promise<VanStockRow[]> {
+  async forRep(repId: string, em: EntityManager = this.stock.manager): Promise<VanStockRow[]> {
     await this.assertRep(repId);
-    const store = await this.resolveVanStore(repId);
-    return store ? this.forStore(store) : this.forVanStockTable(repId);
+    const store = await this.resolveVanStore(repId, em);
+    return store ? this.forStore(store, em) : this.forVanStockTable(repId, em);
+  }
+
+  /**
+   * The van as the handset should start from, and which of the handset's own
+   * documents it already contains.
+   *
+   * Both answers come from ONE REPEATABLE READ snapshot, so they describe the
+   * same instant: a document is reported applied only if the balance returned
+   * beside it includes it. The handset then keeps every other document's
+   * movements on top of this balance and drops the applied ones — exact, with no
+   * clock comparison between the phone and the server (docs/SPEC-single-stock-model.md §4).
+   */
+  async snapshot(
+    repId: string,
+    pending: Array<{ ref: string; number?: string | null }>,
+  ): Promise<{ asOf: string; rows: VanStockRow[]; applied: string[] }> {
+    return this.stock.manager.transaction('REPEATABLE READ', async (em) => {
+      const rows = await this.forRep(repId, em);
+      const applied = pending.length ? await this.appliedRefs(em, pending) : [];
+      return { asOf: new Date().toISOString(), rows, applied };
+    });
+  }
+
+  /**
+   * Of the handset's documents, the refs whose stock is already in the balance:
+   * uploaded and promoted to a posted voucher (by clientRef, through the inbox),
+   * or — for a number the server issued — that voucher posted.
+   */
+  private async appliedRefs(
+    em: EntityManager,
+    pending: Array<{ ref: string; number?: string | null }>,
+  ): Promise<string[]> {
+    const rows: Array<{ ref: string }> = await em.query(
+      `SELECT p.ref
+         FROM unnest($1::text[], $2::text[]) AS p(ref, number)
+        WHERE EXISTS (
+                SELECT 1
+                  FROM voucher_inbox i
+                  JOIN voucher_headers vh
+                    ON vh.voucher_number = i.assigned_number AND vh.is_posted = TRUE
+                 WHERE i.client_ref = p.ref AND i.type = 'VOUCHER')
+           OR (p.number IS NOT NULL AND EXISTS (
+                SELECT 1 FROM voucher_headers vh
+                 WHERE vh.voucher_number = p.number AND vh.is_posted = TRUE))`,
+      [pending.map((d) => d.ref), pending.map((d) => d.number || null)],
+    );
+    return rows.map((r) => r.ref);
   }
 
   /** Resolve the rep's van store number (warehouse) — null when unlinked. */
-  private async resolveVanStore(repId: string): Promise<string | null> {
-    const rows: Array<{ wh_number: string }> = await this.stock.manager.query(
+  private async resolveVanStore(repId: string, em: EntityManager): Promise<string | null> {
+    const rows: Array<{ wh_number: string }> = await em.query(
       `SELECT w.wh_number
          FROM reps r
          JOIN warehouses w ON w.id = r.van_id
@@ -74,7 +127,7 @@ export class VanStockService {
    * One row per (product, pool): reservations are grouped by pool too, or an
    * order for 5 red would show as 5 reserved against every colour of the item.
    */
-  private async forStore(store: string): Promise<VanStockRow[]> {
+  private async forStore(store: string, em: EntityManager): Promise<VanStockRow[]> {
     const rows: Array<{
       product_id: string;
       sku: string;
@@ -84,8 +137,9 @@ export class VanStockService {
       item_unit_id: string | null;
       reorder_qty: number;
       quantity: number;
+      quantity_milli: string;
       reserved: number;
-    }> = await this.stock.manager.query(
+    }> = await em.query(
       `SELECT ic.id             AS product_id,
               ic.sku            AS sku,
               ic.name_ar        AS name_ar,
@@ -94,6 +148,7 @@ export class VanStockService {
               iu.id             AS item_unit_id,
               ic.reorder_qty    AS reorder_qty,
               b.qty::float8     AS quantity,
+              ROUND(b.qty * 1000)::bigint AS quantity_milli,
               COALESCE(o.reserved, 0)::float8 AS reserved
          FROM item_balance b
          JOIN item_cart ic
@@ -124,8 +179,9 @@ export class VanStockService {
   }
 
   /** Legacy per-rep van_stock table (reps with no linked store). */
-  private async forVanStockTable(repId: string): Promise<VanStockRow[]> {
-    const rows = await this.stock
+  private async forVanStockTable(repId: string, em: EntityManager): Promise<VanStockRow[]> {
+    const rows = await em
+      .getRepository(VanStock)
       .createQueryBuilder('vs')
       .innerJoin(ItemCart, 'p', 'p.id = vs.product_id')
       .leftJoin(Unit, 'u', `vs.stock_unit_code <> '' AND u.code = vs.stock_unit_code`)
@@ -170,11 +226,16 @@ export class VanStockService {
       item_unit_id: string | null;
       reorder_qty: number;
       quantity: number;
+      quantity_milli?: string | number | null;
       reserved: number;
     },
     snapshotAt: Date,
   ): VanStockRow {
     const quantity = Number(r.quantity);
+    // The ledger's exact figure when the query has it; the legacy table holds
+    // whole pieces, so scaling it is exact too.
+    const quantityMilli =
+      r.quantity_milli != null ? Number(r.quantity_milli) : Math.round(quantity * 1000);
     const reserved = Number(r.reserved);
     const available = quantity - reserved;
     const reorderQty = Number(r.reorder_qty);
@@ -189,6 +250,7 @@ export class VanStockService {
       unitName: r.unit_name ?? null,
       itemUnitId: r.item_unit_id ?? null,
       quantity,
+      quantityMilli,
       reserved,
       reorderQty,
       status,

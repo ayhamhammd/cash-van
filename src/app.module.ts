@@ -33,6 +33,7 @@ import { RepsModule } from './modules/reps/reps.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { RegionsModule } from './modules/regions/regions.module';
 import { ProductsModule } from './modules/products/products.module';
+import { StockLedgerModule } from './modules/stock-ledger/stock-ledger.module';
 import { RoutesModule } from './modules/routes/routes.module';
 import { InvoicesModule } from './modules/invoices/invoices.module';
 import { CollectionsModule } from './modules/collections/collections.module';
@@ -100,6 +101,7 @@ import { SegmentsModule } from './modules/segments/segments.module';
     SettingsModule,
     RegionsModule,
     ProductsModule,
+    StockLedgerModule,
     RoutesModule,
     InvoicesModule,
     CollectionsModule,

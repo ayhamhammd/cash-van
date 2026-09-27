@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   Param,
   ParseUUIDPipe,
   Post,
@@ -17,7 +18,12 @@ import {
 } from '@nestjs/swagger';
 
 import { VanStockService } from './van-stock.service';
-import { VanStockMutationDto } from './dto/van-stock.dto';
+import { VanStockMutationDto, VanStockSnapshotDto } from './dto/van-stock.dto';
+import { RepScopeService } from '../users/rep-scope.service';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 
@@ -26,7 +32,10 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 @UseGuards(RolesGuard)
 @Controller({ path: 'reps', version: '1' })
 export class VanStockController {
-  constructor(private readonly vanStock: VanStockService) {}
+  constructor(
+    private readonly vanStock: VanStockService,
+    private readonly repScope: RepScopeService,
+  ) {}
 
   @Get(':repId/van-stock')
   @ApiOperation({
@@ -37,6 +46,26 @@ export class VanStockController {
   @ApiOkResponse({ description: 'Van stock lines with stockout flags' })
   forRep(@Param('repId', ParseUUIDPipe) repId: string) {
     return this.vanStock.forRep(repId);
+  }
+
+  @Post(':repId/van-stock/snapshot')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Van stock snapshot for a handset',
+    description:
+      'The van, plus which of the handset\'s pending documents that balance already ' +
+      'contains — both read in one transaction. See docs/SPEC-single-stock-model.md §4.',
+  })
+  @ApiParam({ name: 'repId', format: 'uuid', description: 'Rep id' })
+  @ApiOkResponse({ description: '{ asOf, rows, applied }' })
+  async snapshot(
+    @Param('repId', ParseUUIDPipe) repId: string,
+    @Body() dto: VanStockSnapshotDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // A salesman sees his own van only; an office user within their scope.
+    await this.repScope.assertCanSeeRep(user, repId);
+    return this.vanStock.snapshot(repId, dto.pending);
   }
 
   @Post(':repId/van-stock/load')

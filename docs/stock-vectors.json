@@ -1,0 +1,66 @@
+{
+  "about": "Shared stock test cases (docs/SPEC-single-stock-model.md §6). The SAME file lives in FlowVan/docs/. The API runs each case through the real database triggers; the handset runs it through LocalStockLedger. Pools are 'ITEM|POOL' with POOL '' for base pieces. Quantities in 'start' and 'expect' are base pieces x1000. A line's qty is in its unit; factor is base pieces per unit. 'bonus' marks a free line of that unit (free:<unitId> on the handset). 'gifts' are offer gift lines, base pieces, always the base pool.",
+  "cases": [
+    {
+      "name": "a sale takes pieces off the van",
+      "start": { "A|": 20000 },
+      "docs": [{ "kind": "SALE", "lines": [{ "item": "A", "qty": 5, "factor": 1, "pool": "" }] }],
+      "expect": { "A|": 15000 }
+    },
+    {
+      "name": "a carton sale takes its pieces",
+      "start": { "A|": 30000 },
+      "docs": [{ "kind": "SALE", "lines": [{ "item": "A", "qty": 2, "factor": 12, "pool": "" }] }],
+      "expect": { "A|": 6000 }
+    },
+    {
+      "name": "a return puts pieces back",
+      "start": { "A|": 20000 },
+      "docs": [{ "kind": "RETURN", "lines": [{ "item": "A", "qty": 3, "factor": 1, "pool": "" }] }],
+      "expect": { "A|": 23000 }
+    },
+    {
+      "name": "a variant moves its own pool, not the base",
+      "start": { "A|": 10000, "A|RED": 4000 },
+      "docs": [{ "kind": "SALE", "lines": [{ "item": "A", "qty": 3, "factor": 1, "pool": "RED" }] }],
+      "expect": { "A|": 10000, "A|RED": 1000 }
+    },
+    {
+      "name": "a bonus piece of a variant comes off that variant",
+      "start": { "A|": 10000, "A|RED": 30000 },
+      "docs": [{ "kind": "SALE", "lines": [
+        { "item": "A", "qty": 23, "factor": 1, "pool": "RED" },
+        { "item": "A", "qty": 1, "factor": 1, "pool": "RED", "bonus": true }
+      ] }],
+      "expect": { "A|": 10000, "A|RED": 6000 }
+    },
+    {
+      "name": "offer gifts leave with the sale",
+      "start": { "A|": 10000 },
+      "docs": [{ "kind": "SALE", "lines": [{ "item": "A", "qty": 6, "factor": 1, "pool": "" }], "gifts": [{ "item": "A", "qty": 1 }] }],
+      "expect": { "A|": 3000 }
+    },
+    {
+      "name": "a gift of another item comes off that item",
+      "start": { "A|": 10000, "B|": 5000 },
+      "docs": [{ "kind": "SALE", "lines": [{ "item": "A", "qty": 1, "factor": 1, "pool": "" }], "gifts": [{ "item": "B", "qty": 2 }] }],
+      "expect": { "A|": 9000, "B|": 3000 }
+    },
+    {
+      "name": "a weighed quantity is exact",
+      "start": { "A|": 10000 },
+      "docs": [{ "kind": "SALE", "lines": [{ "item": "A", "qty": 2.5, "factor": 1, "pool": "" }] }],
+      "expect": { "A|": 7500 }
+    },
+    {
+      "name": "sales and returns on one pool add up",
+      "start": { "A|": 10000 },
+      "docs": [
+        { "kind": "SALE", "lines": [{ "item": "A", "qty": 4, "factor": 1, "pool": "" }] },
+        { "kind": "RETURN", "lines": [{ "item": "A", "qty": 1, "factor": 1, "pool": "" }] },
+        { "kind": "SALE", "lines": [{ "item": "A", "qty": 1, "factor": 12, "pool": "" }] }
+      ],
+      "expect": { "A|": -5000 }
+    }
+  ]
+}

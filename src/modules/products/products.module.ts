@@ -2,6 +2,7 @@ import { forwardRef, Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ErpSyncModule } from '../erp-sync/erp-sync.module';
+import { UsersModule } from '../users/users.module';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { ItemImage } from '../items/entities/item-image.entity';
@@ -49,6 +50,7 @@ import { PriceListsController } from './price-lists.controller';
       CustomerAiProfile,
     ]),
     forwardRef(() => ErpSyncModule),
+    UsersModule,
   ],
   controllers: [
     ProductsController,
