@@ -155,6 +155,8 @@ interface ErpSku {
   productName?: string;
   /** Groups all unit-SKUs of one product. */
   productId?: string;
+  /** The product's ERP category (its deepest level). */
+  categoryId?: string | null;
   /** True for the base (smallest) sellable unit — its multiplier is 1. */
   isBaseUnit?: boolean;
   /** Pieces (base units) this SKU's unit represents (1 for base, 30 for a طرد of 30). */
@@ -4601,6 +4603,15 @@ export class ErpSyncService {
     item.price = Math.round((Number(base.sellingPrice) || 0) * 1000); // major → fils
     item.cost = Math.round((Number(base.unitCost) || 0) * 1000); // major → fils
     item.isActive = base.isActive ?? true;
+    // The product's category, which the van app groups the catalogue by. The ERP
+    // always sent it; it was never copied, so every ERP item arrived here with no
+    // category and the app's category filter had nothing to list. Categories
+    // sync before items, so the id-map already holds it.
+    const catMap = base.categoryId
+      ? await this.idmap.findOne({ where: { entity: 'category', erpId: base.categoryId } })
+      : null;
+    item.categoryId = catMap?.localId ?? null;
+    item.erpCategoryId = base.categoryId ?? null;
     // Only overwrite the stored image when this sweep yields a usable one. A sweep
     // that returns no image, or a relative path we can't resolve (erpOrigin
     // momentarily unavailable), must NOT blank an image the item already shows —
@@ -4700,7 +4711,7 @@ export class ErpSyncService {
     return JSON.stringify([
       i.sku, i.name, i.nameAr, i.nameEn, i.barcode, i.price, i.cost,
       i.isActive, i.imageUrl, i.isTobaccoProduct, i.tobaccoTaxProfileId,
-      i.consumerPriceFils,
+      i.consumerPriceFils, i.categoryId,
     ]);
   }
 
