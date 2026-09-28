@@ -1848,15 +1848,22 @@ export class ErpSyncService {
       cat.deletedAt = null; // restore if it had been pruned
       cat.nameAr = c.name;
       cat.nameEn = c.name;
-      if (c.parentId) {
-        const pmap = await this.idmap.findOne({ where: { entity: 'category', erpId: c.parentId } });
-        cat.parentId = pmap?.localId ?? null;
-      } else {
-        cat.parentId = null;
-      }
       await this.productCategories.save(cat);
       await this.upsertIdMap('category', c.id, c.name, cat.id);
       n += 1;
+    }
+    // Parents in a second pass: the ERP may list a child before its parent, and
+    // on a first pull that parent has no local id yet. Linked in the same pass,
+    // the child stayed top-level until the next sync and its products were
+    // filed under the wrong first level.
+    for (const c of data) {
+      if (!c.id || !c.name) continue;
+      const map = await this.idmap.findOne({ where: { entity: 'category', erpId: c.id } });
+      if (!map?.localId) continue;
+      const pmap = c.parentId
+        ? await this.idmap.findOne({ where: { entity: 'category', erpId: c.parentId } })
+        : null;
+      await this.productCategories.update({ id: map.localId }, { parentId: pmap?.localId ?? null });
     }
     // Categories deleted in the ERP → soft-delete locally (guarded against an empty pull).
     await this.pruneVanished('category', seen, async (id) => {

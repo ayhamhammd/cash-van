@@ -10,6 +10,7 @@ import { ProductCategory } from './entities/product-category.entity';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ListProductsQuery } from './dto/list-products.query';
+import { topCategoryOf } from './top-category';
 import { applyTokenSearch } from '../../common/search/token-search.util';
 
 /** One sellable unit of an item (base + each item_unit), sent to the app. */
@@ -95,11 +96,18 @@ export class ProductsService {
       ...new Set(items.map((i) => i.categoryId).filter((c): c is string => !!c)),
     ];
     if (ids.length === 0) return;
-    const cats = await this.categories.find({ where: { id: In(ids) } });
+    // Every category, not just the page's: the first level a product sits under
+    // is found by walking up, and its ancestors are not on the page.
+    const cats = await this.categories.find({ select: { id: true, nameAr: true, parentId: true } });
     const nameById = new Map(cats.map((c) => [c.id, c.nameAr]));
+    const parentById = new Map(cats.map((c) => [c.id, c.parentId ?? null]));
     for (const item of items) {
-      (item as ItemCart & { categoryName: string | null }).categoryName =
-        item.categoryId ? (nameById.get(item.categoryId) ?? null) : null;
+      const top = topCategoryOf(item.categoryId, parentById);
+      Object.assign(item, {
+        categoryName: item.categoryId ? (nameById.get(item.categoryId) ?? null) : null,
+        topCategoryId: top,
+        topCategoryName: top ? (nameById.get(top) ?? null) : null,
+      });
     }
   }
 
