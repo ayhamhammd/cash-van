@@ -58,6 +58,7 @@ import { ArModule } from './modules/ar/ar.module';
 import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module';
 import { InvoiceTemplatesModule } from './modules/invoice-templates/invoice-templates.module';
 import { SegmentsModule } from './modules/segments/segments.module';
+import { AreasModule } from './modules/areas/areas.module';
 
 @Module({
   imports: [
@@ -126,6 +127,7 @@ import { SegmentsModule } from './modules/segments/segments.module';
     CashAccountsModule,
     InvoiceTemplatesModule,
     SegmentsModule,
+    AreasModule,
   ],
   controllers: [HealthController],
   providers: [

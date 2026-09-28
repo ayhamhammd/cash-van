@@ -31,6 +31,7 @@ import { hashPhone } from '../../common/utils/phone-hash.util';
 import { JobsService } from '../../common/jobs/jobs.service';
 import { StorageService } from '../../common/storage/storage.service';
 import { randomUUID } from 'crypto';
+import { AreasService } from '../areas/areas.service';
 import { applyTokenSearch } from '../../common/search/token-search.util';
 
 export interface CustomerInsights {
@@ -68,6 +69,7 @@ export class CustomersService {
   constructor(
     @Inject(forwardRef(() => ApprovalsService))
     private readonly approvals: ApprovalsService,
+    private readonly areas: AreasService,
     @InjectRepository(PendingCustomerPhoto)
     private readonly pendingPhotos: Repository<PendingCustomerPhoto>,
     @InjectRepository(Customer)
@@ -248,6 +250,7 @@ export class CustomersService {
   }
 
   async create(dto: CreateCustomerDto): Promise<Customer> {
+    if (dto.areaId) await this.areas.assertAssignable(dto.areaId);
     const customerNumber =
       dto.customerNumber?.trim() || (await this.nextCustomerNumber());
     const exists = await this.customers.exist({ where: { customerNumber } });
@@ -290,6 +293,11 @@ export class CustomersService {
       repId: saved.repId ?? null,
     });
     return saved;
+  }
+
+  /** Areas a customer can be filed under, as the app's picker needs them. */
+  areaOptions() {
+    return this.areas.options();
   }
 
   /**
@@ -349,6 +357,9 @@ export class CustomersService {
 
   async update(id: string, dto: UpdateCustomerDto): Promise<Customer> {
     const customer = await this.findOneOrThrow(id);
+    if (dto.areaId && dto.areaId !== customer.areaId) {
+      await this.areas.assertAssignable(dto.areaId);
+    }
     Object.assign(customer, dto);
     if (dto.phone !== undefined) {
       customer.phoneHash = hashPhone(dto.phone);
@@ -464,6 +475,8 @@ export class CustomersService {
       );
     }
     if (query.regionId) qb.andWhere('c.region_id = :regionId', { regionId: query.regionId });
+    if (query.noArea) qb.andWhere('c.area_id IS NULL');
+    else if (query.areaId) qb.andWhere('c.area_id = :areaId', { areaId: query.areaId });
     if (query.isActive !== undefined) qb.andWhere('c.is_active = :a', { a: query.isActive });
 
     applyTokenSearch(qb, query.q, [

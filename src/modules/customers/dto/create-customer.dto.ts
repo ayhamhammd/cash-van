@@ -53,6 +53,15 @@ export class CreateCustomerDto {
   @IsUUID()
   segmentId?: string;
 
+  @ApiPropertyOptional({
+    format: 'uuid',
+    nullable: true,
+    description: 'The customer area (GET /customers/areas). One per customer; null clears it on update.',
+  })
+  @IsOptional()
+  @IsUUID()
+  areaId?: string | null;
+
   @ApiPropertyOptional({ description: 'Auto-generated (CUST-000001) when omitted.' })
   @IsOptional()
   @IsString()

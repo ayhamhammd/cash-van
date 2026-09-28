@@ -45,6 +45,17 @@ export class ListCustomersQuery {
   @IsBoolean()
   unsegmented?: boolean;
 
+  @ApiPropertyOptional({ format: 'uuid', description: 'Only customers in this area.' })
+  @IsOptional()
+  @IsUUID()
+  areaId?: string;
+
+  @ApiPropertyOptional({ description: 'Only customers in no area.' })
+  @IsOptional()
+  @Type(() => Boolean)
+  @IsBoolean()
+  noArea?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @Type(() => Boolean)

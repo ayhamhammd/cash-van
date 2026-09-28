@@ -91,6 +91,16 @@ export class CustomersController {
    *
    * Declared ahead of `:id`, or Nest matches "segments" as a customer id.
    */
+  /**
+   * Areas a rep may file a customer under — open to any signed-in user, like
+   * the segments picker. Declared ahead of `:id`, or Nest reads "areas" as an id.
+   */
+  @Get('areas')
+  @ApiOperation({ summary: 'Active customer areas, for the create-customer picker' })
+  areaOptions() {
+    return this.customers.areaOptions();
+  }
+
   @Get('segments')
   @ApiOperation({
     summary: 'Customer segments, for the create-customer picker',

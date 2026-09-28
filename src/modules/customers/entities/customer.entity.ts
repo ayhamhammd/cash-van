@@ -56,6 +56,11 @@ export class Customer extends BaseEntity {
   @Column({ name: 'region_id', type: 'uuid', nullable: true })
   regionId?: string | null;
 
+  /** The customer's area (customer_areas). One per customer; null is "no area". */
+  @Index('idx_customers_area')
+  @Column({ name: 'area_id', type: 'uuid', nullable: true })
+  areaId?: string | null;
+
   @Index('idx_customers_category')
   @Column({ type: 'text', nullable: true })
   category?: CustomerCategory | null;
