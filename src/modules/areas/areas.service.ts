@@ -55,6 +55,12 @@ export class AreasService {
     return rows.map((r) => ({ id: r.id, nameAr: r.nameAr, nameEn: r.nameEn ?? null, color: r.color ?? null }));
   }
 
+  /** Arabic names by id, deleted areas included, for labelling customers. */
+  async namesById(ids: string[]): Promise<Map<string, string>> {
+    const rows = await this.areas.find({ where: { id: In(ids) }, withDeleted: true });
+    return new Map(rows.filter((r) => !r.deletedAt).map((r) => [r.id, r.nameAr]));
+  }
+
   async getOne(id: string): Promise<CustomerArea> {
     const area = await this.areas.findOne({ where: { id } });
     if (!area) throw new NotFoundException('This area no longer exists. Refresh the areas list.');

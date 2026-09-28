@@ -503,7 +503,20 @@ export class CustomersService {
     }
 
     const [items, total] = await qb.getManyAndCount();
+    await this.attachAreaNames(items);
     return { items, total };
+  }
+
+  /**
+   * The area's name on each customer, so the van app can filter its round by
+   * area offline without a second list to keep in step.
+   */
+  private async attachAreaNames(items: Customer[]): Promise<void> {
+    const ids = [...new Set(items.map((c) => c.areaId).filter((a): a is string => !!a))];
+    const names = ids.length ? await this.areas.namesById(ids) : new Map<string, string>();
+    for (const c of items) {
+      Object.assign(c, { areaName: c.areaId ? (names.get(c.areaId) ?? null) : null });
+    }
   }
 
   async insights(id: string): Promise<CustomerInsights> {

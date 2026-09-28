@@ -27,6 +27,7 @@ run('customer areas (real DB)', () => {
   function listCustomers(query: Record<string, unknown>) {
     const svc = Object.create(CustomersService.prototype) as Record<string, unknown>;
     svc.customers = ds.getRepository('Customer');
+    svc.areas = areas;
     return (svc as unknown as CustomersService).list({ limit: 50, offset: 0, q: P, ...query } as never);
   }
 
@@ -92,6 +93,7 @@ run('customer areas (real DB)', () => {
     const zarqa = (await areas.list()).items.find((a) => a.nameAr === `${P} الزرقاء`)!;
     const inZarqa = await listCustomers({ areaId: zarqa.id });
     expect(inZarqa.items.map((c) => c.id)).toEqual([customerIds[0]]);
+    expect((inZarqa.items[0] as unknown as { areaName: string }).areaName).toBe(`${P} الزرقاء`);
     const none = await listCustomers({ noArea: true });
     expect(none.items.map((c) => c.id)).toEqual([customerIds[2]]);
   });
