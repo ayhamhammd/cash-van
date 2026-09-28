@@ -527,11 +527,11 @@ const HEAVY_SYNC_CHECK_MS = 15 * 60 * 1000;
  * ERP_STOCK_RECONCILE_NIGHTLY=off turns it back into a manual one.
  */
 const NIGHTLY_STOCK_RECONCILE =
-  (process.env.ERP_STOCK_RECONCILE_NIGHTLY ?? 'on').toLowerCase() !== 'off';
+  (process.env.ERP_STOCK_RECONCILE_NIGHTLY ?? 'off').toLowerCase() === 'on';
 
 const STOCK_RECONCILE_EVERY_MIN = Math.max(
   0,
-  parseInt(process.env.ERP_STOCK_RECONCILE_EVERY_MIN ?? '15', 10) || 0,
+  parseInt(process.env.ERP_STOCK_RECONCILE_EVERY_MIN ?? '0', 10) || 0,
 );
 const STOCK_RECONCILE_TICK_MS = 60 * 1000;
 
