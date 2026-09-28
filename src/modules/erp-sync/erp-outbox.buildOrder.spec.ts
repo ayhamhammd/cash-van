@@ -44,7 +44,7 @@ function build(opts: {
   const idmap = {
     findOne: jest.fn(({ where }: { where: { entity: string; localId: string } }) => {
       if (where.entity === 'customer') {
-        const id = opts.custErpId === undefined ? 'cust-uuid' : opts.custErpId;
+        const id = opts.custErpId === undefined ? '5f1c2d3e-0000-4000-8000-00000000c001' : opts.custErpId;
         return Promise.resolve(id ? { erpId: id } : null);
       }
       if (where.entity === 'item') {
@@ -126,7 +126,7 @@ describe('ErpOutboxService.buildOrder (ORDER → ERP sales order)', () => {
           items: { A: 'sku-a' },
         }),
       ).toEqual({
-        customerId: 'cust-uuid',
+        customerId: '5f1c2d3e-0000-4000-8000-00000000c001',
         vanWarehouseCode: 'VAN-07',
         lines: [{ skuId: 'sku-a', quantity: 2.5, sellingPrice: 3.25, discountPercent: 5 }],
       });
@@ -141,7 +141,7 @@ describe('ErpOutboxService.buildOrder (ORDER → ERP sales order)', () => {
     expect(call).toEqual({
       path: 'sales-orders',
       body: {
-        customerId: 'cust-uuid',
+        customerId: '5f1c2d3e-0000-4000-8000-00000000c001',
         lines: [{ skuId: 'sku-1', quantity: 2.5, sellingPrice: 12.5, discountPercent: 5 }],
       },
     });
@@ -161,6 +161,13 @@ describe('ErpOutboxService.buildOrder (ORDER → ERP sales order)', () => {
   it('retries (null) while the customer is not yet id-mapped', async () => {
     expect(
       await build({ custErpId: null, lines: [line('A', '1', '1')], items: { A: 'sku-a' } }),
+    ).toBeNull();
+  });
+
+  it('waits (null) when the customer map holds a CODE, not the ERP UUID', async () => {
+    // The old customer export stored the code; sending it failed "customerId: Invalid UUID".
+    expect(
+      await build({ custErpId: 'CUST-000002', lines: [line('A', '1', '1')], items: { A: 'sku-a' } }),
     ).toBeNull();
   });
 

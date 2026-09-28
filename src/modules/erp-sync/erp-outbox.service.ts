@@ -23,11 +23,15 @@ import { CashAccountsService } from '../cash-accounts/cash-accounts.service';
 import { ErpHttpClient } from './erp-http.client';
 import { enqueueOutboxWithin } from './outbox-enqueue';
 import { ErpIdMap } from './entities/erp-id-map.entity';
+
 import {
   ErpOutbox,
   ErpOutboxKind,
   ErpOutboxStatus,
 } from './entities/erp-outbox.entity';
+
+const ERP_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isErpUuid = (v: string): boolean => ERP_UUID.test(v);
 
 /**
  * Attempts before a document the ERP REJECTED (a 4xx) is dead-lettered.
@@ -419,14 +423,22 @@ export class ErpOutboxService {
         // Find-then-update, not create+save: a blind insert added a SECOND map
         // row on every retry, and the customer sync then resolves an ambiguous
         // identity for the same code.
-        const existing = await this.idmap.findOne({
-          where: { entity: 'customer', localId: row.ref },
-        });
-        const map =
-          existing ?? this.idmap.create({ entity: 'customer', localId: row.ref });
-        map.erpId = row.resultRef ?? row.ref;
-        map.erpCode = row.ref;
-        await this.idmap.save(map);
+        //
+        // The map holds the ERP's customer UUID - an order sends it as
+        // customerId. It used to fall back to the customer CODE, which the ERP
+        // rejects ("customerId: Invalid UUID"). No UUID in the reply: write
+        // nothing and let the customer pull map it by code.
+        const erpCustomerId = this.extractErpUuid(lastData);
+        if (erpCustomerId) {
+          const existing = await this.idmap.findOne({
+            where: { entity: 'customer', localId: row.ref },
+          });
+          const map =
+            existing ?? this.idmap.create({ entity: 'customer', localId: row.ref });
+          map.erpId = erpCustomerId;
+          map.erpCode = row.ref;
+          await this.idmap.save(map);
+        }
       }
       if (row.kind === 'SALE_INVOICE' && row.resultRef) {
         await this.mapVoucher(row.ref, row.resultRef);
@@ -861,7 +873,9 @@ export class ErpOutboxService {
     const cust = await this.idmap.findOne({
       where: { entity: 'customer', localId: header.customerNumber },
     });
-    if (!cust?.erpId) return null;
+    // A code where the UUID belongs (written by the old customer export) is not
+    // an ERP id: wait for the customer pull to map the real one.
+    if (!cust?.erpId || !isErpUuid(cust.erpId)) return null;
 
     const lines = await this.lines.find({ where: { voucherNumber } });
     if (lines.length === 0) {
@@ -1359,6 +1373,15 @@ export class ErpOutboxService {
           'collected in the van but is not in the ERP books.',
       );
     }
+  }
+
+  /** The created record's ERP id, when the reply carries one that is a UUID. */
+  private extractErpUuid(data: unknown): string | null {
+    if (!data || typeof data !== 'object') return null;
+    const top = data as Record<string, unknown>;
+    const d = (top.data as Record<string, unknown> | undefined) ?? top;
+    const id = d?.id;
+    return typeof id === 'string' && isErpUuid(id) ? id : null;
   }
 
   private extractResultRef(data: unknown): string | null {

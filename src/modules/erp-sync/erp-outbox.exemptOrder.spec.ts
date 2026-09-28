@@ -22,7 +22,9 @@ function build(opts: {
   args[1] = { get: jest.fn().mockResolvedValue({ taxCalcMethod: opts.taxCalcMethod ?? 'INCLUSIVE' }) };
   args[4] = {
     findOne: jest.fn(({ where }: { where: { entity: string; localId: string } }) =>
-      Promise.resolve({ erpId: `${where.entity}-${where.localId}` }),
+      Promise.resolve({
+        erpId: where.entity === 'customer' ? '5f1c2d3e-0000-4000-8000-00000000c001' : `${where.entity}-${where.localId}`,
+      }),
     ),
   };
   args[5] = { findOne: jest.fn().mockResolvedValue({ voucherNumber: 'ORD-1', customerNumber: 'C-1', ...opts.header }) };
