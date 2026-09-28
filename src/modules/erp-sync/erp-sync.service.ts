@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -528,6 +529,12 @@ const HEAVY_SYNC_CHECK_MS = 15 * 60 * 1000;
 const NIGHTLY_STOCK_RECONCILE =
   (process.env.ERP_STOCK_RECONCILE_NIGHTLY ?? 'on').toLowerCase() !== 'off';
 
+const STOCK_RECONCILE_EVERY_MIN = Math.max(
+  0,
+  parseInt(process.env.ERP_STOCK_RECONCILE_EVERY_MIN ?? '15', 10) || 0,
+);
+const STOCK_RECONCILE_TICK_MS = 60 * 1000;
+
 /**
  * Where one ERP SKU's stock lands in cash-van: an item, and a POOL inside it.
  *
@@ -549,6 +556,8 @@ interface StockTarget {
 export class ErpSyncService {
   private readonly logger = new Logger(ErpSyncService.name);
   private pulling = false;
+  private reconciling = false;
+  private lastAutoReconcileAt = 0;
   private webhookTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Entities with a run in flight right now, whether from the sweep or from a
@@ -1809,23 +1818,37 @@ export class ErpSyncService {
     // Last, once the feed and the catalogue are as current as they get tonight.
     if (NIGHTLY_STOCK_RECONCILE) {
       this.logger.log('nightly ERP stock reconciliation');
-      await this.runEntity('stock-reconcile', async () => {
-        const r = await this.reconcileStockToErp();
-        for (const a of r.applied) {
-          this.logger.log(
-            `stock reconciled: store ${a.storeNumber}, ${a.pools} pool(s), ` +
-              `${a.absQtyCorrected} piece(s) moved (${a.voucherNumber})`,
-          );
-        }
-        for (const k of r.skipped) {
-          this.logger.warn(`stock reconcile skipped store ${k.storeNumber}: ${k.reason}`);
-        }
-        return {
-          count: r.applied.reduce((t, a) => t + a.pools, 0),
-          skipped: r.skipped.reduce((t, k) => t + k.poolsDrifted, 0),
-        };
-      });
+      await this.runStockReconcile();
     }
+  }
+
+  @Interval(STOCK_RECONCILE_TICK_MS)
+  async scheduledStockReconcile(): Promise<void> {
+    if (STOCK_RECONCILE_EVERY_MIN === 0 || this.reconciling) return;
+    if (Date.now() - this.lastAutoReconcileAt < STOCK_RECONCILE_EVERY_MIN * 60 * 1000) return;
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return;
+    this.lastAutoReconcileAt = Date.now();
+    await this.runStockReconcile();
+  }
+
+  private async runStockReconcile(): Promise<void> {
+    await this.runEntity('stock-reconcile', async () => {
+      const r = await this.reconcileStockToErp();
+      for (const a of r.applied) {
+        this.logger.log(
+          `stock reconciled: store ${a.storeNumber}, ${a.pools} pool(s), ` +
+            `${a.absQtyCorrected} piece(s) moved (${a.voucherNumber})`,
+        );
+      }
+      for (const k of r.skipped) {
+        this.logger.warn(`stock reconcile skipped store ${k.storeNumber}: ${k.reason}`);
+      }
+      return {
+        count: r.applied.reduce((t, a) => t + a.pools, 0),
+        skipped: r.skipped.reduce((t, k) => t + k.poolsDrifted, 0),
+      };
+    });
   }
 
   /**
@@ -3609,6 +3632,23 @@ export class ErpSyncService {
   async reconcileStockToErp(
     opts: { dryRun?: boolean } = {},
   ): Promise<StockReconcileResult> {
+    if (opts.dryRun) return this.reconcileStockOnce(opts);
+    if (this.reconciling) {
+      throw new ConflictException(
+        'Van stock is already being matched to the ERP. Wait a minute for it to finish, then refresh Stock Balances.',
+      );
+    }
+    this.reconciling = true;
+    try {
+      return await this.reconcileStockOnce(opts);
+    } finally {
+      this.reconciling = false;
+    }
+  }
+
+  private async reconcileStockOnce(
+    opts: { dryRun?: boolean },
+  ): Promise<StockReconcileResult> {
     const cfg = await this.settings.getErpConfig();
     if (!cfg.enabled) {
       throw new ServiceUnavailableException('The ERP connection is turned off.');
@@ -3617,6 +3657,7 @@ export class ErpSyncService {
     // 1. Apply everything the ERP has already published. Skipping this would
     //    read a movement that is merely late as though it were drift.
     if (!opts.dryRun) await this.pullAllMovements();
+    const [{ t0 }]: Array<{ t0: Date }> = await this.dataSource.query(`SELECT now() AS t0`);
 
     // 2. Measure. Same detector the drift report uses — one implementation of
     //    "what do the two sides disagree about", so the report and the fix can
@@ -3649,7 +3690,8 @@ export class ErpSyncService {
     // 4. Which stores have documents still on their way to the ERP. For those,
     //    the ERP's figure is behind by definition and is not something to
     //    correct towards.
-    const blocked = await this.storesWithUnsentDocuments();
+    if (!opts.dryRun) await this.pullAllMovements();
+    const blocked = await this.storesWithUnsentDocuments(t0);
 
     const byStore = new Map<string, typeof drift.rows>();
     for (const r of drift.rows) {
@@ -3732,7 +3774,7 @@ export class ErpSyncService {
    * A queued document whose store cannot be determined blocks EVERY store: the
    * one thing worse than skipping a van is correcting the wrong one.
    */
-  private async storesWithUnsentDocuments(): Promise<Map<string, string>> {
+  private async storesWithUnsentDocuments(since?: Date): Promise<Map<string, string>> {
     // Every store a queued document touches: a transfer moved stock at BOTH ends
     // here and at neither end in the ERP. And a dead letter is the most unsent
     // document of all — it was left out, so a reconciliation read the sale it
@@ -3744,12 +3786,15 @@ export class ErpSyncService {
          LEFT JOIN LATERAL (
            VALUES (vt.store_number), (vt.from_store_number), (vt.to_store_number)
          ) AS s(store_number) ON TRUE
-        WHERE o.status IN ('pending', 'failed', 'dead_letter')
+        WHERE (o.status IN ('pending', 'failed', 'dead_letter')
+               OR ($1::timestamptz IS NOT NULL
+                   AND o.updated_at >= $1::timestamptz - interval '1 minute'))
           -- Only what moves stock. A queued customer or collection has no store,
           -- and read as "unattributed" it held back every van at once.
           AND o.kind IN ('SALE_INVOICE', 'SALES_RETURN', 'STOCK_ADJUSTMENT', 'STOCK_TRANSFER')
           AND (s.store_number IS NOT NULL OR vt.voucher_number IS NULL)
         GROUP BY s.store_number`,
+      [since ?? null],
     );
     const blocked = new Map<string, string>();
     let unattributed = 0;
@@ -3762,6 +3807,26 @@ export class ErpSyncService {
         r.store_number,
         `${r.n} document(s) still on their way to the ERP — reconciling now would erase them`,
       );
+    }
+    if (since) {
+      const moved: Array<{ store_number: string; n: string }> = await this.dataSource.query(
+        `SELECT store_number, COUNT(*)::text AS n
+           FROM stock_movements
+          WHERE COALESCE(voucher_number, '') NOT LIKE 'ERP-RECON-%'
+            AND created_at >= CASE
+                  WHEN COALESCE(voucher_number, '') LIKE 'ERP-MV-%' THEN $1::timestamptz
+                  ELSE $1::timestamptz - interval '1 minute'
+                END
+          GROUP BY store_number`,
+        [since],
+      );
+      for (const r of moved) {
+        if (blocked.has(r.store_number)) continue;
+        blocked.set(
+          r.store_number,
+          `stock moved ${r.n} time(s) while the ERP was being read — it will be matched on the next run`,
+        );
+      }
     }
     if (unattributed > 0) {
       for (const s of await this.allStoreCodes()) {

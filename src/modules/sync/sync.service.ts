@@ -57,6 +57,10 @@ export interface IntakeResult {
  */
 export type IntakeVerdict = 'accepted' | 'posted' | 'rejected';
 
+
+const NO_STORE = 'NA';
+const MOVES_VAN_STOCK = new Set(['SALE', 'RETURN']);
+
 @Injectable()
 export class SyncService {
   private readonly logger = new Logger(SyncService.name);
@@ -278,6 +282,12 @@ export class SyncService {
   private async promoteVoucher(row: VoucherInbox, store: string): Promise<void> {
     try {
       const dto = { ...(row.payload as unknown as CreateVoucherDto) };
+      if (store === NO_STORE && MOVES_VAN_STOCK.has(dto.transKind)) {
+        throw new NotFoundException(
+          `Van not found for salesman ${dto.userCode ?? row.userCode ?? ''}: link a van to this salesman on the Reps page. ` +
+            'The document is kept and goes through by itself once the van is linked.',
+        );
+      }
       dto.voucherNumber = row.assignedNumber ?? undefined;
       // Mobile documents are completed transactions → post on promotion.
       dto.isPosted = true;
@@ -611,7 +621,7 @@ export class SyncService {
       const van = await this.vouchers.resolveRepVanStore(repId);
       if (van) return van;
     }
-    return 'NA';
+    return NO_STORE;
   }
 
   private async storeForRow(row: VoucherInbox): Promise<string> {

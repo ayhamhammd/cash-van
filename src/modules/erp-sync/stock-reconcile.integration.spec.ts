@@ -49,6 +49,8 @@ run('stock reconciliation to the ERP (real DB)', () => {
     );
     await q(`DELETE FROM voucher_headers WHERE voucher_number LIKE $1`, [`%${P}%`]);
     await q(`DELETE FROM erp_outbox WHERE ref LIKE $1`, [`%${P}%`]);
+    await q(`DELETE FROM stock_movements WHERE store_number LIKE $1`, [`${P}%`]);
+    await q(`DELETE FROM stock_balance WHERE store_number LIKE $1`, [`${P}%`]);
     await q(`DELETE FROM item_units WHERE item_id IN (SELECT id FROM item_cart WHERE item_number LIKE $1)`, [`${P}%`]);
     await q(`DELETE FROM item_cart WHERE item_number LIKE $1`, [`${P}%`]);
     await q(`DELETE FROM warehouses WHERE wh_number LIKE $1`, [`${P}%`]);
@@ -78,6 +80,9 @@ run('stock reconciliation to the ERP (real DB)', () => {
           to_store_number, item_qty, signed_qty, qty_of_unit, unit_base_qty, stock_unit_code)
        VALUES ($1,$2,$2,'IN',$3,$3,$4,$4,$4,1,'')`,
       [voucher, itemNumber, STORE, qty],
+    );    await q(
+      `UPDATE stock_movements SET created_at = now() - interval '10 minutes' WHERE voucher_number = $1`,
+      [voucher],
     );
   }
 
@@ -311,12 +316,71 @@ run('stock reconciliation to the ERP (real DB)', () => {
        VALUES ('SALE_INVOICE', $1, 'posted', 1)`,
       [`${P}-SALE-G`],
     );
+    await q(
+      `UPDATE erp_outbox SET updated_at = now() - interval '10 minutes' WHERE ref = $1`,
+      [`${P}-SALE-G`],
+    );
     erpSnapshot = [{ skuCode: `${P}-G`, warehouseName: WH_NAME, quantity: 20 }];
 
     // 'posted' is done and gone — only unsent documents hold a store back.
     await makeService().reconcileStockToErp();
 
     expect(await onHand(`${P}-G`)).toBe(20);
+  });
+
+  it('leaves a store alone when a sale lands on it while the ERP is being read', async () => {
+    await makeItem(`${P}-RACE`);
+    await stockIn(`${P}-IN-RACE`, `${P}-RACE`, 10);
+    erpSnapshot = [{ skuCode: `${P}-RACE`, warehouseName: WH_NAME, quantity: 10 }];
+    const svc = makeService();
+    let drains = 0;
+    (svc as unknown as { pullAllMovements: () => Promise<[]> }).pullAllMovements = async () => {
+      drains += 1;
+      if (drains === 2) {
+        await q(
+          `INSERT INTO voucher_headers (voucher_number, trans_kind, user_code, in_date, is_posted)
+           VALUES ($1,'OUT',$2, now(), TRUE)`,
+          [`${P}-LATE`, USER_CODE],
+        );
+        await q(
+          `INSERT INTO voucher_transactions
+             (voucher_number, item_number, item_name, trans_kind, store_number,
+              from_store_number, item_qty, signed_qty, qty_of_unit, unit_base_qty, stock_unit_code)
+           VALUES ($1,$2,$2,'OUT',$3,$3,4,-4,4,1,'')`,
+          [`${P}-LATE`, `${P}-RACE`, STORE],
+        );
+      }
+      return [];
+    };
+    erpSnapshot = [{ skuCode: `${P}-RACE`, warehouseName: WH_NAME, quantity: 3 }];
+
+    const res = await svc.reconcileStockToErp();
+
+    expect(await onHand(`${P}-RACE`)).toBe(6);
+    expect(res.applied).toHaveLength(0);
+    expect(res.skipped[0].reason).toMatch(/next run/);
+  });
+
+  it('leaves a store alone when one of its sales reached the ERP during the read', async () => {
+    await makeItem(`${P}-SENT`);
+    await stockIn(`${P}-SALE-SENT`, `${P}-SENT`, 12);
+    await q(
+      `INSERT INTO erp_outbox (kind, ref, status, attempts)
+       VALUES ('SALE_INVOICE', $1, 'posted', 1)`,
+      [`${P}-SALE-SENT`],
+    );
+    erpSnapshot = [{ skuCode: `${P}-SENT`, warehouseName: WH_NAME, quantity: 20 }];
+
+    const res = await makeService().reconcileStockToErp();
+
+    expect(await onHand(`${P}-SENT`)).toBe(12);
+    expect(res.applied).toHaveLength(0);
+  });
+
+  it('refuses a second match while one is still running', async () => {
+    const svc = makeService();
+    (svc as unknown as { reconciling: boolean }).reconciling = true;
+    await expect(svc.reconcileStockToErp()).rejects.toThrow(/already being matched/);
   });
 
   it('changes nothing on a dry run, but reports what it would change', async () => {
