@@ -49,6 +49,7 @@ import {
   type ResolvedItem,
 } from './order-invoice-sale';
 import { ErpOutboxKind } from './entities/erp-outbox.entity';
+import { repeatedStockRows, UNSTABLE_SNAPSHOT_MESSAGE } from './van-stock-snapshot';
 
 const ORDER_INVOICE_REREAD = 'erp_invoice_order_reread';
 
@@ -3456,7 +3457,9 @@ export class ErpSyncService {
 
     // 2. Pull the whole ERP snapshot, page by page.
     type VanStockRow = {
+      skuId?: string | null;
       skuCode: string;
+      warehouseId?: string | null;
       warehouseName: string;
       quantity: number;
     };
@@ -3480,6 +3483,9 @@ export class ErpSyncService {
           }`,
         );
       }
+      // Rows repeated means other rows are missing: correcting against this
+      // would wipe real stock in one store and double it in another.
+      if (repeatedStockRows(data) > 0) throw new ServiceUnavailableException(UNSTABLE_SNAPSHOT_MESSAGE);
       erpTotalReported = total;
       for (const r of data) {
         erpRowsFetched += 1;
@@ -4028,7 +4034,13 @@ export class ErpSyncService {
     // query, which is the part that broke.
     const itemSet = new Set(opts.itemNumbers?.filter(Boolean) ?? []);
 
-    type VanStockRow = { skuCode: string; warehouseName: string; quantity: number };
+    type VanStockRow = {
+      skuId?: string | null;
+      skuCode: string;
+      warehouseId?: string | null;
+      warehouseName: string;
+      quantity: number;
+    };
     const erpRows: VanStockRow[] = [];
     try {
       // ALWAYS pull the broad snapshot and map it the way the dashboard and the
@@ -4047,6 +4059,11 @@ export class ErpSyncService {
       erpRows.push(...all.data);
     } catch {
       return { source: 'unavailable', reason: 'fetch_failed', asOf: null, rows: [] };
+    }
+    // A repeated row means others are missing - show a gap, not a wrong figure.
+    if (repeatedStockRows(erpRows) > 0) {
+      this.logger.warn(UNSTABLE_SNAPSHOT_MESSAGE);
+      return { source: 'unavailable', reason: 'unstable_snapshot', asOf: null, rows: [] };
     }
 
     // Aggregate ERP rows into cash-van pools (store | item | stock unit).
