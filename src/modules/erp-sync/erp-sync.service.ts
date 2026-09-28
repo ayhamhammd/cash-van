@@ -49,7 +49,7 @@ import {
   type ResolvedItem,
 } from './order-invoice-sale';
 import { ErpOutboxKind } from './entities/erp-outbox.entity';
-import { repeatedStockRows, UNSTABLE_SNAPSHOT_MESSAGE } from './van-stock-snapshot';
+import { buildStoreResolver, repeatedStockRows, UNSTABLE_SNAPSHOT_MESSAGE } from './van-stock-snapshot';
 
 const ORDER_INVOICE_REREAD = 'erp_invoice_order_reread';
 
@@ -3204,6 +3204,12 @@ export class ErpSyncService {
    * Falls back to the full set when the map is empty — a fresh install that has
    * not pulled warehouses yet must still be able to sync.
    */
+  /** ERP stock row → cash-van store, by ERP warehouse id first (see buildStoreResolver). */
+  private async erpStoreResolver(stores: Warehouse[]) {
+    const mapped = await this.idmap.find({ where: { entity: 'warehouse' } });
+    return buildStoreResolver(stores, mapped);
+  }
+
   private async erpStoreCodes(): Promise<string[]> {
     const mapped = await this.idmap.find({ where: { entity: 'warehouse' } });
     const codes = [
@@ -3450,10 +3456,7 @@ export class ErpSyncService {
     //    name, not the code; cash-van pulled these warehouses from the ERP, so
     //    the names line up. Unmatched names are surfaced, never silently dropped.
     const stores = await this.whs.find();
-    const storeByName = new Map<string, { number: string; name: string }>();
-    for (const w of stores) {
-      if (w.whName) storeByName.set(w.whName.trim(), { number: w.whNumber, name: w.whName });
-    }
+    const storeFor = await this.erpStoreResolver(stores);
 
     // 2. Pull the whole ERP snapshot, page by page.
     type VanStockRow = {
@@ -3489,7 +3492,7 @@ export class ErpSyncService {
       erpTotalReported = total;
       for (const r of data) {
         erpRowsFetched += 1;
-        const store = r.warehouseName ? storeByName.get(r.warehouseName.trim()) : undefined;
+        const store = storeFor(r);
         if (!store) {
           if (r.warehouseName) unmatchedWarehouses.add(r.warehouseName);
           continue;
@@ -3545,7 +3548,7 @@ export class ErpSyncService {
       const [storeNumber, itemNumber, stockUnitCode] = key.split('|');
       // Only compare pools whose store we actually mapped to the ERP snapshot —
       // a store the ERP key cannot see would otherwise read as "all local, no ERP".
-      if (!erpByPool.has(key) && !storeByName.has(storeName.get(storeNumber) ?? '')) {
+      if (!erpByPool.has(key) && !storeName.get(storeNumber)?.trim()) {
         continue;
       }
       const erpQty = erpByPool.get(key) ?? 0;
@@ -4024,10 +4027,7 @@ export class ErpSyncService {
     // ERP warehouse NAME → cash-van store. /van/stock returns the name, not the
     // code; cash-van pulled these warehouses from the ERP, so the names line up.
     const stores = await this.whs.find();
-    const storeByName = new Map<string, { number: string; name: string }>();
-    for (const w of stores) {
-      if (w.whName) storeByName.set(w.whName.trim(), { number: w.whNumber, name: w.whName });
-    }
+    const storeFor = await this.erpStoreResolver(stores);
 
     // Callers that name items (approval availability, transfer, stock report)
     // get the pools filtered to these AFTER mapping — never by a per-sku ERP
@@ -4069,7 +4069,7 @@ export class ErpSyncService {
     // Aggregate ERP rows into cash-van pools (store | item | stock unit).
     const byPool = new Map<string, { store: { number: string; name: string }; itemNumber: string; stockUnitCode: string; qty: number }>();
     for (const r of erpRows) {
-      const store = r.warehouseName ? storeByName.get(r.warehouseName.trim()) : undefined;
+      const store = storeFor(r);
       if (!store) continue;
       if (opts.stockNumber && store.number !== opts.stockNumber) continue;
       const target = await this.resolveStockTarget(r.skuCode);
