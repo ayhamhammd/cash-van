@@ -200,6 +200,36 @@ export class ErpHttpClient {
     return { ok: true, duplicate: false, data: json, status: res.status };
   }
 
+  async patchResult(
+    path: string,
+    body: unknown,
+  ): Promise<{ ok: boolean; duplicate: boolean; data: unknown; status: number; error?: string }> {
+    const cfg = await this.settings.getErpConfig();
+    if (!cfg.baseUrl || !cfg.apiKey) {
+      throw new Error('ERP base URL or API key not configured');
+    }
+    const base = cfg.baseUrl.replace(/\/+$/, '');
+    this.logger.log(`→ PATCH ${base}/api/v1/${path} body=${brief(body)}`);
+    const res = await fetch(`${base}/api/v1/${path}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.timeout()),
+    });
+    const json: unknown = await res.json().catch(() => null);
+    this.logger.log(`← PATCH ${path} ${res.status} res=${brief(json)}`);
+    if (!res.ok) {
+      return {
+        ok: false,
+        duplicate: false,
+        data: json,
+        status: res.status,
+        error: this.errorDetail(json) ?? this.errorCode(json) ?? `HTTP ${res.status}`,
+      };
+    }
+    return { ok: true, duplicate: false, data: json, status: res.status };
+  }
+
   /** PATCH an ERP resource (e.g. organization settings). Returns the parsed `data`. */
   async patch<T>(path: string, body: unknown): Promise<T | null> {
     const cfg = await this.settings.getErpConfig();

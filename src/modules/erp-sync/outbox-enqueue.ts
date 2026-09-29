@@ -76,3 +76,21 @@ export async function enqueueOutboxWithin(
     [kind, ref],
   );
 }
+
+export async function requeueOutboxLatestWithin(
+  em: EntityManager,
+  kind: ErpOutboxKind,
+  ref: string,
+): Promise<void> {
+  await em.query(
+    `INSERT INTO erp_outbox (kind, ref, status, attempts, next_attempt_at)
+     VALUES ($1, $2, 'pending', 0, now())
+     ON CONFLICT (kind, ref) DO UPDATE
+        SET status = 'pending',
+            attempts = 0,
+            error = NULL,
+            next_attempt_at = now(),
+            updated_at = clock_timestamp()`,
+    [kind, ref],
+  );
+}

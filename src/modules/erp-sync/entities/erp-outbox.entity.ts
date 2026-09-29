@@ -26,7 +26,8 @@ export type ErpOutboxKind =
   // An APPROVED van stock request, so the warehouse can see what it owes a van.
   // Carries no stock movement — the movement is the TRANSFER voucher the van
   // raises on receipt, which queues separately as STOCK_TRANSFER.
-  | 'VAN_STOCK_REQUEST';
+  | 'VAN_STOCK_REQUEST'
+  | 'CUSTOMER_AREA';
 export type ErpOutboxStatus = 'pending' | 'posted' | 'failed' | 'dead_letter';
 
 /** Outbound queue: van transactions to push to the ERP (idempotent by `ref`). */

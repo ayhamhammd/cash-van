@@ -15,6 +15,7 @@ import { Cheque } from '../collections/entities/cheque.entity';
 import { chequeGaps, describeMissing, type ChequeGap } from '../collections/cheque-gaps';
 import { Customer } from '../customers/entities/customer.entity';
 import { erpCustomerBody } from './erp-customer-payload';
+import { requeueOutboxLatestWithin } from './outbox-enqueue';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
 import { StockRequest } from '../stock-requests/entities/stock-request.entity';
 import { Rep } from '../reps/entities/rep.entity';
@@ -143,6 +144,14 @@ export class ErpOutboxService {
       await enqueueOutboxWithin(this.outbox.manager, kind, ref);
     } catch (e) {
       this.logger.warn(`enqueue ${kind} ${ref} failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  async requeueLatest(kind: ErpOutboxKind, ref: string): Promise<void> {
+    try {
+      await requeueOutboxLatestWithin(this.outbox.manager, kind, ref);
+    } catch (e) {
+      this.logger.warn(`requeue ${kind} ${ref} failed: ${e instanceof Error ? e.message : e}`);
     }
   }
 
@@ -393,7 +402,10 @@ export class ErpOutboxService {
       // retry replays them idempotently. (Most kinds are a single call.)
       let lastData: unknown = null;
       for (const c of calls) {
-        const res = await this.erp.post(c.path, c.body, c.idem ?? row.ref);
+        const res =
+          c.method === 'PATCH'
+            ? await this.erp.patchResult(c.path, c.body)
+            : await this.erp.post(c.path, c.body, c.idem ?? row.ref);
         if (!res.ok) {
           // Rate limited: back off past the window and retry, no attempt spent.
           if (res.status === 429) return this.softRetry(row, res.error ?? 'RATE_LIMITED');
@@ -404,6 +416,7 @@ export class ErpOutboxService {
         }
         lastData = res.data;
       }
+      if (await this.requeuedSinceRead(row)) return;
       row.status = 'posted';
       row.error = null;
       row.resultRef = this.extractResultRef(lastData);
@@ -463,7 +476,16 @@ export class ErpOutboxService {
    */
   private async buildCalls(
     row: ErpOutbox,
-  ): Promise<Array<{ path: string; body: Record<string, unknown>; idem?: string }> | null> {
+  ): Promise<Array<{
+    path: string;
+    body: Record<string, unknown>;
+    idem?: string;
+    method?: 'PATCH';
+  }> | null> {
+    if (row.kind === 'CUSTOMER_AREA') {
+      const call = await this.buildCustomerArea(row.ref);
+      return call ? [call] : null;
+    }
     // A TRANSFER becomes TWO immediate stock-adjustments (OUT source + IN dest)
     // so ERP stock moves RIGHT AWAY — the ERP `stock-transfers` document instead
     // sits PENDING_DISPATCH and doesn't touch stock until dispatch+receive.
@@ -609,6 +631,35 @@ export class ErpOutboxService {
         repCode: rep?.code ?? null,
       }),
     };
+  }
+
+  private async buildCustomerArea(
+    ref: string,
+  ): Promise<{ path: string; body: Record<string, unknown>; method: 'PATCH' } | null> {
+    const map = await this.idmap.findOne({ where: { entity: 'customer', localId: ref } });
+    if (!map?.erpId) return null;
+    const rows: Array<{ area: string | null }> = await this.outbox.query(
+      `SELECT a.name_ar AS area
+         FROM customers c
+         LEFT JOIN customer_areas a ON a.id = c.area_id AND a.deleted_at IS NULL
+        WHERE c.customer_number = $1
+        LIMIT 1`,
+      [ref],
+    );
+    if (!rows.length) {
+      throw new TerminalPayloadError(`Customer ${ref} no longer exists in VanFlow.`);
+    }
+    return {
+      path: `customers/${map.erpId}`,
+      body: { address: rows[0].area ?? null },
+      method: 'PATCH',
+    };
+  }
+
+  private async requeuedSinceRead(row: ErpOutbox): Promise<boolean> {
+    if (row.kind !== 'CUSTOMER_AREA') return false;
+    const fresh = await this.outbox.findOne({ where: { id: row.id } });
+    return !!fresh && fresh.updatedAt.getTime() > row.updatedAt.getTime();
   }
 
   /**

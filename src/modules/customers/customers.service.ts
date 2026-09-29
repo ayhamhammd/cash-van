@@ -292,6 +292,7 @@ export class CustomersService {
       creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
       repId: saved.repId ?? null,
     });
+    if (saved.areaId) this.events.emit('erp.customer.area', { customerIds: [saved.id] });
     return saved;
   }
 
@@ -357,6 +358,7 @@ export class CustomersService {
 
   async update(id: string, dto: UpdateCustomerDto): Promise<Customer> {
     const customer = await this.findOneOrThrow(id);
+    const areaBefore = customer.areaId ?? null;
     if (dto.areaId && dto.areaId !== customer.areaId) {
       await this.areas.assertAssignable(dto.areaId);
     }
@@ -379,6 +381,9 @@ export class CustomersService {
       creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
       repId: saved.repId ?? null,
     });
+    if ((saved.areaId ?? null) !== areaBefore) {
+      this.events.emit('erp.customer.area', { customerIds: [saved.id] });
+    }
     return saved;
   }
 

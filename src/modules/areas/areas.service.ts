@@ -81,6 +81,7 @@ export class AreasService {
 
   async update(id: string, dto: UpdateAreaDto): Promise<CustomerArea> {
     const area = await this.getOne(id);
+    const before = area.nameAr;
     if (dto.nameAr !== undefined && dto.nameAr.trim() !== area.nameAr) {
       await this.assertNameFree(dto.nameAr, id);
       area.nameAr = dto.nameAr.trim();
@@ -88,17 +89,21 @@ export class AreasService {
     if (dto.nameEn !== undefined) area.nameEn = dto.nameEn.trim() || null;
     if (dto.color !== undefined) area.color = dto.color;
     if (dto.isActive !== undefined) area.isActive = dto.isActive;
+    const renamed = dto.nameAr !== undefined && dto.nameAr.trim() !== before;
     const saved = await this.areas.save(area);
     this.changed('area.updated');
+    if (renamed) this.addressChanged(await this.memberIds(id));
     return saved;
   }
 
   /** Deleting an area leaves its customers in none, rather than refusing. */
   async remove(id: string): Promise<void> {
     await this.getOne(id);
+    const members = await this.memberIds(id);
     await this.customers.update({ areaId: id }, { areaId: null });
     await this.areas.softDelete(id);
     this.changed('area.deleted');
+    this.addressChanged(members);
   }
 
   async members(
@@ -137,13 +142,15 @@ export class AreasService {
     }
     const res = await this.customers.update({ id: In(customerIds) }, { areaId: id });
     this.changed('area.members');
+    this.addressChanged(customerIds);
     return { moved: res.affected ?? 0 };
   }
 
   async removeMember(id: string, customerId: string): Promise<void> {
     await this.getOne(id);
-    await this.customers.update({ id: customerId, areaId: id }, { areaId: null });
+    const res = await this.customers.update({ id: customerId, areaId: id }, { areaId: null });
     this.changed('area.members');
+    if (res.affected) this.addressChanged([customerId]);
   }
 
   /**
@@ -175,5 +182,17 @@ export class AreasService {
 
   private changed(reason: string): void {
     this.events.emit('customer.changed', { reason });
+  }
+
+  private addressChanged(customerIds: string[]): void {
+    if (customerIds.length) this.events.emit('erp.customer.area', { customerIds });
+  }
+
+  private async memberIds(areaId: string): Promise<string[]> {
+    const rows = await this.customers.find({
+      where: { areaId, deletedAt: IsNull() },
+      select: { id: true },
+    });
+    return rows.map((r) => r.id);
   }
 }

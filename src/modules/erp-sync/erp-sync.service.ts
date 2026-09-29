@@ -1169,6 +1169,18 @@ export class ErpSyncService {
     }
   }
 
+  @OnEvent('erp.customer.area')
+  async onCustomerArea(p: { customerIds: string[] }): Promise<void> {
+    if (!p.customerIds?.length) return;
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled) return;
+    const rows: Array<{ customer_number: string }> = await this.dataSource.query(
+      `SELECT customer_number FROM customers WHERE id = ANY($1::uuid[]) AND customer_number IS NOT NULL`,
+      [p.customerIds],
+    );
+    for (const r of rows) await this.outbox.requeueLatest('CUSTOMER_AREA', r.customer_number);
+  }
+
   @OnEvent('erp.item.created')
   onItemCreated(p: {
     itemNumber: string;

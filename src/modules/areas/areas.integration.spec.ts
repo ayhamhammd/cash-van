@@ -15,6 +15,7 @@ run('customer areas (real DB)', () => {
   let ds: DataSource;
   let areas: AreasService;
   let events: string[];
+  let addressed: string[][];
   const customerIds: string[] = [];
   const q = (sql: string, params: unknown[] = []) => ds.query(sql, params);
 
@@ -45,10 +46,16 @@ run('customer areas (real DB)', () => {
     await ds.initialize();
     await purge();
     events = [];
+    addressed = [];
     areas = new AreasService(
       ds.getRepository('CustomerArea') as never,
       ds.getRepository('Customer') as never,
-      { emit: (_: string, p: { reason: string }) => events.push(p.reason) } as never,
+      {
+        emit: (name: string, p: { reason?: string; customerIds?: string[] }) =>
+          name === 'erp.customer.area'
+            ? addressed.push([...(p.customerIds ?? [])].sort())
+            : events.push(p.reason ?? ''),
+      } as never,
     );
     for (const n of [1, 2, 3]) {
       const [c] = await q(
@@ -77,6 +84,7 @@ run('customer areas (real DB)', () => {
     const after = (await areas.list()).items.find((a) => a.id === zarqa.id)!;
     expect(after.memberCount).toBe(2);
     expect(events).toContain('area.members');
+    expect(addressed.at(-1)).toEqual([customerIds[0], customerIds[1]].sort());
   });
 
   it('keeps a customer in one area: moving him elsewhere takes him out of the first', async () => {
@@ -106,11 +114,32 @@ run('customer areas (real DB)', () => {
     await areas.update(rusaifa.id, { isActive: true });
   });
 
+  it('sends every member to the ERP again when an area is renamed, and none when only its colour changes', async () => {
+    const zarqa = (await areas.list()).items.find((a) => a.nameAr === `${P} الزرقاء`)!;
+    addressed = [];
+    await areas.update(zarqa.id, { color: '#10B981' });
+    expect(addressed).toEqual([]);
+    await areas.update(zarqa.id, { nameAr: `${P} الزرقاء الجديدة` });
+    expect(addressed).toEqual([[customerIds[0]]]);
+    await areas.update(zarqa.id, { nameAr: `${P} الزرقاء` });
+  });
+
+  it('sends a customer taken out of an area, and only when he was in it', async () => {
+    const rusaifa = (await areas.list()).items.find((a) => a.nameAr === `${P} الرصيفة`)!;
+    addressed = [];
+    await areas.removeMember(rusaifa.id, customerIds[2]);
+    expect(addressed).toEqual([]);
+    await areas.removeMember(rusaifa.id, customerIds[1]);
+    expect(addressed).toEqual([[customerIds[1]]]);
+  });
+
   it('leaves its customers with no area when an area is deleted', async () => {
+    addressed = [];
     const zarqa = (await areas.list()).items.find((a) => a.nameAr === `${P} الزرقاء`)!;
     await areas.remove(zarqa.id);
     const [c] = await q(`SELECT area_id FROM customers WHERE id = $1`, [customerIds[0]]);
     expect(c.area_id).toBeNull();
     expect((await areas.list()).items.some((a) => a.id === zarqa.id)).toBe(false);
+    expect(addressed).toEqual([[customerIds[0]]]);
   });
 });
