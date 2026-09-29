@@ -104,6 +104,12 @@ export class ErpOutboxService {
   private readonly logger = new Logger(ErpOutboxService.name);
   private draining = false;
   private reconcilingQr = false;
+  /**
+   * Where the QR poll resumes: each tick takes the NEXT page of candidates, and
+   * wraps to the start after the last. Without it every tick re-read the same
+   * newest twenty — see reconcileJofotaraQr.
+   */
+  private qrOffset = 0;
 
   constructor(
     private readonly erp: ErpHttpClient,
@@ -323,45 +329,55 @@ export class ErpOutboxService {
 
     this.reconcilingQr = true;
     try {
-      // Posted sales that still have no QR and are not in a terminal JoFotara
-      // state — REJECTED/ERROR never produce a QR, so polling them is waste.
-      const headers = await this.headers.find({
-        where: [
-          { isPosted: true, transKind: 'SALE', jofotaraQrCode: IsNull(), jofotaraStatus: IsNull() },
-          {
-            isPosted: true,
-            transKind: 'SALE',
-            jofotaraQrCode: IsNull(),
-            jofotaraStatus: Not(In(['REJECTED', 'ERROR'])),
-          },
-        ],
-        order: { inDate: 'DESC' },
-        take: BATCH,
-      });
+      // Posted sales that still have no QR, are not in a terminal JoFotara state
+      // (REJECTED/ERROR never produce one), and HAVE an ERP invoice to ask about.
+      //
+      // The id-map is joined here, not checked per row afterwards. The old query
+      // took the twenty newest candidates first and skipped the unmapped ones
+      // inside the loop — and the unmapped are exactly the sales that can never
+      // get a QR: ERP movement mirrors (ERP-MV-…, kind SALE) and sales not pushed
+      // yet. They held the twenty slots forever, so an invoice further down was
+      // never asked about: exported in the ERP, "pending" on the dashboard.
+      // And the page ROTATES (qrOffset), so no fixed set can starve the rest.
+      const candidates: Array<{ id: string; voucher_number: string; jofotara_status: string | null; jofotara_qr_code: string | null; invoice_number: string }> =
+        await this.headers.manager.query(
+          `SELECT h.id, h.voucher_number, h.jofotara_status, h.jofotara_qr_code,
+                  m.erp_code AS invoice_number
+             FROM voucher_headers h
+             JOIN erp_id_map m
+               ON m.entity = 'voucher' AND m.erp_id = h.voucher_number
+              AND m.erp_code IS NOT NULL AND m.erp_code <> ''
+            WHERE h.is_posted = TRUE
+              AND h.trans_kind = 'SALE'
+              AND h.jofotara_qr_code IS NULL
+              AND (h.jofotara_status IS NULL OR h.jofotara_status NOT IN ('REJECTED', 'ERROR'))
+            ORDER BY h.in_date DESC, h.id
+           OFFSET $1 LIMIT $2`,
+          [this.qrOffset, BATCH],
+        );
+      this.qrOffset = candidates.length < BATCH ? 0 : this.qrOffset + BATCH;
 
-      for (const h of headers) {
-        // The ERP invoice number was recorded when the sale pushed. No mapping =
-        // not pushed yet; the drain pushes it, then a later tick fills the QR.
-        const map = await this.idmap.findOne({
-          where: { entity: 'voucher', erpId: h.voucherNumber },
-        });
-        const invoiceNumber = map?.erpCode ?? undefined;
-        if (!invoiceNumber) continue;
-
+      for (const h of candidates) {
+        const invoiceNumber = h.invoice_number;
         try {
+          // The ERP matches `number` as a SUBSTRING (ilike %n%), so the page can
+          // hold other invoices whose number contains this one. Only an exact
+          // match is this invoice: the old fallback to the first row copied a
+          // DIFFERENT invoice's QR onto this voucher whenever the exact one was
+          // not on the page.
           const res = await this.erp.list<{
             invoiceNumber: string;
             jofotaraStatus?: string | null;
             jofotaraQrCode?: string | null;
-          }>('sales-invoices', { number: invoiceNumber, pageSize: 5 });
-          const row = res.data.find((r) => r.invoiceNumber === invoiceNumber) ?? res.data[0];
+          }>('sales-invoices', { number: invoiceNumber, pageSize: 50 });
+          const row = res.data.find((r) => r.invoiceNumber === invoiceNumber);
           if (!row) continue;
 
           const patch: { jofotaraStatus?: string; jofotaraQrCode?: string } = {};
-          if (row.jofotaraStatus && row.jofotaraStatus !== h.jofotaraStatus) {
+          if (row.jofotaraStatus && row.jofotaraStatus !== h.jofotara_status) {
             patch.jofotaraStatus = row.jofotaraStatus;
           }
-          if (row.jofotaraQrCode && row.jofotaraQrCode !== h.jofotaraQrCode) {
+          if (row.jofotaraQrCode && row.jofotaraQrCode !== h.jofotara_qr_code) {
             patch.jofotaraQrCode = row.jofotaraQrCode;
           }
           if (Object.keys(patch).length > 0) {
@@ -369,7 +385,7 @@ export class ErpOutboxService {
           }
         } catch (e) {
           this.logger.warn(
-            `JoFotara QR reconcile failed for voucher ${h.voucherNumber} (invoice ${invoiceNumber}): ${
+            `JoFotara QR reconcile failed for voucher ${h.voucher_number} (invoice ${invoiceNumber}): ${
               e instanceof Error ? e.message : String(e)
             }`,
           );
