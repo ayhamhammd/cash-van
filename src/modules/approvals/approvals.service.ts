@@ -29,6 +29,8 @@ import { RepScopeService } from '../users/rep-scope.service';
 import { CustomersService } from '../customers/customers.service';
 import { CreateCustomerDto } from '../customers/dto/create-customer.dto';
 import { PendingCustomerPhoto } from '../customers/entities/pending-customer-photo.entity';
+import { Customer } from '../customers/entities/customer.entity';
+import { PERM_CREDIT_REQUEST } from '../../common/constants/permissions';
 import { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
 const TYPE_LABEL: Record<ApprovalType, { ar: string; en: string }> = {
@@ -37,7 +39,14 @@ const TYPE_LABEL: Record<ApprovalType, { ar: string; en: string }> = {
   PRICE_OVERRIDE: { ar: 'تغيير سعر', en: 'Price change' },
   CUSTOMER_CREATE: { ar: 'إضافة عميل', en: 'New customer' },
   VOUCHER_FREE_ITEM: { ar: 'أصناف مجانية', en: 'Free items' },
+  CREDIT_OVER_LIMIT: { ar: 'بيع آجل فوق حد الائتمان', en: 'Credit over limit' },
 };
+
+/** What a supervisor may decide: new customers, and credit for their own reps. */
+const SUPERVISOR_TYPES: ApprovalType[] = ['CUSTOMER_CREATE', 'CREDIT_OVER_LIMIT'];
+
+/** An approval row as the queue shows it: who asked, for whom. */
+export type ApprovalRow = ApprovalRequest & { repName: string | null; customerName: string | null };
 
 @Injectable()
 export class ApprovalsService {
@@ -57,6 +66,8 @@ export class ApprovalsService {
     private readonly customers: CustomersService,
     @InjectRepository(PendingCustomerPhoto)
     private readonly pendingPhotos: Repository<PendingCustomerPhoto>,
+    @InjectRepository(Customer)
+    private readonly customerRows: Repository<Customer>,
     private readonly repScope: RepScopeService,
     private readonly notifications: NotificationsService,
     private readonly events: EventEmitter2,
@@ -128,17 +139,23 @@ export class ApprovalsService {
 
     const requester = await this.users.findOne({ where: { id: requesterUserId } });
     const rep = await this.reps.findOne({ where: { userId: requesterUserId } });
+    const customerNumber =
+      dto.customerNumber ??
+      ((dto.payload as { customerNumber?: string }).customerNumber || null);
+    const context =
+      dto.type === 'CREDIT_OVER_LIMIT'
+        ? await this.creditContext(requester, customerNumber, dto.payload)
+        : null;
 
     const row = await this.repo.save(
       this.repo.create({
         type: dto.type,
         requesterUser: requesterUserId,
         repId: rep?.id ?? null,
-        customerNumber:
-          dto.customerNumber ??
-          ((dto.payload as { customerNumber?: string }).customerNumber || null),
+        customerNumber,
         payload: dto.payload,
         note: dto.note ?? null,
+        context,
       }),
     );
 
@@ -149,8 +166,14 @@ export class ApprovalsService {
         kind: 'approval.requested',
         titleAr: `طلب ${label.ar} جديد من ${repName}`,
         titleEn: `New ${label.en.toLowerCase()} request from ${repName}`,
-        bodyAr: dto.note ?? undefined,
-        bodyEn: dto.note ?? undefined,
+        // A credit request names the customer and the amount in the notification
+        // itself: the supervisor decides from the bell, not after opening it.
+        bodyAr: context
+          ? [`${context.customerName} — ${Number(context.creditAmount).toFixed(3)}`, dto.note].filter(Boolean).join('\n')
+          : dto.note ?? undefined,
+        bodyEn: context
+          ? [`${context.customerName} — ${Number(context.creditAmount).toFixed(3)}`, dto.note].filter(Boolean).join('\n')
+          : dto.note ?? undefined,
         refType: 'approval',
         refId: row.id,
       },
@@ -187,7 +210,32 @@ export class ApprovalsService {
       skip: q.offset ?? 0,
       take: q.limit ?? 25,
     });
-    return { items, total };
+    return { items: await this.withNames(items), total };
+  }
+
+  /**
+   * Who asked, and for whom, by NAME. The queue showed a customer number and no
+   * salesman at all, so a supervisor deciding credit had to look both up.
+   */
+  private async withNames(rows: ApprovalRequest[]): Promise<ApprovalRow[]> {
+    const repIds = [...new Set(rows.map((r) => r.repId).filter((x): x is string => !!x))];
+    const numbers = [...new Set(rows.map((r) => r.customerNumber).filter((x): x is string => !!x))];
+    const [reps, customers] = await Promise.all([
+      repIds.length ? this.reps.find({ where: { id: In(repIds) } }) : Promise.resolve([] as Rep[]),
+      numbers.length
+        ? this.customerRows.find({ where: { customerNumber: In(numbers) }, withDeleted: true })
+        : Promise.resolve([] as Customer[]),
+    ]);
+    const repName = new Map(reps.map((r) => [r.id, r.nameAr ?? r.nameEn ?? r.code ?? null]));
+    const customerName = new Map(
+      customers.map((c) => [c.customerNumber, c.nameAr || c.customerName || null]),
+    );
+    return rows.map((r) =>
+      Object.assign(r, {
+        repName: (r.repId && repName.get(r.repId)) || null,
+        customerName: (r.customerNumber && customerName.get(r.customerNumber)) || null,
+      }),
+    );
   }
 
   /** The salesman's own requests (mobile polls this). */
@@ -224,7 +272,8 @@ export class ApprovalsService {
     const row = await this.findOneOrThrow(id);
     if (row.repId) await this.repScope.assertCanSeeRep(reviewer, row.repId);
     this.assertReviewerMayDecide(reviewer, row);
-    return row;
+    const [named] = await this.withNames([row]);
+    return named;
   }
 
   /**
@@ -246,9 +295,11 @@ export class ApprovalsService {
     row: ApprovalRequest,
   ): void {
     if (reviewer.role !== 'supervisor') return;
-    if (row.type !== 'CUSTOMER_CREATE') {
+    // Credit over the limit is the supervisor's call by design: the request is
+    // literally "ask my supervisor to let this sale go on credit".
+    if (!SUPERVISOR_TYPES.includes(row.type)) {
       throw new ForbiddenException(
-        'A supervisor may only decide new-customer requests',
+        'A supervisor may only decide new-customer and credit requests',
       );
     }
   }
@@ -350,7 +401,9 @@ export class ApprovalsService {
         );
         resultVoucher = customer.customerNumber;
       } else {
-        const created = await this.vouchers.create(await this.postable(row));
+        const created = await this.vouchers.create(await this.postable(row), {
+          allowOverCreditLimit: row.type === 'CREDIT_OVER_LIMIT',
+        });
         resultVoucher = created.voucherNumber;
       }
     } catch (e) {
@@ -481,6 +534,51 @@ export class ApprovalsService {
       resultVoucher: row.resultVoucher ?? null,
       decisionNote: row.decisionNote ?? null,
     });
+  }
+
+  /**
+   * Checks a CREDIT_OVER_LIMIT request and freezes the figures it is about.
+   *
+   * The requester must hold `vouchers.credit.request` (admins and managers
+   * always may), the payload must be a SALE to a known customer with a credit
+   * part, and the figures are what the supervisor sees: limit, balance, this
+   * sale's credit amount, and how far past the limit it goes.
+   */
+  private async creditContext(
+    requester: User | null,
+    customerNumber: string | null,
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const privileged = requester?.role === 'admin' || requester?.role === 'manager';
+    if (!privileged && !(requester?.permissions ?? []).includes(PERM_CREDIT_REQUEST)) {
+      throw new ForbiddenException('You are not allowed to request credit over the limit.');
+    }
+    const p = payload as { transKind?: string; payments?: { paymentType?: string; amount?: string | number }[] };
+    if (p.transKind !== 'SALE') {
+      throw new BadRequestException('A credit request must be a sale.');
+    }
+    const creditAmount = (p.payments ?? [])
+      .filter((x) => x.paymentType === 'CREDIT')
+      .reduce((sum, x) => sum + (Number(x.amount) || 0), 0);
+    if (creditAmount <= 0) {
+      throw new BadRequestException('A credit request must have a credit (on-account) payment.');
+    }
+    if (!customerNumber) throw new BadRequestException('A credit request needs a customer.');
+    const customer = await this.customerRows.findOne({ where: { customerNumber } });
+    if (!customer) throw new NotFoundException(`Customer ${customerNumber} not found`);
+
+    const creditLimit = Number(customer.creditLimit) || 0;
+    const balance = Number(customer.totalDebt) || 0;
+    const round = (n: number) => Math.round(n * 1000) / 1000;
+    return {
+      customerName: customer.nameAr || customer.customerName,
+      creditLimit: round(creditLimit),
+      balance: round(balance),
+      creditAmount: round(creditAmount),
+      available: round(Math.max(0, creditLimit - balance)),
+      overBy: round(Math.max(0, balance + creditAmount - creditLimit)),
+      creditHold: customer.creditHold === true,
+    };
   }
 
   /** Shape-check the embedded CreateVoucherDto without executing it. */

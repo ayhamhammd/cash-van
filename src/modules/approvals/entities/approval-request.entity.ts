@@ -16,7 +16,12 @@ export type ApprovalType =
   // A salesman asked to give stock away on a voucher. The payload is the proposed
   // voucher with its free lines marked; a supervisor may cut the free quantity
   // before agreeing, which is why this is the one type whose payload is amendable.
-  | 'VOUCHER_FREE_ITEM';
+  | 'VOUCHER_FREE_ITEM'
+  // A credit sale that would take the customer past their credit limit. The
+  // payload is the whole sale; approving it creates the invoice with the limit
+  // check skipped (a credit HOLD still blocks). `context` keeps the figures the
+  // supervisor decided on.
+  | 'CREDIT_OVER_LIMIT';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
 
@@ -63,6 +68,14 @@ export class ApprovalRequest {
   decisionNote?: string | null;
 
   /** voucher_number created when an approval was executed. */
+  /**
+   * What the reviewer needs beside the payload, frozen when the request was filed:
+   * for CREDIT_OVER_LIMIT the limit, the balance, the sale's credit amount and how
+   * far over it goes. The balance moves on; the decision was made on these.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  context?: Record<string, unknown> | null;
+
   @Column({ name: 'result_voucher', type: 'text', nullable: true })
   resultVoucher?: string | null;
 

@@ -63,6 +63,9 @@ describe('ApprovalsService — what a supervisor may decide', () => {
     function make(row: ApprovalRequest, visibleRepIds: string[] | null) {
       const s = Object.create(ApprovalsService.prototype) as Record<string, unknown>;
       s.repo = { findOne: async () => row };
+      // The detail now carries the salesman's and customer's names.
+      s.reps = { find: async () => [] };
+      s.customerRows = { find: async () => [] };
       s.repScope = {
         assertCanSeeRep: async (_u: AuthenticatedUser, repId: string) => {
           if (visibleRepIds !== null && !visibleRepIds.includes(repId)) {

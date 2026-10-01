@@ -14,6 +14,12 @@
  * see the field at all. Permission keys are passed to the app exactly as stored,
  * so toggling it in the dashboard reaches the rep on their next login/refresh.
  */
+/**
+ * The salesman may ASK a supervisor to let a credit sale go past the customer's
+ * credit limit. Opt-in like the free-item request: a server that has not heard of
+ * it must not hand a rep that power by omission.
+ */
+export const PERM_CREDIT_REQUEST = 'vouchers.credit.request';
 export const PERM_DISCOUNT_DIRECT = 'vouchers.discount.direct';
 
 /**

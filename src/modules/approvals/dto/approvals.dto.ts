@@ -18,6 +18,7 @@ export const APPROVAL_TYPES: ApprovalType[] = [
   'VOUCHER_DISCOUNT',
   'PRICE_OVERRIDE',
   'VOUCHER_FREE_ITEM',
+  'CREDIT_OVER_LIMIT',
 ];
 
 export class CreateApprovalDto {

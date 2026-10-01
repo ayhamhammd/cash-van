@@ -295,7 +295,15 @@ export class VouchersService implements OnModuleInit {
     );
   }
 
-  async create(dto: CreateVoucherDto): Promise<VoucherHeader> {
+  /**
+   * @param opts.allowOverCreditLimit only for an approved CREDIT_OVER_LIMIT
+   *   request: a supervisor has agreed to this sale going past the limit. A credit
+   *   hold still blocks — the hold is a stop on all credit, not a ceiling.
+   */
+  async create(
+    dto: CreateVoucherDto,
+    opts: { allowOverCreditLimit?: boolean } = {},
+  ): Promise<VoucherHeader> {
     // First, before anything reads the payments: a return is the customer's
     // credit, never a cash refund — whatever an old phone sent. See
     // returns/returns-are-credit.
@@ -319,7 +327,7 @@ export class VouchersService implements OnModuleInit {
     // balance over their limit. Hard block — the remedy is a manager raising the limit
     // (which mirrors down), then the rep re-creates the voucher. See
     // docs/SPEC-accounts-receivable.md.
-    await this.enforceCreditLimit(dto);
+    await this.enforceCreditLimit(dto, opts.allowOverCreditLimit === true);
     // Server-authoritative offers: bake per-line discounts and gift free-lines
     // into the dto BEFORE the voucher is built, so gifts post as real lines and
     // their stock moves. MUST run before createUnchecked (was previously dead
@@ -356,7 +364,10 @@ export class VouchersService implements OnModuleInit {
    * entirely. Cash/cheque/transfer/card sales never touch AR. See
    * docs/SPEC-accounts-receivable.md.
    */
-  private async enforceCreditLimit(dto: CreateVoucherDto): Promise<void> {
+  private async enforceCreditLimit(
+    dto: CreateVoucherDto,
+    allowOverLimit = false,
+  ): Promise<void> {
     if (dto.transKind !== 'SALE' || !dto.customerNumber) return;
     const creditAmount = (dto.payments ?? [])
       .filter((p) => p.paymentType === 'CREDIT')
@@ -374,6 +385,7 @@ export class VouchersService implements OnModuleInit {
         message: `Customer ${customer.customerName} is on credit hold — no credit sales allowed.`,
       });
     }
+    if (allowOverLimit) return; // a supervisor approved this sale over the limit
     const creditLimit = Number(customer.creditLimit) || 0;
     if (creditLimit <= 0) return; // not enforced
     const balance = Number(customer.totalDebt) || 0;
