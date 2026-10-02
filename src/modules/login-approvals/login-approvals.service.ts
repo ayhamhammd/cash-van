@@ -35,20 +35,18 @@ export type CompleteResult =
 export const hashDevice = (raw: string): string => createHash('sha256').update(raw).digest('hex');
 export const newDeviceId = (): string => randomBytes(32).toString('base64url');
 
-/**
- * Administrators approve sign-ins, so they are never held waiting for one.
- * The ROLE decides, not the user type: office staff are commonly typed ADMIN
- * while holding a manager or viewer role, and must not slip past the rule.
- */
-export const isExempt = (u: Pick<User, 'role'>): boolean => u.role === 'admin';
 
 /**
  * Sign-ins from untrusted browsers wait for an administrator.
  *
  * Optional and off by default (app_settings.require_device_approval). Applies to
  * web sign-ins only: the mobile app already binds each salesman to one phone
- * that only the office can release. Administrators are exempt — they are the
- * ones approving, and an only admin on a new laptop must not be locked out.
+ * that only the office can release.
+ *
+ * Applies to EVERYONE, administrators included. What keeps an administrator
+ * from being locked out: the browser that turns the rule on is trusted for
+ * them on the spot ([trustCurrent]), and an administrator may approve their
+ * own new device from a session they already have open elsewhere.
  */
 @Injectable()
 export class LoginApprovalsService {
@@ -68,7 +66,6 @@ export class LoginApprovalsService {
    */
   async gate(user: User, device: WebDevice): Promise<GateResult> {
     if (!(await this.settings.requireDeviceApproval())) return { allowed: true };
-    if (isExempt(user)) return { allowed: true };
 
     const deviceHash = hashDevice(device.raw);
     const trusted = await this.trusted.findOne({
@@ -184,6 +181,15 @@ export class LoginApprovalsService {
     if (!row) throw new NotFoundException('Trusted device not found');
     row.label = label.trim().slice(0, 120) || row.label;
     return this.trusted.save(row);
+  }
+
+  /**
+   * Trust the browser this administrator is using right now. Called when the
+   * rule is switched on, so the person switching it on is never the one it
+   * locks out.
+   */
+  async trustCurrent(userId: string, device: WebDevice): Promise<void> {
+    await this.trustDevice(userId, hashDevice(device.raw), deviceLabel(device.userAgent), device.ip ?? null, userId);
   }
 
   // ── internals ──────────────────────────────────────────────────────────────

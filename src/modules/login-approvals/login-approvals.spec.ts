@@ -77,9 +77,17 @@ describe('LoginApprovalsService.gate', () => {
     await expect(svc.gate(staff, laptop)).resolves.toMatchObject({ allowed: false });
   });
 
-  it('never holds an administrator — they are the ones approving', async () => {
+  it('holds an administrator on a new device too', async () => {
     const { svc } = setup();
+    await expect(svc.gate(admin, laptop)).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('the browser that switched the rule on is trusted for that administrator', async () => {
+    const { svc } = setup();
+    await svc.trustCurrent(admin.id, laptop);
     await expect(svc.gate(admin, laptop)).resolves.toEqual({ allowed: true });
+    // ...for them only, not for everyone at that desk.
+    await expect(svc.gate(clerk, laptop)).resolves.toMatchObject({ allowed: false });
   });
 
   it('holds an untrusted browser and tells the administrators', async () => {

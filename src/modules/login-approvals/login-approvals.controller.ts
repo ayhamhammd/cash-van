@@ -1,10 +1,12 @@
 import {
-  Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards,
+  Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, Req, Res, UseGuards,
 } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
 import { IsBoolean, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 
-import { LoginApprovalsService } from './login-approvals.service';
+import { DEVICE_COOKIE, LoginApprovalsService, newDeviceId } from './login-approvals.service';
+import { accessTokenCookieOptions } from '../../common/auth/auth-cookie';
 import { LoginRequestStatus } from './entities/login-request.entity';
 import { SettingsService } from '../settings/settings.service';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -57,10 +59,27 @@ export class LoginApprovalsController {
   @ApiOperation({
     summary: 'Turn device approval on or off',
     description:
-      'When on, a web sign-in from a browser not trusted for that user waits for an administrator. ' +
-      'Administrators are exempt; the mobile app is unaffected (it has device binding). Admin only.',
+      'When on, a web sign-in from a browser not trusted for that user waits for an administrator — ' +
+      'administrators included. Turning it on trusts the caller\'s current browser for them, so the ' +
+      'administrator switching it on is not locked out. The mobile app is unaffected. Admin only.',
   })
-  async setSettings(@Body() dto: SecuritySettingsDto) {
+  async setSettings(
+    @Body() dto: SecuritySettingsDto,
+    @CurrentUser('sub') adminId: string,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (dto.requireDeviceApproval) {
+      let raw = (req.cookies as Record<string, string> | undefined)?.[DEVICE_COOKIE];
+      if (!raw || raw.length < 32) {
+        // Signed in before device cookies existed: give this browser one now.
+        raw = newDeviceId();
+        res.cookie(DEVICE_COOKIE, raw, { ...accessTokenCookieOptions(), maxAge: 5 * 365 * 24 * 60 * 60 * 1000 });
+      }
+      await this.approvals.trustCurrent(adminId, {
+        raw, userAgent: req.headers['user-agent'] ?? null, ip: req.ip ?? null,
+      });
+    }
     await this.settings.setRequireDeviceApproval(dto.requireDeviceApproval);
     return { requireDeviceApproval: dto.requireDeviceApproval };
   }
