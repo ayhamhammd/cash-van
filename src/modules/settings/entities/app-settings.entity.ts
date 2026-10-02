@@ -77,6 +77,13 @@ export class AppSettings {
   @Column({ name: 'salesman_activation_enabled', type: 'boolean', default: false })
   salesmanActivationEnabled!: boolean;
 
+  /**
+   * Web sign-ins from a browser not trusted for that user wait for an
+   * administrator (see LoginApprovalsService). Off by default.
+   */
+  @Column({ name: 'require_device_approval', type: 'boolean', default: false })
+  requireDeviceApproval!: boolean;
+
   @Column({ name: 'erp_sync_enabled', type: 'boolean', default: false })
   erpSyncEnabled!: boolean;
 

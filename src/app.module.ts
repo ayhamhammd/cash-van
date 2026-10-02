@@ -49,6 +49,7 @@ import { ErpSyncModule } from './modules/erp-sync/erp-sync.module';
 import { ApprovalsModule } from './modules/approvals/approvals.module';
 import { StockRequestsModule } from './modules/stock-requests/stock-requests.module';
 import { DevicesModule } from './modules/devices/devices.module';
+import { LoginApprovalsModule } from './modules/login-approvals/login-approvals.module';
 import { AgentModule } from './modules/agent/agent.module';
 import { OffersModule } from './modules/offers/offers.module';
 import { ProspectingModule } from './modules/prospecting/prospecting.module';
@@ -116,6 +117,7 @@ import { AreasModule } from './modules/areas/areas.module';
     ApprovalsModule,
     StockRequestsModule,
     DevicesModule,
+    LoginApprovalsModule,
     SyncModule,
     ErpSyncModule,
     AgentModule,

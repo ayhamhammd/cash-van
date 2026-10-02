@@ -10,6 +10,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { UsersModule } from '../users/users.module';
 import { RepsModule } from '../reps/reps.module';
 import { DevicesModule } from '../devices/devices.module';
+import { LoginApprovalsModule } from '../login-approvals/login-approvals.module';
 import { User } from '../users/entities/user.entity';
 
 @Module({
@@ -18,6 +19,7 @@ import { User } from '../users/entities/user.entity';
     UsersModule,
     RepsModule,
     DevicesModule,
+    LoginApprovalsModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],

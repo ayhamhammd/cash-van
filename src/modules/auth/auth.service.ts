@@ -11,6 +11,7 @@ import { DevicesService } from '../devices/devices.service';
 import { LoginDto } from './dto/login.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 import { User } from '../users/entities/user.entity';
+import { LoginApprovalsService, WebDevice } from '../login-approvals/login-approvals.service';
 
 export interface LoginResponse {
   accessToken: string;
@@ -36,6 +37,13 @@ export interface LoginResponse {
   };
 }
 
+/** The password was right, but this browser needs an administrator first. */
+export interface ApprovalRequiredResponse {
+  approvalRequired: true;
+  requestId: string;
+  expiresAt: string;
+}
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -45,6 +53,7 @@ export class AuthService {
     private readonly devices: DevicesService,
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
+    private readonly loginApprovals: LoginApprovalsService,
   ) {}
 
   /** Sign-out: end the interactive session, leave the device tracking. */
@@ -52,7 +61,12 @@ export class AuthService {
     await this.devices.closeSessionByDevice(deviceId);
   }
 
-  async login(dto: LoginDto): Promise<LoginResponse> {
+  /**
+   * @param web the browser's device, for web sign-ins. When device approval is
+   *   on and this browser is not trusted for the user, no token is issued: the
+   *   caller gets an approval request to wait on instead.
+   */
+  async login(dto: LoginDto, web?: WebDevice): Promise<LoginResponse | ApprovalRequiredResponse> {
     const user = await this.usersService.findByUserNumberWithSecret(dto.userNumber);
     if (!user) {
       throw new UnauthorizedException('Invalid credentials');
@@ -65,6 +79,33 @@ export class AuthService {
       throw new UnauthorizedException('User is disabled');
     }
 
+    // Web only: the mobile app sends a deviceId and is held by device binding.
+    if (web && !dto.deviceId) {
+      const gate = await this.loginApprovals.gate(user, web);
+      if (!gate.allowed) {
+        return { approvalRequired: true, requestId: gate.requestId, expiresAt: gate.expiresAt.toISOString() };
+      }
+    }
+    return this.issue(user, dto);
+  }
+
+  /**
+   * Finish a sign-in an administrator approved. The approvals service checks
+   * that this is the browser that asked and that the approval is unused.
+   */
+  async completeApproved(
+    requestId: string,
+    rawDevice: string | undefined,
+  ): Promise<{ status: string; session?: LoginResponse }> {
+    const result = await this.loginApprovals.complete(requestId, rawDevice);
+    if (result.status !== 'approved') return { status: result.status };
+    const user = await this.userRepo.findOne({ where: { id: result.userId } });
+    if (!user || !user.isActive) throw new UnauthorizedException('User is disabled');
+    return { status: 'approved', session: await this.issue(user, {} as LoginDto) };
+  }
+
+  /** Everything after the password and the device check: the token itself. */
+  private async issue(user: User, dto: LoginDto): Promise<LoginResponse> {
     // Stamp last_login_at (best-effort; ignore failure).
     await this.userRepo
       .update(user.id, { lastLoginAt: new Date() })

@@ -164,6 +164,23 @@ export class SettingsService {
    * that changes shape as fields come and go, and a lock must not silently turn
    * itself on or off because a projection was edited.
    */
+  /** Sign-in device approval switch; false when there is no settings row yet. */
+  async requireDeviceApproval(): Promise<boolean> {
+    const row = await this.repo.findOne({
+      where: { id: 1 },
+      select: { id: true, requireDeviceApproval: true },
+    });
+    return row?.requireDeviceApproval === true;
+  }
+
+  /** Not behind the ERP read-only guard: sign-in security is VanFlow's own. */
+  async setRequireDeviceApproval(on: boolean): Promise<void> {
+    const row = await this.requireRow();
+    row.requireDeviceApproval = on;
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+  }
+
   async salesmanActivationEnabled(): Promise<boolean> {
     const row = await this.repo.findOne({
       where: { id: 1 },

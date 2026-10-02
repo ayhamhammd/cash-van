@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import {
   ApiBearerAuth,
@@ -14,6 +14,21 @@ import { Public } from '../../common/decorators/public.decorator';
 import { SkipAudit } from '../../common/decorators/skip-audit.decorator';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { ACCESS_TOKEN_COOKIE, accessTokenCookieOptions } from '../../common/auth/auth-cookie';
+import { DEVICE_COOKIE, newDeviceId } from '../login-approvals/login-approvals.service';
+
+/** The browser's device id outlives every session: five years. */
+const DEVICE_COOKIE_MAX_AGE_MS = 5 * 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * The browser's device id, issued on its first web sign-in. Read and set by the
+ * API itself (httpOnly), so page script can neither see nor copy it.
+ */
+function webDevice(req: Request, res: Response) {
+  let raw = (req.cookies as Record<string, string> | undefined)?.[DEVICE_COOKIE];
+  if (!raw || raw.length < 32) raw = newDeviceId();
+  res.cookie(DEVICE_COOKIE, raw, { ...accessTokenCookieOptions(), maxAge: DEVICE_COOKIE_MAX_AGE_MS });
+  return { raw, userAgent: req.headers['user-agent'] ?? null, ip: req.ip ?? null };
+}
 
 @ApiTags('auth')
 @Controller({ path: 'auth', version: '1' })
@@ -38,7 +53,11 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const result = await this.authService.login(dto);
+    // A web sign-in (no mobile deviceId) carries the browser's device cookie, so
+    // the optional administrator approval can recognise trusted browsers.
+    const web = dto.deviceId ? undefined : webDevice(req, res);
+    const result = await this.authService.login(dto, web);
+    if ('approvalRequired' in result) return result;
     // Always set the httpOnly cookie so the browser is authenticated without exposing the JWT.
     res.cookie(ACCESS_TOKEN_COOKIE, result.accessToken, accessTokenCookieOptions());
     // Web clients rely purely on the cookie — don't echo the token back to the browser.
@@ -73,6 +92,32 @@ export class AuthController {
     // bookkeeping flag the office reads; it grants nothing and revokes nothing.
     if (dto?.deviceId) await this.authService.closeDeviceSession(dto.deviceId);
     return { ok: true };
+  }
+
+  @Public()
+  @SkipAudit()
+  @Post('login-requests/:id/complete')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Finish a sign-in that was waiting for an administrator',
+    description:
+      'Polled by the browser that asked. Returns `{ status }` while pending, rejected or expired; ' +
+      'once approved it signs in exactly like a normal login. Only the browser holding the same ' +
+      'device cookie can complete it, and an approval works once.',
+  })
+  async completeLogin(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const raw = (req.cookies as Record<string, string> | undefined)?.[DEVICE_COOKIE];
+    const result = await this.authService.completeApproved(id, raw);
+    if (!result.session) return { status: result.status };
+    res.cookie(ACCESS_TOKEN_COOKIE, result.session.accessToken, accessTokenCookieOptions());
+    if (req.headers['x-client-type'] === 'web') {
+      return { status: 'approved', user: result.session.user };
+    }
+    return { status: 'approved', ...result.session };
   }
 
   @Get('me')
