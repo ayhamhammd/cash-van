@@ -71,6 +71,12 @@ describe('LoginApprovalsService.gate', () => {
     await expect(svc.gate(clerk, laptop)).resolves.toEqual({ allowed: true });
   });
 
+  it('holds office staff typed ADMIN whose role is not admin', async () => {
+    const { svc } = setup();
+    const staff = { ...clerk, userType: 'ADMIN', role: 'manager' } as unknown as User;
+    await expect(svc.gate(staff, laptop)).resolves.toMatchObject({ allowed: false });
+  });
+
   it('never holds an administrator — they are the ones approving', async () => {
     const { svc } = setup();
     await expect(svc.gate(admin, laptop)).resolves.toEqual({ allowed: true });

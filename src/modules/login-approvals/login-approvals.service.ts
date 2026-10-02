@@ -35,9 +35,12 @@ export type CompleteResult =
 export const hashDevice = (raw: string): string => createHash('sha256').update(raw).digest('hex');
 export const newDeviceId = (): string => randomBytes(32).toString('base64url');
 
-/** Administrators approve sign-ins, so they are never held waiting for one. */
-export const isExempt = (u: Pick<User, 'role' | 'userType'>): boolean =>
-  u.role === 'admin' || (u.userType ?? '').toUpperCase() === 'ADMIN';
+/**
+ * Administrators approve sign-ins, so they are never held waiting for one.
+ * The ROLE decides, not the user type: office staff are commonly typed ADMIN
+ * while holding a manager or viewer role, and must not slip past the rule.
+ */
+export const isExempt = (u: Pick<User, 'role'>): boolean => u.role === 'admin';
 
 /**
  * Sign-ins from untrusted browsers wait for an administrator.
