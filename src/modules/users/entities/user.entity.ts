@@ -131,6 +131,15 @@ export class User extends BaseEntity {
   canRequestStock!: boolean;
 
   /**
+   * Developer / support account: signs in from any device without the
+   * administrator approval that app_settings.require_device_approval asks of
+   * everyone else. Set per account by an administrator; the password is still
+   * required.
+   */
+  @Column({ name: 'skip_device_approval', type: 'boolean', default: false })
+  skipDeviceApproval!: boolean;
+
+  /**
    * May this user decide someone else's stock request?
    *
    * Separate from the admin/manager role on purpose: deciding what goes onto a

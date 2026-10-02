@@ -71,6 +71,12 @@ describe('LoginApprovalsService.gate', () => {
     await expect(svc.gate(clerk, laptop)).resolves.toEqual({ allowed: true });
   });
 
+  it('a developer account on the any-device list signs in from anywhere', async () => {
+    const { svc } = setup();
+    const dev = { ...clerk, skipDeviceApproval: true } as unknown as User;
+    await expect(svc.gate(dev, laptop)).resolves.toEqual({ allowed: true });
+  });
+
   it('holds office staff typed ADMIN whose role is not admin', async () => {
     const { svc } = setup();
     const staff = { ...clerk, userType: 'ADMIN', role: 'manager' } as unknown as User;

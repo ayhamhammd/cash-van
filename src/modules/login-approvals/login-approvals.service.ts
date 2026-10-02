@@ -66,6 +66,8 @@ export class LoginApprovalsService {
    */
   async gate(user: User, device: WebDevice): Promise<GateResult> {
     if (!(await this.settings.requireDeviceApproval())) return { allowed: true };
+    // Developer / support accounts an administrator listed: any device.
+    if (user.skipDeviceApproval) return { allowed: true };
 
     const deviceHash = hashDevice(device.raw);
     const trusted = await this.trusted.findOne({
@@ -190,6 +192,20 @@ export class LoginApprovalsService {
    */
   async trustCurrent(userId: string, device: WebDevice): Promise<void> {
     await this.trustDevice(userId, hashDevice(device.raw), deviceLabel(device.userAgent), device.ip ?? null, userId);
+  }
+
+  /** Accounts that sign in from any device (developers, support). */
+  async listAnyDevice() {
+    return this.users.find({
+      where: { skipDeviceApproval: true },
+      select: { id: true, name: true, userNumber: true, role: true, isActive: true, lastLoginAt: true },
+      order: { name: 'ASC' },
+    });
+  }
+
+  async setAnyDevice(userId: string, on: boolean): Promise<void> {
+    const done = await this.users.update({ id: userId }, { skipDeviceApproval: on });
+    if (!done.affected) throw new NotFoundException('User not found');
   }
 
   // ── internals ──────────────────────────────────────────────────────────────

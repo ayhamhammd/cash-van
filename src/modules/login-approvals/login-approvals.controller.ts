@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, Req, Res, UseGuards,
+  Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req, Res, UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiParam, ApiTags } from '@nestjs/swagger';
@@ -30,6 +30,11 @@ export class RenameDeviceDto {
   @IsNotEmpty()
   @MaxLength(120)
   label!: string;
+}
+
+export class AnyDeviceDto {
+  @IsBoolean()
+  anyDevice!: boolean;
 }
 
 export class ListLoginRequestsQuery {
@@ -109,6 +114,23 @@ export class LoginApprovalsController {
   @ApiOperation({ summary: 'Refuse this sign-in' })
   reject(@Param('id', ParseUUIDPipe) id: string, @CurrentUser('sub') adminId: string) {
     return this.approvals.reject(id, adminId);
+  }
+
+  @Get('any-device-users')
+  @ApiOperation({
+    summary: 'Developer / support accounts that sign in from any device',
+    description: 'They skip device approval; the password is still required. Admin only.',
+  })
+  listAnyDevice() {
+    return this.approvals.listAnyDevice();
+  }
+
+  @Put('any-device-users/:userId')
+  @ApiParam({ name: 'userId', format: 'uuid' })
+  @ApiOperation({ summary: 'Add an account to, or remove it from, the any-device list' })
+  async setAnyDevice(@Param('userId', ParseUUIDPipe) userId: string, @Body() dto: AnyDeviceDto) {
+    await this.approvals.setAnyDevice(userId, dto.anyDevice);
+    return { userId, anyDevice: dto.anyDevice };
   }
 
   @Get('trusted-devices')
