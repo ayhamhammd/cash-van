@@ -26,6 +26,20 @@ export class StockLedgerController {
     return this.ledger.card(q);
   }
 
+  @Get('negative')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: 'Pools below zero',
+    description:
+      'Every pool sitting below zero, by store, with the quantity and what it is worth. ' +
+      'A van permitted to go negative will, and a negative nobody is shown is how drift ' +
+      'becomes invisible again — which is the whole reason the permission reports itself.',
+  })
+  @ApiOkResponse({ description: '{ checkedAt, pools, totalValueFils }' })
+  negative() {
+    return this.ledger.negativePools();
+  }
+
   @Get('ledger/verify')
   @Roles('admin')
   @ApiOperation({

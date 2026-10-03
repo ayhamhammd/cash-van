@@ -26,6 +26,21 @@ export class Warehouse extends BaseEntity {
   @Column({ name: 'is_main', type: 'boolean', default: false })
   isMain!: boolean;
 
+  /**
+   * May this store's pools go below zero?
+   *
+   * Per warehouse, not per organisation: a van's stock is genuinely uncertain
+   * between the morning load and the day closing, and the main store has no such
+   * excuse — if it is short, something is wrong and the sale should stop. Named
+   * and defaulted to match the ERP's own column, because both sides have to
+   * agree about which vans may hold a negative.
+   *
+   * Only consulted through `mayGoNegative`, which refuses a non-van whatever
+   * this says.
+   */
+  @Column({ name: 'allow_negative_stock', type: 'boolean', default: false })
+  allowNegativeStock!: boolean;
+
   @Column({
     name: 'wh_credit_box',
     type: 'numeric',

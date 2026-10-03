@@ -118,6 +118,7 @@ import {
   enqueueOutboxWithin,
   outboxKindForVoucher,
 } from '../erp-sync/outbox-enqueue';
+import { mayGoNegative } from '../warehouses/negative-stock';
 
 
 /** Permission keys gating sensitive salesman actions (F10). */
@@ -1023,16 +1024,22 @@ export class VouchersService implements OnModuleInit {
       // guard only for van source stores; trust the approval-time ERP check for a
       // depot source. (vouchers can't read ERP directly — erp-sync imports this
       // module, so the reverse dependency would be circular.)
-      const vanStores = new Set<string>(
-        (
-          await em.query(
-            `SELECT w.wh_number AS n
-               FROM warehouses w
-              WHERE w.wh_number IS NOT NULL
-                AND (w.is_van = TRUE
-                     OR EXISTS (SELECT 1 FROM reps r WHERE r.van_id = w.id))`,
-          )
-        ).map((r: { n: string }) => r.n),
+      //
+      // The same read carries each van's `allow_negative_stock`, because the
+      // check below has to ask it: a store switched on is permitted to sell
+      // from a pool the ledger says is empty. One read, so the pre-check and
+      // the deduction cannot disagree about which stores those are.
+      const vanStoreRows: Array<{ n: string; allow_negative: boolean }> =
+        await em.query(
+          `SELECT w.wh_number AS n, w.allow_negative_stock AS allow_negative
+             FROM warehouses w
+            WHERE w.wh_number IS NOT NULL
+              AND (w.is_van = TRUE
+                   OR EXISTS (SELECT 1 FROM reps r WHERE r.van_id = w.id))`,
+        );
+      const vanStores = new Set<string>(vanStoreRows.map((r) => r.n));
+      const negativeAllowedStores = new Set<string>(
+        vanStoreRows.filter((r) => r.allow_negative).map((r) => r.n),
       );
       // ── Serialise concurrent vouchers drawing on the SAME pool ────────────
       // The check below reads `item_balance`, a VIEW aggregating posted
@@ -1066,7 +1073,17 @@ export class VouchersService implements OnModuleInit {
           n.stockUnitCode,
           n.store,
         );
-        if (available < n.qty) {
+        // Every store in this loop is a van, so the only remaining question is
+        // its own flag. Asked through the shared function rather than reading
+        // the set directly, so a third refusal site added later asks the same
+        // question in the same words — a flag one path honours and another
+        // ignores is worse than no flag, because the setting appears to be on
+        // and the refusal still happens.
+        const permitted = mayGoNegative({
+          warehouseAllowsNegative: negativeAllowedStores.has(n.store),
+          isVan: true,
+        });
+        if (available < n.qty && !permitted) {
           // Name the pool when it is not the base one — otherwise "not enough
           // stock" reads as a lie to a rep staring at a healthy item total.
           const unit = n.stockUnitCode
@@ -1422,6 +1439,29 @@ export class VouchersService implements OnModuleInit {
     line: VoucherTransaction,
     effect: 'in' | 'out' | 'reserve',
   ): Promise<void> {
+    // Does this rep's own van permit a negative?
+    //
+    // Asked here rather than passed down, because this is the LAST gate: the
+    // pre-check above can pass a line that this guard then refuses, and the
+    // caller would see INSUFFICIENT_STOCK for a sale the policy had just
+    // allowed. That is precisely the "one path honours the setting, another
+    // ignores it" failure the ERP's own notes describe, and it looks to the
+    // next person like the feature is broken rather than like a path forgot to
+    // ask.
+    const vanRows: Array<{ allow_negative: boolean; is_van: boolean }> =
+      await em.query(
+        `SELECT w.allow_negative_stock AS allow_negative, w.is_van AS is_van
+           FROM reps r JOIN warehouses w ON w.id = r.van_id
+          WHERE r.id = $1
+          LIMIT 1`,
+        [repId],
+      );
+    const allowNegative = mayGoNegative({
+      warehouseAllowsNegative: vanRows[0]?.allow_negative === true,
+      // A rep with no van row attached resolves to no store, and an unknown
+      // store is never a van — so it keeps the guard.
+      isVan: vanRows[0]?.is_van === true,
+    });
     const product = await em
       .getRepository(ItemCart)
       .findOne({ where: { itemNumber: line.itemNumber } });
@@ -1444,11 +1484,38 @@ export class VouchersService implements OnModuleInit {
               reserved    = van_stock.reserved + $5,
               loaded_at   = COALESCE($6, van_stock.loaded_at),
               snapshot_at = now()
-        WHERE van_stock.quantity + $4 >= 0
-          AND van_stock.reserved + $5 >= 0
-       RETURNING quantity`,
+        ${allowNegative ? '' : `WHERE van_stock.quantity + $4 >= 0
+          AND van_stock.reserved + $5 >= 0`}
+       RETURNING quantity, (xmax = 0) AS inserted`,
       [repId, product.id, stockUnitCode, qtyDelta, reservedDelta, loadedAt],
     );
+
+    // A pool with NO ROW is refused even where negatives are allowed.
+    //
+    // The insert clamps a fresh row with GREATEST(delta, 0), and that clamp is
+    // right: going below zero from nothing is not "the balance is stale", it is
+    // "this item was never loaded onto this van". But the pre-check no longer
+    // catches it for a permitted store — it only knows the ledger reads zero,
+    // which is what a missing pool and an empty pool both look like — so
+    // without this the sale would post against a silent 0 instead of the
+    // negative it asked for. A wrong number nobody can see is the one outcome
+    // this whole feature exists to avoid.
+    //
+    // `xmax = 0` is true only on the inserted row, which is how an upsert says
+    // which half of itself ran.
+    const insertedFresh = (updated[0] as { inserted?: boolean } | undefined)?.inserted === true;
+    if (allowNegative && qtyDelta < 0 && insertedFresh) {
+      const unit = stockUnitCode ? ` (unit ${stockUnitCode})` : '';
+      throw new ConflictException({
+        code: 'INSUFFICIENT_STOCK',
+        message:
+          `${line.itemNumber}${unit} is not loaded on this van, so it cannot be ` +
+          `sold below zero: need ${qty}.`,
+        itemNumber: line.itemNumber,
+        stockUnitCode,
+        requested: qty,
+      });
+    }
 
     // Zero rows means the guard refused it: the row exists and the delta would
     // drive it negative. (An insert can't be refused — a fresh row starts at the

@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { negativeValue } from '../warehouses/negative-stock';
 import { Cron } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -133,6 +134,82 @@ export class StockLedgerService {
    * table without the other). Expensive (it replays all history); run it nightly
    * and on demand, never in a request path.
    */
+  /**
+   * Every pool sitting below zero, by store, with what it is worth.
+   *
+   * A van allowed to go negative WILL go negative, and nobody looks at a number
+   * they are not shown: the 77 client reached -46 on one item and it was only
+   * found by reading the balances straight out of the database. So the balances
+   * this permission produces are reported rather than left to be discovered.
+   *
+   * The value is the figure finance needs — a van twelve short of something
+   * costing 4.000 is carrying a 48.000 hole in the inventory account, and the
+   * quantity alone does not say that. An item with no cost recorded contributes
+   * nothing rather than -0.
+   *
+   * Reads the ledger, not van_stock: the ledger is what the rest of the system
+   * answers "how much is there?" with, so a negative that does not appear here
+   * is not one anybody is acting on.
+   */
+  async negativePools(): Promise<{
+    checkedAt: string;
+    pools: Array<{
+      storeNumber: string;
+      storeName: string | null;
+      itemNumber: string;
+      itemName: string | null;
+      stockUnitCode: string;
+      qty: number;
+      unitCostFils: number | null;
+      valueFils: number;
+    }>;
+    totalValueFils: number;
+  }> {
+    const rows: Array<{
+      store_number: string;
+      store_name: string | null;
+      item_number: string;
+      item_name: string | null;
+      stock_unit_code: string;
+      qty: string;
+      cost: number | null;
+    }> = await this.ds.query(
+      `SELECT b.stock_number    AS store_number,
+              w.wh_name         AS store_name,
+              b.item_number     AS item_number,
+              b.item_name       AS item_name,
+              b.stock_unit_code AS stock_unit_code,
+              b.qty             AS qty,
+              ic.cost           AS cost
+         FROM item_balance b
+         LEFT JOIN warehouses w ON w.wh_number = b.stock_number
+         LEFT JOIN item_cart  ic ON ic.item_number = b.item_number
+        WHERE b.qty < 0
+        ORDER BY (b.qty * COALESCE(ic.cost, 0)) ASC, b.stock_number, b.item_number`,
+    );
+
+    const pools = rows.map((r) => {
+      const qty = Number(r.qty) || 0;
+      const unitCostFils = r.cost ?? null;
+      return {
+        storeNumber: r.store_number,
+        storeName: r.store_name,
+        itemNumber: r.item_number,
+        itemName: r.item_name,
+        stockUnitCode: r.stock_unit_code,
+        qty,
+        unitCostFils,
+        valueFils: negativeValue(qty, unitCostFils ?? 0),
+      };
+    });
+
+    return {
+      checkedAt: new Date().toISOString(),
+      pools,
+      totalValueFils: pools.reduce((sum, p) => sum + p.valueFils, 0),
+    };
+  }
+
   async verify(): Promise<{ checkedAt: string; differences: LedgerDifference[] }> {
     const rows: Array<{
       store_number: string;
