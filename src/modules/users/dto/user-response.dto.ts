@@ -42,6 +42,15 @@ export class UserResponseDto {
   @ApiProperty() canEditCustomerCredit!: boolean;
   @ApiProperty() canAddItems!: boolean;
   @ApiProperty() canEditExpiry!: boolean;
+  /**
+   * Developer / support account: signs in from any device without the
+   * administrator approval everyone else needs.
+   *
+   * Carried here because an administrator sets it per account, and a flag that
+   * can be set but not read back is how a setting silently reverts — the drawer
+   * reopens showing the default and the next save writes it away.
+   */
+  @ApiProperty() skipDeviceApproval!: boolean;
   @ApiProperty({ type: [String] }) permissions!: string[];
   @ApiProperty() createdAt!: Date;
   @ApiProperty() updatedAt!: Date;
@@ -77,6 +86,7 @@ export class UserResponseDto {
       canEditCustomerCredit: u.canEditCustomerCredit,
       canAddItems: u.canAddItems,
       canEditExpiry: u.canEditExpiry,
+      skipDeviceApproval: u.skipDeviceApproval,
       permissions: u.permissions ?? [],
       createdAt: u.createdAt,
       updatedAt: u.updatedAt,
