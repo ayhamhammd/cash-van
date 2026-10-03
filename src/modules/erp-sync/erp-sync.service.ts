@@ -1191,13 +1191,21 @@ export class ErpSyncService {
       });
     }
     try {
-      await this.erp.patch(`customers/${map.erpId}`, {
-        name: p.name,
-        phone: p.phone,
-        email: p.email,
-        taxNumber: p.taxNumber,
+      // Built field by field, for the same reason as the organization patch
+      // above: undefined does not survive JSON, so sending the whole shape
+      // unconditionally can produce an empty body and a VALIDATION_ERROR.
+      //
+      // `null` is kept, and is NOT the same as undefined here — it is how a
+      // phone number or a tax number gets cleared, and the ERP accepts it.
+      const body: Record<string, unknown> = {
+        ...(p.name !== undefined ? { name: p.name } : {}),
+        ...(p.phone !== undefined ? { phone: p.phone } : {}),
+        ...(p.email !== undefined ? { email: p.email } : {}),
+        ...(p.taxNumber !== undefined ? { taxNumber: p.taxNumber } : {}),
         ...(p.creditLimit != null ? { creditLimit: p.creditLimit } : {}),
-      });
+      };
+      if (Object.keys(body).length === 0) return;
+      await this.erp.patch(`customers/${map.erpId}`, body);
     } catch (e) {
       this.logger.warn(`pushCustomerUpdate ${p.code} failed: ${e instanceof Error ? e.message : e}`);
     }
@@ -1474,8 +1482,13 @@ export class ErpSyncService {
     const cfg = await this.settings.getErpConfig().catch(() => null);
     if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return;
     try {
-      await this.erp.patch('organization', {
-        name: p.name,
+      const body: Record<string, unknown> = {
+        // Only when there is one. `JSON.stringify` drops an undefined value, so
+        // `{ name: undefined }` leaves here as `{}` — and the ERP answers that
+        // with VALIDATION_ERROR: No updatable fields provided. A settings save
+        // that changed nothing it mirrors should be silent, not an error in the
+        // log every time.
+        ...(p.name ? { name: p.name } : {}),
         // Tax mode is ERP-MASTERED: the ERP is the source of truth and the
         // dashboard PULLS it (pullOrganization → applyErpOrg). We deliberately do
         // NOT push salesTaxMode back, so the app/dashboard/ERP can never disagree.
@@ -1483,7 +1496,11 @@ export class ErpSyncService {
         ...(p.address !== undefined ? { address: p.address } : {}),
         ...(p.phone !== undefined ? { phone: p.phone } : {}),
         ...(p.taxNumber !== undefined ? { taxNumber: p.taxNumber } : {}),
-      });
+      };
+      // Nothing to say: say nothing. A PATCH with an empty body is a round trip
+      // that can only fail.
+      if (Object.keys(body).length === 0) return;
+      await this.erp.patch('organization', body);
     } catch (e) {
       this.logger.warn(`pushOrganization failed: ${e instanceof Error ? e.message : e}`);
     }
