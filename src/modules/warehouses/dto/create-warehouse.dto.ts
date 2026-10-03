@@ -35,4 +35,15 @@ export class CreateWarehouseDto {
   @IsOptional()
   @IsBoolean()
   isVan?: boolean;
+
+  @ApiPropertyOptional({
+    default: false,
+    description:
+      'May this store sell a pool below zero? Vans only — a van\'s stock is uncertain ' +
+      'between the morning load and the day closing, and the main store has no such ' +
+      'excuse. Ignored for a non-van, which is refused whatever this says.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  allowNegativeStock?: boolean;
 }
