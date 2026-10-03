@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   ForbiddenException,
   NotFoundException,
@@ -100,15 +101,18 @@ export class ErpSyncController {
   @ApiOperation({
     summary: 'ERP change webhook (push)',
     description:
-      'Called by the ERP the moment any synced data changes (stock, items, customers, stores, org). Authenticated by the shared ERP_WEBHOOK_SECRET header, NOT a JWT. Schedules an immediate debounced inbound pull and returns 200 at once.',
+      'Called by the ERP the moment any synced data changes (stock, items, customers, stores, org). Authenticated by the shared ERP_WEBHOOK_SECRET header, NOT a JWT. Schedules an immediate debounced inbound pull and returns 200 at once. When the body names a stock change ({ entity: "stock" }), the pull is followed by the same van-stock match as the Match ERP button.',
   })
   @ApiOkResponse({ description: 'Accepted' })
-  webhook(@Headers('x-webhook-secret') secret?: string): { accepted: boolean } {
+  webhook(
+    @Headers('x-webhook-secret') secret?: string,
+    @Body() body?: { entity?: unknown },
+  ): { accepted: boolean } {
     const expected = process.env.ERP_WEBHOOK_SECRET;
     if (!expected || secret !== expected) {
       throw new ForbiddenException('Invalid webhook secret');
     }
-    this.sync.triggerWebhookSync();
+    this.sync.triggerWebhookSync(typeof body?.entity === 'string' ? body.entity : undefined);
     return { accepted: true };
   }
 

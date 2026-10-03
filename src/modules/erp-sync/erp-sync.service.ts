@@ -537,6 +537,36 @@ const STOCK_RECONCILE_EVERY_MIN = Math.max(
 const STOCK_RECONCILE_TICK_MS = 60 * 1000;
 
 /**
+ * Match the vans to the ERP straight after the ERP says stock changed.
+ *
+ * The webhook already pulls the ERP's movement feed, but the feed is a running
+ * sum and can miss a row — an ERP transfer whose movement never arrived left the
+ * van short until someone pressed "Match ERP" on Stock Balances. So a stock
+ * webhook now ends with that same reconciliation, unattended: the same refusals
+ * (a short or empty snapshot, a store with documents still on their way to the
+ * ERP), the same single correcting voucher per store.
+ *
+ * It reads the ERP's whole stock snapshot, so a burst of changes — a busy ERP
+ * posts a movement per invoice line — must not mean a snapshot per change. A
+ * stock webhook asks for one; it runs a few seconds after the pull, and never
+ * sooner than WEBHOOK_RECONCILE_GAP_MS after the last one. Asks that arrive in
+ * between fold into the next run, so the last change is always matched.
+ * ERP_STOCK_RECONCILE_ON_WEBHOOK=off turns it off.
+ */
+const STOCK_RECONCILE_ON_WEBHOOK =
+  (process.env.ERP_STOCK_RECONCILE_ON_WEBHOOK ?? 'on').toLowerCase() !== 'off';
+const WEBHOOK_RECONCILE_SETTLE_MS = 3000;
+const WEBHOOK_RECONCILE_GAP_MS =
+  Math.max(5, parseInt(process.env.ERP_STOCK_RECONCILE_WEBHOOK_GAP_SEC ?? '20', 10) || 20) * 1000;
+
+/**
+ * Webhook entities that mean an on-hand quantity may have moved. The ERP names
+ * the entity it changed; an unnamed ping is treated as stock, because missing a
+ * stock change costs a van that oversells and an extra match costs a read.
+ */
+const STOCK_WEBHOOK_ENTITIES = new Set(['stock', 'sales_invoice', 'warehouse', 'data']);
+
+/**
  * Where one ERP SKU's stock lands in cash-van: an item, and a POOL inside it.
  *
  * The ERP keys stock by `(sku_id, warehouse_id)`; cash-van keys it by
@@ -560,6 +590,10 @@ export class ErpSyncService {
   private reconciling = false;
   private lastAutoReconcileAt = 0;
   private webhookTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A stock webhook arrived since the last pull was scheduled — match after it. */
+  private stockMatchWanted = false;
+  private webhookReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastWebhookReconcileAt = 0;
   /**
    * Entities with a run in flight right now, whether from the sweep or from a
    * per-row button. Two runs of the same entity would race on the same cursor and
@@ -1610,18 +1644,59 @@ export class ErpSyncService {
    * returns 200 right away; the pull runs ~1s later, after the ERP transaction
    * has committed.
    */
-  triggerWebhookSync(): void {
+  triggerWebhookSync(entity?: string): void {
+    if (STOCK_RECONCILE_ON_WEBHOOK && (!entity || STOCK_WEBHOOK_ENTITIES.has(entity))) {
+      this.stockMatchWanted = true;
+    }
+    this.armWebhookPull();
+  }
+
+  private armWebhookPull(): void {
     if (this.webhookTimer) return; // a sync is already scheduled within the window
     this.webhookTimer = setTimeout(() => {
       this.webhookTimer = null;
       if (this.pulling) {
         // A sync is mid-flight; reschedule so changes after it still get pulled.
-        this.triggerWebhookSync();
+        this.armWebhookPull();
         return;
       }
-      void this.scheduledPull();
+      const match = this.stockMatchWanted;
+      this.stockMatchWanted = false;
+      void this.scheduledPull().then(() => {
+        if (match) this.scheduleWebhookReconcile();
+      });
     }, 1000);
     this.webhookTimer.unref?.();
+  }
+
+  /**
+   * Run "Match ERP" once the pull has landed — see STOCK_RECONCILE_ON_WEBHOOK.
+   * One timer: a request while one is pending is already covered by it.
+   */
+  private scheduleWebhookReconcile(): void {
+    if (this.webhookReconcileTimer) return;
+    const wait = Math.max(
+      WEBHOOK_RECONCILE_SETTLE_MS,
+      this.lastWebhookReconcileAt + WEBHOOK_RECONCILE_GAP_MS - Date.now(),
+    );
+    this.webhookReconcileTimer = setTimeout(() => {
+      this.webhookReconcileTimer = null;
+      void this.runWebhookReconcile();
+    }, wait);
+    this.webhookReconcileTimer.unref?.();
+  }
+
+  private async runWebhookReconcile(): Promise<void> {
+    // Someone pressed the button, or a pull is mid-flight: let it finish, then
+    // match — the change that asked for this must still be matched.
+    if (this.reconciling || this.pulling) {
+      this.scheduleWebhookReconcile();
+      return;
+    }
+    const cfg = await this.settings.getErpConfig().catch(() => null);
+    if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return;
+    this.lastWebhookReconcileAt = Date.now();
+    await this.runStockReconcile();
   }
 
   /**
