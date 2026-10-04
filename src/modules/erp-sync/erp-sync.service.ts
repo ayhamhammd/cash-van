@@ -3972,7 +3972,11 @@ export class ErpSyncService {
          FROM item_units iu
          JOIN item_cart ic ON ic.id = iu.item_id
          JOIN units u      ON u.id = iu.unit_id
-        WHERE ic.item_number = $1 AND u.code = $2 AND iu.is_stock_unit = TRUE
+        WHERE ic.item_number = $1 AND u.code = $2
+        -- The variant row first; but a pool whose row is no longer a variant
+        -- (its SKU turned out to be the base) still holds stock, and has to be
+        -- corrected to zero through that same row or it is stranded.
+        ORDER BY iu.is_stock_unit DESC
         LIMIT 1`,
       [itemNumber, stockUnitCode],
     );
@@ -4208,7 +4212,12 @@ export class ErpSyncService {
       where: { erpSkuCode: skuCode },
       relations: { unit: true, item: true },
     });
-    if (iu?.item?.itemNumber) {
+    // A unit row that claims the item's OWN base SKU is a leftover from an
+    // earlier shape of the product (upsertProductItem clears it). It is not a
+    // variant: SKU 442 of item 442 is the item itself, and routing it to that
+    // row's pool sent all of item 442's stock into a pool the base "حبة" never
+    // reads — the base unit showed 0 while a second "حبة" held 2,105.
+    if (iu?.item?.itemNumber && iu.item.itemNumber !== skuCode) {
       return {
         itemNumber: iu.item.itemNumber,
         itemUnitId: iu.id,
@@ -4883,6 +4892,22 @@ export class ErpSyncService {
         await this.itemUnits.save(iu);
         changed = true;
       }
+    }
+
+    // A unit row still carrying the BASE SKU — left from a sync when the product
+    // had a different base — claims the item's own stock for a separate pool.
+    // The loop above never visits it (it skips the base), so nothing corrected
+    // it. It becomes a plain ×1 unit of the base pool: the pool it filled is
+    // then corrected to zero by "Match ERP", which moves that stock into the
+    // base pool where the item's own unit reads it.
+    const claimingBase = await this.itemUnits.find({
+      where: { itemId: item.id, erpSkuCode: base.sku },
+    });
+    for (const iu of claimingBase) {
+      iu.erpSkuCode = null;
+      iu.isStockUnit = false;
+      await this.itemUnits.save(iu);
+      changed = true;
     }
     return changed;
   }

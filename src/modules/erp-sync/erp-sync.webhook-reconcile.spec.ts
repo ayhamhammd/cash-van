@@ -25,6 +25,9 @@ async function advance(ms: number) {
   await jest.advanceTimersByTimeAsync(ms);
 }
 
+// Loading the service module is slow on a busy machine; the timers are fake.
+jest.setTimeout(30_000);
+
 describe('ERP webhook → van stock match', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());

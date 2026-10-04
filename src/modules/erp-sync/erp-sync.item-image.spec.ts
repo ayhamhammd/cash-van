@@ -51,6 +51,8 @@ function makeSvc(existing: Existing) {
   const svc = Object.create(ErpSyncService.prototype) as ErpSyncService;
   (svc as unknown as { items: unknown }).items = items;
   (svc as unknown as { idmap: unknown }).idmap = idmap;
+  // No unit row claims this item's base SKU — see upsertProductItem's cleanup.
+  (svc as unknown as { itemUnits: unknown }).itemUnits = { find: jest.fn().mockResolvedValue([]) };
   (svc as unknown as { logger: unknown }).logger = { warn: jest.fn(), log: jest.fn() };
   const upsert = (skus: unknown[], origin: string | null) =>
     (svc as unknown as {

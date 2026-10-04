@@ -10,8 +10,8 @@ import { ErpSyncService } from './erp-sync.service';
  * dropped, leaving the item hidden forever (the "7 items missing" on 94). The fix
  * captures `wasDeleted` and forces the write.
  *
- * Single base-unit SKU → the item_units loop is skipped; only items (arg 3) and
- * idmap (arg 17) are touched. Field values below are chosen to MATCH what the
+ * Single base-unit SKU → the item_units loop is skipped; items (arg 3) and
+ * idmap (arg 17) are touched, plus the one lookup for a unit row claiming the base SKU. Field values below are chosen to MATCH what the
  * sweep computes, so ONLY the deletedAt restore can trigger the write.
  */
 function baseSku(sku: string) {
@@ -73,6 +73,8 @@ function makeSvc(existing: Record<string, unknown>) {
   const svc = Object.create(ErpSyncService.prototype) as ErpSyncService;
   (svc as unknown as { items: unknown }).items = items;
   (svc as unknown as { idmap: unknown }).idmap = idmap;
+  // No unit row claims this item's base SKU — see upsertProductItem's cleanup.
+  (svc as unknown as { itemUnits: unknown }).itemUnits = { find: jest.fn().mockResolvedValue([]) };
   (svc as unknown as { logger: unknown }).logger = { warn: jest.fn(), log: jest.fn() };
   const upsert = (skus: unknown[], origin: string | null) =>
     (svc as unknown as {
