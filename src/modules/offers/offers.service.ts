@@ -24,6 +24,11 @@ import type {
   OfferTriggerConfig,
   OfferType,
 } from './offers.types';
+import {
+  legacyPaymentCondition,
+  OFFER_PAYMENT_TYPES,
+  offerPaymentTypes,
+} from './offers.types';
 import { applyTokenSearch } from '../../common/search/token-search.util';
 
 export type OfferStatus = 'active' | 'paused' | 'scheduled' | 'expired';
@@ -74,7 +79,7 @@ export class OffersService {
       name: dto.name,
       description: dto.description ?? null,
       type: dto.type,
-      trigger: dto.trigger as unknown as OfferTriggerConfig,
+      trigger: normalizeTriggerPayment(dto.type, dto.trigger) as unknown as OfferTriggerConfig,
       reward: dto.reward as unknown as OfferRewardConfig,
       eligibility: (dto.eligibility ?? { customerScope: 'ALL' }) as OfferEligibility,
       validFrom: dto.validFrom ? new Date(dto.validFrom) : null,
@@ -214,7 +219,7 @@ export class OffersService {
       name: dto.name ?? offer.name,
       description: dto.description ?? offer.description,
       type,
-      trigger,
+      trigger: normalizeTriggerPayment(type, trigger),
       reward,
       eligibility: dto.eligibility ?? offer.eligibility,
       validFrom:
@@ -401,15 +406,12 @@ export class OffersService {
     const t = trigger ?? ({} as OfferTriggerDto);
     switch (type) {
       case 'PAYMENT_METHOD_DISCOUNT':
+        // At least one payment type (legacy paymentCondition still accepted and
+        // read as cash-only / credit-only — see offerPaymentTypes).
         this.req(
-          t.paymentCondition,
-          'PAYMENT_METHOD_DISCOUNT requires trigger.paymentCondition (CASH|CREDIT)',
+          offerPaymentTypes(t)?.length,
+          'PAYMENT_METHOD_DISCOUNT requires trigger.paymentTypes (one or more of CASH, CARD, CREDIT)',
         );
-        if (t.paymentCondition !== 'CASH' && t.paymentCondition !== 'CREDIT') {
-          throw new BadRequestException(
-            'trigger.paymentCondition must be CASH or CREDIT',
-          );
-        }
         if (t.minOrderTotal != null && t.minOrderTotal < 0) {
           throw new BadRequestException(
             'trigger.minOrderTotal must be ≥ 0 (fils)',
@@ -621,4 +623,27 @@ export class OffersService {
       throw new BadRequestException(message);
     }
   }
+}
+
+/**
+ * Store an offer's payment gate in one explicit form: `paymentTypes` as the truth,
+ * plus the legacy `paymentCondition` derived from it for phone builds that read
+ * only that. An item offer covering every type is stored as no gate at all (absent
+ * = every type); a payment-method discount always keeps its list.
+ */
+export function normalizeTriggerPayment<
+  T extends { paymentTypes?: string[]; paymentCondition?: string },
+>(type: OfferType, trigger: T): T {
+  if (!trigger) return trigger;
+  const out = { ...trigger };
+  const types = offerPaymentTypes(out);
+  const everyType = types != null && types.length === OFFER_PAYMENT_TYPES.length;
+  if (types == null || (everyType && type !== 'PAYMENT_METHOD_DISCOUNT')) {
+    delete out.paymentTypes;
+    delete out.paymentCondition;
+    return out;
+  }
+  out.paymentTypes = types;
+  out.paymentCondition = legacyPaymentCondition(types);
+  return out;
 }

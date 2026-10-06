@@ -42,7 +42,7 @@ export class EvaluateOffersDto {
 
   @ApiPropertyOptional({
     enum: PAYMENT_TYPES,
-    description: "Order payment method — drives PAYMENT_METHOD_DISCOUNT (CASH = any non-CREDIT).",
+    description: "The sale's payment type (CASH, CARD = Visa, CREDIT; CHEQUE/TRANSFER count as CASH). Offers apply only when their paymentTypes include it.",
   })
   @IsOptional()
   @IsIn(PAYMENT_TYPES)

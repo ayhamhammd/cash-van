@@ -296,9 +296,10 @@ export class SyncService {
         ...l,
         storeNumber: l.storeNumber ?? l.fromStoreNumber ?? store,
       }));
-      const created = await this.vouchers.create(dto);
+      const created = await this.vouchers.create(dto, { completedOffline: true });
       await this.markPosted(row.id, created.voucherNumber);
       // ERP push is enqueued via the 'erp.voucher.posted' event from vouchers.create.
+      await this.flagUnpermittedCard(dto, created.voucherNumber);
     } catch (e) {
       await this.markFailed(row, e);
     }
@@ -376,6 +377,34 @@ export class SyncService {
     );
 
     if (status !== 'pending') await this.announce(row, status, detail);
+  }
+
+  /**
+   * A Visa sale already happened on the handset, so it posts — but if the
+   * salesman is not (or no longer) allowed Visa, the managers hear about it.
+   */
+  private async flagUnpermittedCard(
+    dto: CreateVoucherDto,
+    voucherNumber: string,
+  ): Promise<void> {
+    if (!(dto.payments ?? []).some((p) => p.paymentType === 'CARD')) return;
+    try {
+      if (await this.vouchers.userMayTakeCard(dto.userCode)) return;
+      await this.notifications.notifyManagers({
+        kind: 'sync.card_not_allowed',
+        titleAr: 'بيع فيزا من مندوب غير مصرح',
+        titleEn: 'Visa sale by a salesman without Visa permission',
+        bodyAr: `${voucherNumber} — ${dto.userCode ?? ''}`,
+        bodyEn: `${voucherNumber} (${dto.userCode ?? 'unknown rep'})`,
+        refType: 'voucher',
+        refId: voucherNumber,
+      });
+    } catch (err) {
+      // The sale is posted; a failed alert must not turn it into a failure.
+      this.logger.error(
+        `Could not flag Visa sale ${voucherNumber}: ${(err as Error).message}`,
+      );
+    }
   }
 
   /** Tell the office about a document that will not post on its own. */

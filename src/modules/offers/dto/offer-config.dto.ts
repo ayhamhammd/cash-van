@@ -14,7 +14,9 @@ import {
 } from 'class-validator';
 import {
   DISCOUNT_MODES,
+  OFFER_PAYMENT_TYPES,
   PAYMENT_CONDITIONS,
+  type OfferPaymentType,
   type CustomerScope,
   type DiscountMode,
   type PaymentCondition,
@@ -37,10 +39,24 @@ const CUSTOMER_SCOPES: CustomerScope[] = ['ALL', 'SEGMENT', 'SPECIFIC', 'NEW_ONL
  * legality (which fields are required) is enforced in OffersService.validateConfig.
  */
 export class OfferTriggerDto {
-  // ---- PAYMENT_METHOD_DISCOUNT ----
+  // ---- payment gate (PAYMENT_METHOD_DISCOUNT required, ITEM_QTY_REWARD optional) ----
+  @ApiPropertyOptional({
+    enum: OFFER_PAYMENT_TYPES,
+    isArray: true,
+    description:
+      'The payment types the offer applies to: CASH, CARD (Visa), CREDIT. Required for ' +
+      'PAYMENT_METHOD_DISCOUNT; optional for ITEM_QTY_REWARD (absent = every type).',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsIn(OFFER_PAYMENT_TYPES, { each: true })
+  paymentTypes?: OfferPaymentType[];
+
   @ApiPropertyOptional({
     enum: PAYMENT_CONDITIONS,
-    description: 'PAYMENT_METHOD_DISCOUNT: CASH matches any non-CREDIT; CREDIT only CREDIT.',
+    deprecated: true,
+    description: 'LEGACY: use paymentTypes. CASH = cash only (not Visa); CREDIT = credit only.',
   })
   @IsOptional()
   @IsIn(PAYMENT_CONDITIONS)

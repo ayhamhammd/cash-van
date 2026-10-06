@@ -42,6 +42,10 @@ export class SalesmanSettlement {
   @Column({ name: 'credit_sales_fils', type: 'bigint', default: 0 })
   creditSalesFils!: string;
 
+  /** Visa sales in the period — paid to the bank, so not in expected cash. */
+  @Column({ name: 'card_sales_fils', type: 'bigint', default: 0 })
+  cardSalesFils!: string;
+
   @Column({ name: 'cash_returns_fils', type: 'bigint', default: 0 })
   cashReturnsFils!: string;
 

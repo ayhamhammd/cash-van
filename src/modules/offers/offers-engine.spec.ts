@@ -1,5 +1,12 @@
 import { OffersEngineService } from './offers-engine.service';
 import type { Offer } from './entities/offer.entity';
+import {
+  offerPaymentTypes,
+  paymentTypeOf,
+  type OfferPaymentType,
+  type PaymentType,
+} from './offers.types';
+import { normalizeTriggerPayment } from './offers.service';
 
 /**
  * Pure-ish unit tests for the discount engine. Repositories are mocked so the
@@ -155,17 +162,118 @@ describe('OffersEngineService', () => {
     expect(exc.totals.grandTotalFils).toBe(1323);
   });
 
-  it('treats any non-CREDIT payment as cash, but not CREDIT', async () => {
+  it('a cash offer covers cheque and transfer, but not Visa or credit', async () => {
     const engine = makeEngine([cashStatic5]);
-    const cheque = await engine.evaluate([{ itemNumber: 'A', qty: 4 }], {
-      paymentMethod: 'CHEQUE',
-    });
-    expect(cheque.appliedOffers).toHaveLength(1); // CHEQUE = cash
+    const applied = async (paymentMethod: PaymentType) =>
+      (await engine.evaluate([{ itemNumber: 'A', qty: 4 }], { paymentMethod }))
+        .appliedOffers.length;
+    expect(await applied('CHEQUE')).toBe(1); // CHEQUE = cash
+    expect(await applied('TRANSFER')).toBe(1);
+    expect(await applied('CARD')).toBe(0); // Visa only when the offer lists it
+    expect(await applied('CREDIT')).toBe(0);
+  });
 
-    const credit = await engine.evaluate([{ itemNumber: 'A', qty: 4 }], {
-      paymentMethod: 'CREDIT',
+  describe('payment types (Visa)', () => {
+    const pmd = (paymentTypes: OfferPaymentType[]): Partial<Offer> => ({
+      type: 'PAYMENT_METHOD_DISCOUNT',
+      trigger: { paymentTypes },
+      reward: { kind: 'LINE_PERCENT_DISCOUNT', basePercent: 5, mode: 'STATIC' },
     });
-    expect(credit.appliedOffers).toHaveLength(0); // CREDIT excluded
+    const itemOffer = (trigger: Record<string, unknown>): Partial<Offer> => ({
+      type: 'ITEM_QTY_REWARD',
+      trigger: { itemNumbers: ['A'], ...trigger } as Offer['trigger'],
+      reward: { kind: 'ITEM_AMOUNT_DISCOUNT', minQty: 1, baseAmountFils: 100, mode: 'STATIC' },
+    });
+    const applied = async (offer: Partial<Offer>, paymentMethod: PaymentType) =>
+      (await makeEngine([offer]).evaluate([{ itemNumber: 'A', qty: 2 }], { paymentMethod }))
+        .appliedOffers.length;
+
+    it('a cash-only discount does not apply to a Visa sale', async () => {
+      expect(await applied(pmd(['CASH']), 'CASH')).toBe(1);
+      expect(await applied(pmd(['CASH']), 'CARD')).toBe(0);
+    });
+
+    it('a cash + Visa discount applies to both, not to credit', async () => {
+      expect(await applied(pmd(['CASH', 'CARD']), 'CASH')).toBe(1);
+      expect(await applied(pmd(['CASH', 'CARD']), 'CARD')).toBe(1);
+      expect(await applied(pmd(['CASH', 'CARD']), 'CREDIT')).toBe(0);
+    });
+
+    it('a Visa-only discount applies only to Visa', async () => {
+      expect(await applied(pmd(['CARD']), 'CARD')).toBe(1);
+      expect(await applied(pmd(['CARD']), 'CASH')).toBe(0);
+      expect(await applied(pmd(['CARD']), 'CHEQUE')).toBe(0);
+    });
+
+    it('paymentTypes wins over a stale legacy paymentCondition', async () => {
+      const offer = pmd(['CARD']);
+      (offer.trigger as Record<string, unknown>).paymentCondition = 'CASH';
+      expect(await applied(offer, 'CARD')).toBe(1);
+      expect(await applied(offer, 'CASH')).toBe(0);
+    });
+
+    it('a discount with no payment types never applies', async () => {
+      const offer: Partial<Offer> = { ...pmd(['CASH']), trigger: {} };
+      expect(await applied(offer, 'CASH')).toBe(0);
+    });
+
+    it('an item offer with no payment gate applies to every type, Visa included', async () => {
+      expect(await applied(itemOffer({}), 'CASH')).toBe(1);
+      expect(await applied(itemOffer({}), 'CARD')).toBe(1);
+      expect(await applied(itemOffer({}), 'CREDIT')).toBe(1);
+    });
+
+    it('an item offer gated to legacy CASH leaves Visa out', async () => {
+      expect(await applied(itemOffer({ paymentCondition: 'CASH' }), 'CASH')).toBe(1);
+      expect(await applied(itemOffer({ paymentCondition: 'CASH' }), 'CARD')).toBe(0);
+    });
+
+    it('an item offer listing Visa applies to Visa', async () => {
+      expect(await applied(itemOffer({ paymentTypes: ['CASH', 'CARD'] }), 'CARD')).toBe(1);
+      expect(await applied(itemOffer({ paymentTypes: ['CASH', 'CARD'] }), 'CREDIT')).toBe(0);
+    });
+  });
+
+  describe('paymentTypeOf', () => {
+    it('credit anywhere makes the sale credit, then Visa, else cash', () => {
+      expect(paymentTypeOf(['CASH', 'CREDIT'])).toBe('CREDIT');
+      expect(paymentTypeOf(['CARD', 'CREDIT'])).toBe('CREDIT');
+      expect(paymentTypeOf(['CASH', 'CARD'])).toBe('CARD');
+      expect(paymentTypeOf(['CHEQUE'])).toBe('CASH');
+      expect(paymentTypeOf(['TRANSFER'])).toBe('CASH');
+      expect(paymentTypeOf([])).toBe('CASH');
+      expect(paymentTypeOf([undefined])).toBe('CASH');
+    });
+  });
+
+  describe('offerPaymentTypes (legacy rows)', () => {
+    it('reads paymentTypes first, then the legacy condition', () => {
+      expect(offerPaymentTypes({ paymentTypes: ['CARD', 'CASH'] })).toEqual(['CASH', 'CARD']);
+      expect(offerPaymentTypes({ paymentCondition: 'CASH' })).toEqual(['CASH']);
+      expect(offerPaymentTypes({ paymentCondition: 'CREDIT' })).toEqual(['CREDIT']);
+      expect(offerPaymentTypes({})).toBeNull();
+      expect(offerPaymentTypes({ paymentTypes: ['BOGUS'] })).toBeNull();
+    });
+  });
+
+  describe('normalizeTriggerPayment (saved form)', () => {
+    it('stores paymentTypes with the legacy condition derived for old phones', () => {
+      expect(normalizeTriggerPayment('PAYMENT_METHOD_DISCOUNT', { paymentTypes: ['CASH', 'CARD'] }))
+        .toEqual({ paymentTypes: ['CASH', 'CARD'], paymentCondition: 'CASH' });
+      expect(normalizeTriggerPayment('PAYMENT_METHOD_DISCOUNT', { paymentTypes: ['CREDIT'] }))
+        .toEqual({ paymentTypes: ['CREDIT'], paymentCondition: 'CREDIT' });
+      expect(normalizeTriggerPayment('PAYMENT_METHOD_DISCOUNT', { paymentCondition: 'CASH' }))
+        .toEqual({ paymentTypes: ['CASH'], paymentCondition: 'CASH' });
+    });
+
+    it('a discount keeps an all-types list; an item offer drops it (absent = all)', () => {
+      const all = { paymentTypes: ['CASH', 'CARD', 'CREDIT'] };
+      expect(normalizeTriggerPayment('PAYMENT_METHOD_DISCOUNT', all).paymentTypes).toEqual([
+        'CASH', 'CARD', 'CREDIT',
+      ]);
+      expect(normalizeTriggerPayment('ITEM_QTY_REWARD', { itemNumbers: ['A'], ...all } as any))
+        .toEqual({ itemNumbers: ['A'] });
+    });
   });
 
   it('a CREDIT offer applies only on a CREDIT payment', async () => {

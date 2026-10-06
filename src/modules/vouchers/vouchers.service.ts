@@ -39,6 +39,7 @@ import { SettingsService } from '../settings/settings.service';
 import { calcVoucher, toFils, filsToJod, type TaxMode } from './voucher-calc';
 import { calculateTobaccoTax, type TobaccoTaxProfileData } from './tobacco-tax-calc';
 import type { EvaluationResult } from '../offers/offers.types';
+import { paymentTypeOf } from '../offers/offers.types';
 
 /** Resolved tobacco context for one voucher line (null = not a tobacco line). */
 interface TobaccoLineCtx {
@@ -300,10 +301,13 @@ export class VouchersService implements OnModuleInit {
    * @param opts.allowOverCreditLimit only for an approved CREDIT_OVER_LIMIT
    *   request: a supervisor has agreed to this sale going past the limit. A credit
    *   hold still blocks — the hold is a stop on all credit, not a ceiling.
+   * @param opts.completedOffline a sale the handset already completed offline
+   *   (sync intake). Not refused for a Visa permission removed since — the sync
+   *   service tells the managers instead.
    */
   async create(
     dto: CreateVoucherDto,
-    opts: { allowOverCreditLimit?: boolean } = {},
+    opts: { allowOverCreditLimit?: boolean; completedOffline?: boolean } = {},
   ): Promise<VoucherHeader> {
     // First, before anything reads the payments: a return is the customer's
     // credit, never a cash refund — whatever an old phone sent. See
@@ -315,6 +319,7 @@ export class VouchersService implements OnModuleInit {
     // (the approving manager re-runs create() under their own role). Runs BEFORE
     // offers so system-granted offer discounts bypass the manual-discount gate.
     await this.enforceSalesmanPolicy(dto);
+    if (!opts.completedOffline) await this.enforceCardPermission(dto);
     // Location lock: a rep flagged customers.requireProximity may only act on a
     // customer while within the geofence of its saved location (and seeds a
     // missing one from repLat/repLng). No-op for everyone else. Runs before any
@@ -480,9 +485,12 @@ export class VouchersService implements OnModuleInit {
       }));
       const result = await this.offersEngine.evaluate(cart, {
         customerNumber: dto.customerNumber ?? null,
-        // Payment method drives PAYMENT_METHOD_DISCOUNT. A sale carries one
-        // payment line; default to CASH when none was sent.
-        paymentMethod: dto.payments?.[0]?.paymentType ?? 'CASH',
+        // The sale's payment type gates every offer (offer.trigger.paymentTypes):
+        // any credit line makes it CREDIT, else any card line CARD (Visa), else
+        // CASH — same rule as the phone's LocalOfferEvaluator.
+        paymentMethod: paymentTypeOf(
+          (dto.payments ?? []).map((p) => p.paymentType),
+        ),
         // Rep's gift picks for ITEM_QTY_REWARD → resolved to free lines.
         chosenFreeItems: dto.chosenFreeItems ?? null,
         at: dto.inDate ? new Date(dto.inDate) : undefined,
@@ -2037,6 +2045,34 @@ export class VouchersService implements OnModuleInit {
    * with no request context, e.g. jobs or approval execution) pass through.
    * Permissions are read fresh from the DB so edits apply without re-login.
    */
+  /**
+   * Visa (CARD) payments need the user's `canUseCardPayment` (set per salesman
+   * in the dashboard). Admins, managers and internal calls are not gated.
+   */
+  private async enforceCardPermission(dto: CreateVoucherDto): Promise<void> {
+    if (!(dto.payments ?? []).some((p) => p.paymentType === 'CARD')) return;
+    const ctx = this.userCtx.get();
+    if (!ctx) return;
+    if (ctx.role === 'admin' || ctx.role === 'manager') return;
+    const user = await this.dataSource.getRepository(User).findOne({
+      where: { id: ctx.userId },
+    });
+    if (!user || user.userType === 'ADMIN') return;
+    if (!user.canUseCardPayment) throw new ForbiddenException('CARD_NOT_ALLOWED');
+  }
+
+  /**
+   * Whether the salesman behind `userCode` may take Visa today. Unknown users
+   * count as allowed — there is nobody to hold to the permission.
+   */
+  async userMayTakeCard(userCode: string | null | undefined): Promise<boolean> {
+    if (!userCode) return true;
+    const user = await this.dataSource
+      .getRepository(User)
+      .findOne({ where: { userNumber: userCode } });
+    return !user || user.userType === 'ADMIN' || user.canUseCardPayment;
+  }
+
   private async enforceSalesmanPolicy(dto: CreateVoucherDto): Promise<void> {
     const ctx = this.userCtx.get();
     if (!ctx) return; // internal call (job / approval execution) — trusted

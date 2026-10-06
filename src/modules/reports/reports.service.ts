@@ -16,6 +16,7 @@ export interface EodRow {
   collectedChequeFils: number;
   cashSalesFils: number;
   creditSalesFils: number;
+  cardSalesFils: number; // Visa — paid, but to the bank: never part of expected cash
   cashReturnsFils: number;
   totalDiscountFils: number;
   expectedCashFils: number; // cashSales + collectedCash — returns are the customer's credit, not cash
@@ -51,6 +52,7 @@ export interface SettlementRow {
   collectedChequeFils: string;
   cashSalesFils: string;
   creditSalesFils: string;
+  cardSalesFils: string;
   cashReturnsFils: string;
   totalDiscountFils: string;
   previousBalanceFils: string;
@@ -340,6 +342,7 @@ export class ReportsService {
         SELECT r.id AS rep_id,
           COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CASH'   AND h.trans_kind='SALE'),0)   AS cash_sales,
           COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CREDIT' AND h.trans_kind='SALE'),0)   AS credit_sales,
+          COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CARD'   AND h.trans_kind='SALE'),0)   AS card_sales,
           -- Every return, whatever it was recorded as: it is the customer's credit,
           -- shown for the day's picture and never taken off expected cash. (Only
           -- CASH-typed returns used to count, and be subtracted — new returns are
@@ -409,6 +412,7 @@ export class ReportsService {
         COALESCE(coll.collected_cheque,0)::bigint AS "collectedChequeFils",
         COALESCE(vp.cash_sales,0)::bigint         AS "cashSalesFils",
         COALESCE(vp.credit_sales,0)::bigint       AS "creditSalesFils",
+        COALESCE(vp.card_sales,0)::bigint         AS "cardSalesFils",
         COALESCE(vp.cash_returns,0)::bigint       AS "cashReturnsFils",
         COALESCE(disc.total_discount,0)::bigint   AS "totalDiscountFils",
         COALESCE(bal.new_balance_fils,0)::bigint  AS "previousBalanceFils",
@@ -450,6 +454,7 @@ export class ReportsService {
         collectedChequeFils: n('collectedChequeFils'),
         cashSalesFils: n('cashSalesFils'),
         creditSalesFils: n('creditSalesFils'),
+        cardSalesFils: n('cardSalesFils'),
         cashReturnsFils: n('cashReturnsFils'),
         totalDiscountFils: n('totalDiscountFils'),
         expectedCashFils,
@@ -482,6 +487,7 @@ export class ReportsService {
         collectedChequeFils: sum('collectedChequeFils'),
         cashSalesFils: sum('cashSalesFils'),
         creditSalesFils: sum('creditSalesFils'),
+        cardSalesFils: sum('cardSalesFils'),
         cashReturnsFils: sum('cashReturnsFils'),
         totalDiscountFils: sum('totalDiscountFils'),
         expectedCashFils: sum('expectedCashFils'),
@@ -518,6 +524,7 @@ export class ReportsService {
         collectedChequeFils: String(row.collectedChequeFils),
         cashSalesFils: String(row.cashSalesFils),
         creditSalesFils: String(row.creditSalesFils),
+        cardSalesFils: String(row.cardSalesFils),
         cashReturnsFils: String(row.cashReturnsFils),
         totalDiscountFils: String(row.totalDiscountFils),
         previousBalanceFils: String(row.previousBalanceFils),
@@ -586,6 +593,7 @@ export class ReportsService {
          s.collected_cheque_fils AS "collectedChequeFils",
          s.cash_sales_fils       AS "cashSalesFils",
          s.credit_sales_fils     AS "creditSalesFils",
+         s.card_sales_fils       AS "cardSalesFils",
          s.cash_returns_fils     AS "cashReturnsFils",
          s.total_discount_fils   AS "totalDiscountFils",
          s.previous_balance_fils AS "previousBalanceFils",

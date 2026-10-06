@@ -28,9 +28,77 @@ export const PAYMENT_TYPES: PaymentType[] = [
   'CREDIT',
 ];
 
-/** The binary condition an offer targets. CASH = any non-CREDIT payment. */
+/**
+ * LEGACY: the single condition offers carried before Visa. Still read (and still
+ * written, derived from [paymentTypes]) so phone builds that predate
+ * `paymentTypes` keep evaluating; never used to decide anything on the server.
+ */
 export type PaymentCondition = 'CASH' | 'CREDIT';
 export const PAYMENT_CONDITIONS: PaymentCondition[] = ['CASH', 'CREDIT'];
+
+/**
+ * The payment types an offer can be limited to (todo-tasks/07, FlowVan).
+ *
+ * An offer applies to a sale only when the sale's [paymentTypeOf] is in its list.
+ * Visa is its own type: a cash offer no longer discounts a Visa sale — the old
+ * single `paymentCondition: 'CASH'` meant "anything not credit", so every cash
+ * offer silently applied to Visa too.
+ */
+export type OfferPaymentType = 'CASH' | 'CARD' | 'CREDIT';
+export const OFFER_PAYMENT_TYPES: OfferPaymentType[] = ['CASH', 'CARD', 'CREDIT'];
+
+/**
+ * How a sale pays, for offers and reports — ONE rule, the same on the phone
+ * (LocalOfferEvaluator.paymentTypeOf):
+ *  - CREDIT if any payment line is on account (the defining fact of the sale),
+ *  - else CARD if any line is Visa,
+ *  - else CASH (cash, cheque, transfer — and no line at all).
+ */
+export function paymentTypeOf(methods: Array<string | null | undefined>): OfferPaymentType {
+  if (methods.some((m) => m === 'CREDIT')) return 'CREDIT';
+  if (methods.some((m) => m === 'CARD')) return 'CARD';
+  return 'CASH';
+}
+
+/**
+ * The payment types an offer covers, or null for "every payment type".
+ *
+ * Reads `paymentTypes` when present; otherwise the legacy `paymentCondition`,
+ * where CASH now means cash ONLY — not Visa. That reading is the fix: an offer
+ * written as "cash" before Visa existed never meant to discount a card sale.
+ */
+export function offerPaymentTypes(
+  t: { paymentTypes?: readonly string[] | null; paymentCondition?: string | null } | null | undefined,
+): OfferPaymentType[] | null {
+  const listed = (t?.paymentTypes ?? []).filter((x): x is OfferPaymentType =>
+    (OFFER_PAYMENT_TYPES as readonly string[]).includes(x),
+  );
+  if (listed.length) return OFFER_PAYMENT_TYPES.filter((x) => listed.includes(x));
+  if (t?.paymentCondition === 'CREDIT') return ['CREDIT'];
+  if (t?.paymentCondition === 'CASH') return ['CASH'];
+  return null;
+}
+
+/** Does an offer limited to [covered] (null = all) apply to a sale paid by [payType]? */
+export function offerCoversPayment(
+  covered: OfferPaymentType[] | null,
+  payType: OfferPaymentType,
+): boolean {
+  return covered == null || covered.includes(payType);
+}
+
+/**
+ * The legacy single condition derived from a payment-type list, for phone builds
+ * that only read `paymentCondition`: CREDIT for a credit-only offer, CASH otherwise.
+ * Lossy on purpose — those builds cannot express Visa — and gone once the fleet
+ * has updated.
+ */
+export function legacyPaymentCondition(
+  types: OfferPaymentType[] | null,
+): PaymentCondition | undefined {
+  if (!types) return undefined;
+  return types.length === 1 && types[0] === 'CREDIT' ? 'CREDIT' : 'CASH';
+}
 
 /**
  * How an amount/percent reward scales with quantity:
@@ -58,8 +126,10 @@ export type CustomerScope = 'ALL' | 'SEGMENT' | 'SPECIFIC' | 'NEW_ONLY';
 // ---- trigger configs ----
 
 export interface PaymentMethodTrigger {
-  /** CASH matches any non-CREDIT payment; CREDIT matches CREDIT only. */
-  paymentCondition: PaymentCondition;
+  /** The payment types this discount applies to — at least one. See [offerPaymentTypes]. */
+  paymentTypes?: OfferPaymentType[];
+  /** LEGACY, derived from [paymentTypes] for old phone builds. Never read by the engine directly. */
+  paymentCondition?: PaymentCondition;
   /** Minimum order subtotal (fils) for the offer to apply. */
   minOrderTotal?: number;
   /** Minimum total item count (sum of qty) for the offer to apply — band floor. */
@@ -79,9 +149,11 @@ export interface PaymentMethodTrigger {
 export interface ItemSetTrigger {
   itemNumbers: string[];
   /**
-   * Optional payment gate: when set, the ITEM_QTY_REWARD only applies if the sale's
-   * payment matches (CASH = any non-CREDIT). Null/undefined = any payment.
+   * Optional payment gate: when set, the ITEM_QTY_REWARD only applies to sales paid
+   * by one of these types. Absent = every payment type, Visa included.
    */
+  paymentTypes?: OfferPaymentType[];
+  /** LEGACY, derived from [paymentTypes] for old phone builds. */
   paymentCondition?: PaymentCondition;
 }
 

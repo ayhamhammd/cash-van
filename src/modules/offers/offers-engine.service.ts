@@ -29,6 +29,12 @@ import type {
   PaymentMethodTrigger,
   PaymentType,
 } from './offers.types';
+import {
+  offerCoversPayment,
+  offerPaymentTypes,
+  paymentTypeOf,
+  type OfferPaymentType,
+} from './offers.types';
 
 interface ItemInfo {
   priceFils: number;
@@ -153,7 +159,9 @@ export class OffersEngineService {
     // ── Classify eligible, trigger-satisfied offers by category ────────────────
     // Conflict rule: within a category (payment-method vs item) the HIGHEST
     // discount wins per line; across categories the discounts ADD on the line.
-    const isCredit = (ctx.paymentMethod ?? null) === 'CREDIT';
+    // One classification for every payment check below — Visa is its own type,
+    // not "anything that isn't credit" (todo-tasks/07).
+    const payType = paymentTypeOf([ctx.paymentMethod]);
     interface Disc {
       offer: Offer;
       pct: number;
@@ -198,7 +206,10 @@ export class OffersEngineService {
       if (offer.type === 'PAYMENT_METHOD_DISCOUNT') {
         const t = offer.trigger as PaymentMethodTrigger;
         const reward = offer.reward;
-        const payOk = t.paymentCondition === 'CREDIT' ? isCredit : !isCredit;
+        // A payment discount must name its payment types; one that names none
+        // (an invalid row) applies to nothing rather than to everything.
+        const covered = offerPaymentTypes(t);
+        const payOk = covered != null && covered.includes(payType);
         const totalOk = t.minOrderTotal == null || subtotalFils >= t.minOrderTotal;
         const countOk = t.minItemCount == null || itemCount >= t.minItemCount;
         // Quantity band ceiling: the order's total unit count must be within
@@ -252,12 +263,9 @@ export class OffersEngineService {
         }
       } else if (offer.type === 'ITEM_QTY_REWARD') {
         const t = offer.trigger as ItemSetTrigger;
-        // Optional payment gate: skip the offer if it targets a payment condition the
-        // sale doesn't match (CASH covers any non-CREDIT). No condition = any payment.
-        if (t.paymentCondition != null) {
-          const payOk = t.paymentCondition === 'CREDIT' ? isCredit : !isCredit;
-          if (!payOk) continue;
-        }
+        // Optional payment gate: skip the offer unless the sale's payment type is one
+        // it lists. No list = every payment type, Visa included.
+        if (!offerCoversPayment(offerPaymentTypes(t), payType)) continue;
         const items = t.itemNumbers ?? [];
         const qty = items.reduce((s, n) => s + (cart.get(n) ?? 0), 0);
         const reward = offer.reward;
@@ -746,7 +754,8 @@ export class OffersEngineService {
     }
     const t = offer.trigger as PaymentMethodTrigger;
     const r = offer.reward;
-    const cond = t.paymentCondition === 'CREDIT' ? 'Credit' : 'Cash';
+    const labels: Record<OfferPaymentType, string> = { CASH: 'Cash', CARD: 'Visa', CREDIT: 'Credit' };
+    const cond = (offerPaymentTypes(t) ?? ['CASH']).map((x) => labels[x]).join('/');
     const jod = (fils: number): string => (fils / 1000).toFixed(3);
     const mins: string[] = [];
     if (t.minOrderTotal) mins.push(`≥ ${(t.minOrderTotal / 1000).toFixed(3)} JOD`);
