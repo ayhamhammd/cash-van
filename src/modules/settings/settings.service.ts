@@ -254,6 +254,7 @@ export class SettingsService {
     address?: string | null;
     phone?: string | null;
     taxNumber?: string | null;
+    jofotaraAutoSubmit?: boolean | null;
   }): Promise<void> {
     const row = await this.requireRow();
     let changed = false;
@@ -268,6 +269,12 @@ export class SettingsService {
     if (org.address != null && row.sellerAddress !== org.address) { row.sellerAddress = org.address; changed = true; }
     if (org.phone != null && row.sellerPhone !== org.phone) { row.sellerPhone = org.phone; changed = true; }
     if (org.taxNumber != null && row.sellerTin !== org.taxNumber) { row.sellerTin = org.taxNumber; changed = true; }
+    // Only a real answer overwrites: an older ERP omits the field, and that must
+    // not erase what a newer one said.
+    if (typeof org.jofotaraAutoSubmit === 'boolean' && row.jofotaraAutoSubmit !== org.jofotaraAutoSubmit) {
+      row.jofotaraAutoSubmit = org.jofotaraAutoSubmit;
+      changed = true;
+    }
     if (changed) await this.repo.save(row);
   }
 
@@ -318,6 +325,7 @@ export class SettingsService {
     timezone: string;
     locale: string;
     damagedReturnsEnabled: boolean;
+    jofotaraAutoSubmit: boolean | null;
   }> {
     const row = await this.requireRow();
     return {
@@ -333,6 +341,8 @@ export class SettingsService {
       locale: row.locale,
       // Lets the app limit return reasons to damaged/expired when the feature is on.
       damagedReturnsEnabled: row.damagedReturnsEnabled,
+      // Whether a sale will get a JoFotara QR at all; null = not known, so the app waits.
+      jofotaraAutoSubmit: row.jofotaraAutoSubmit ?? null,
     };
   }
 

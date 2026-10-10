@@ -477,6 +477,8 @@ interface ErpOrg {
   taxNumber?: string | null;
   currencyCode?: string | null;
   salesTaxMode?: string | null;
+  /** The ERP's "auto-submit to JoFotara" switch. Absent on an older ERP. */
+  jofotaraAutoSubmit?: boolean | null;
 }
 
 export interface SyncEntityResult {
@@ -1527,6 +1529,7 @@ export class ErpSyncService {
       address: org.address ?? null,
       phone: org.phone ?? null,
       taxNumber: org.taxNumber ?? null,
+      jofotaraAutoSubmit: org.jofotaraAutoSubmit ?? null,
     });
     return 1;
   }

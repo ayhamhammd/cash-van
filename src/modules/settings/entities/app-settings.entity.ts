@@ -177,6 +177,14 @@ export class AppSettings {
   @Column({ name: 'damaged_returns_enabled', type: 'boolean', default: false })
   damagedReturnsEnabled!: boolean;
 
+  /**
+   * The ERP's JoFotara auto-submit switch, from GET /organization. Off, no sale
+   * ever gets a QR, so the app prints without waiting for one. NULL = not known
+   * yet (or an ERP too old to say), which the app treats as on.
+   */
+  @Column({ name: 'jofotara_auto_submit', type: 'boolean', nullable: true })
+  jofotaraAutoSubmit?: boolean | null;
+
   /** Program feature: salesman target figures and progress include tax. */
   @Column({ name: 'targets_include_tax', type: 'boolean', default: true })
   targetsIncludeTax!: boolean;
