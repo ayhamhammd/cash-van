@@ -117,9 +117,9 @@ export class CreateUserDto {
 
   @ApiPropertyOptional({
     description:
-      'Salesman may capture the GPS location of a customer they create. Off by default — without it the app hides the section and the server ignores latitude/longitude.',
+      'Salesman may choose the area of a customer they create. Off by default — without it the app hides the picker and the server ignores areaId.',
   })
-  @IsOptional() @IsBoolean() canSetCustomerLocation?: boolean;
+  @IsOptional() @IsBoolean() canSetCustomerArea?: boolean;
 
   @ApiPropertyOptional({
     description:

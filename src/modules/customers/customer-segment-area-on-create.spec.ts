@@ -3,16 +3,17 @@ import type { CreateCustomerDto } from './dto/create-customer.dto';
 import type { AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
 /**
- * A salesman's segment and GPS location reach the customer only when the office
- * allowed them (canSetCustomerSegment / canSetCustomerLocation, off by default).
+ * A salesman's segment and area reach the customer only when the office allowed
+ * them (canSetCustomerSegment / canSetCustomerArea, off by default).
  *
- * The app hides both sections without the switch; these pin that the server
+ * The app hides both pickers without the switch; these pin that the server
  * drops them too — on the direct path and the approval path — so a phone whose
- * session predates the office turning one off cannot slip them through. An
- * office user is not a salesman and is left alone.
+ * session predates the office turning one off cannot slip them through. The GPS
+ * location is not one of them and always passes. An office user is not a
+ * salesman and is left alone.
  */
-describe('CustomersService.createAsUser — segment and location need their switches', () => {
-  function makeSvc(flags: { direct: boolean; segment: boolean; location: boolean }) {
+describe('CustomersService.createAsUser — segment and area need their switches', () => {
+  function makeSvc(flags: { direct: boolean; segment: boolean; area: boolean }) {
     const svc = Object.create(CustomersService.prototype) as Record<string, unknown>;
     const created: Array<Partial<CreateCustomerDto>> = [];
     const requested: Array<Partial<CreateCustomerDto>> = [];
@@ -23,7 +24,7 @@ describe('CustomersService.createAsUser — segment and location need their swit
         id: 'user-1',
         canCreateCustomerDirect: flags.direct,
         canSetCustomerSegment: flags.segment,
-        canSetCustomerLocation: flags.location,
+        canSetCustomerArea: flags.area,
       }),
     };
     svc.create = jest.fn(async (dto: CreateCustomerDto) => {
@@ -48,45 +49,45 @@ describe('CustomersService.createAsUser — segment and location need their swit
       customerName: 'Shop',
       photoId: 'photo-1',
       segmentId: 'seg-1',
+      areaId: 'area-1',
       latitude: '31.950000',
       longitude: '35.930000',
     }) as CreateCustomerDto;
 
-  it('drops both when the salesman has neither switch', async () => {
-    const { svc, created } = makeSvc({ direct: true, segment: false, location: false });
+  it('drops both when the salesman has neither switch — but keeps the GPS location', async () => {
+    const { svc, created } = makeSvc({ direct: true, segment: false, area: false });
     await svc.createAsUser(dto(), salesman);
     expect(created[0].segmentId).toBeUndefined();
-    expect(created[0].latitude).toBeUndefined();
-    expect(created[0].longitude).toBeUndefined();
-    expect(created[0].customerName).toBe('Shop');
-  });
-
-  it('keeps each one its switch allows, independently', async () => {
-    const segOnly = makeSvc({ direct: true, segment: true, location: false });
-    await segOnly.svc.createAsUser(dto(), salesman);
-    expect(segOnly.created[0]).toMatchObject({ segmentId: 'seg-1' });
-    expect(segOnly.created[0].latitude).toBeUndefined();
-
-    const locOnly = makeSvc({ direct: true, segment: false, location: true });
-    await locOnly.svc.createAsUser(dto(), salesman);
-    expect(locOnly.created[0]).toMatchObject({ latitude: '31.950000', longitude: '35.930000' });
-    expect(locOnly.created[0].segmentId).toBeUndefined();
-  });
-
-  it('an approval request carries only what was allowed', async () => {
-    const { svc, requested } = makeSvc({ direct: false, segment: false, location: false });
-    await svc.createAsUser(dto(), salesman);
-    expect(requested[0].segmentId).toBeUndefined();
-    expect(requested[0].latitude).toBeUndefined();
-  });
-
-  it('an office user keeps the segment and location they entered', async () => {
-    const { svc, created } = makeSvc({ direct: true, segment: false, location: false });
-    await svc.createAsUser(dto(), office);
+    expect(created[0].areaId).toBeUndefined();
     expect(created[0]).toMatchObject({
-      segmentId: 'seg-1',
+      customerName: 'Shop',
       latitude: '31.950000',
       longitude: '35.930000',
     });
+  });
+
+  it('keeps each one its switch allows, independently', async () => {
+    const segOnly = makeSvc({ direct: true, segment: true, area: false });
+    await segOnly.svc.createAsUser(dto(), salesman);
+    expect(segOnly.created[0]).toMatchObject({ segmentId: 'seg-1' });
+    expect(segOnly.created[0].areaId).toBeUndefined();
+
+    const areaOnly = makeSvc({ direct: true, segment: false, area: true });
+    await areaOnly.svc.createAsUser(dto(), salesman);
+    expect(areaOnly.created[0]).toMatchObject({ areaId: 'area-1' });
+    expect(areaOnly.created[0].segmentId).toBeUndefined();
+  });
+
+  it('an approval request carries only what was allowed', async () => {
+    const { svc, requested } = makeSvc({ direct: false, segment: false, area: false });
+    await svc.createAsUser(dto(), salesman);
+    expect(requested[0].segmentId).toBeUndefined();
+    expect(requested[0].areaId).toBeUndefined();
+  });
+
+  it('an office user keeps the segment and area they entered', async () => {
+    const { svc, created } = makeSvc({ direct: true, segment: false, area: false });
+    await svc.createAsUser(dto(), office);
+    expect(created[0]).toMatchObject({ segmentId: 'seg-1', areaId: 'area-1' });
   });
 });

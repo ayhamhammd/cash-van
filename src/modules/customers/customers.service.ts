@@ -145,8 +145,8 @@ export class CustomersService {
    * plain [create] cannot know about:
    *
    *   a salesman must attach a document photo
-   *   a salesman without canSetCustomerSegment / canSetCustomerLocation has the
-   *   segment / GPS location dropped from what they sent
+   *   a salesman without canSetCustomerSegment / canSetCustomerArea has the
+   *   segment / area dropped from what they sent
    *   a salesman without canCreateCustomerDirect gets an approval request,
    *   not a customer
    *
@@ -193,20 +193,18 @@ export class CustomersService {
         id: true,
         canCreateCustomerDirect: true,
         canSetCustomerSegment: true,
-        canSetCustomerLocation: true,
+        canSetCustomerArea: true,
       },
     });
 
     // The office decides per salesman whether they may file the shop under a
-    // segment and pin where it is. The app hides both sections without the
-    // switch, but a phone that has not refreshed since the office turned one
-    // off still sends them. Dropped rather than refused: the rest of the
-    // customer is good, and the office can fill these two in itself. Before
-    // both paths, so an approval request carries only what was allowed.
+    // segment and an area. The app hides both pickers without the switch, but
+    // a phone that has not refreshed since the office turned one off still
+    // sends them. Dropped rather than refused: the rest of the customer is
+    // good, and the office can fill these two in itself. Before both paths, so
+    // an approval request carries only what was allowed.
     if (!actor?.canSetCustomerSegment) dto = { ...dto, segmentId: undefined };
-    if (!actor?.canSetCustomerLocation) {
-      dto = { ...dto, latitude: undefined, longitude: undefined };
-    }
+    if (!actor?.canSetCustomerArea) dto = { ...dto, areaId: undefined };
 
     if (actor?.canCreateCustomerDirect) {
       const customer = await this.create(dto);

@@ -229,10 +229,10 @@ export class AuthService {
       canEditVoucher: user.canEditVoucher,
       canAddCustomer: user.canAddCustomer,
       canCreateCustomerDirect: user.canCreateCustomerDirect,
-      // Read by the app to show, or hide, the segment and location sections of
-      // its create-customer form.
+      // Read by the app to show, or hide, the segment and area pickers of its
+      // create-customer form.
       canSetCustomerSegment: user.canSetCustomerSegment,
-      canSetCustomerLocation: user.canSetCustomerLocation,
+      canSetCustomerArea: user.canSetCustomerArea,
       canPrintLineDiscount: user.canPrintLineDiscount,
       // Read by the app to decide whether a sale offers فيزا at all.
       canUseCardPayment: user.canUseCardPayment,

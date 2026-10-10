@@ -120,13 +120,12 @@ export class User extends BaseEntity {
   canSetCustomerSegment!: boolean;
 
   /**
-   * May this salesman capture the GPS location of a customer they create? Off
-   * by default: the app hides the section (and stops requiring it), and the
-   * server drops coordinates sent without it. Only the create — moving an
-   * existing customer's pin is POST /customers/:id/location, unaffected.
+   * May this salesman pick the area (المنطقة) of a customer they create? Off by
+   * default: the app hides the picker (and stops requiring it), and the server
+   * drops an areaId sent without it, so the office files the shop instead.
    */
-  @Column({ name: 'can_set_customer_location', type: 'boolean', default: false })
-  canSetCustomerLocation!: boolean;
+  @Column({ name: 'can_set_customer_area', type: 'boolean', default: false })
+  canSetCustomerArea!: boolean;
 
   @Column({ name: 'can_edit_customer_credit', type: 'boolean', default: false })
   canEditCustomerCredit!: boolean;

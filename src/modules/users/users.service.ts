@@ -51,7 +51,7 @@ export class UsersService {
       canAddCustomer: dto.canAddCustomer ?? false,
       canCreateCustomerDirect: dto.canCreateCustomerDirect ?? false,
       canSetCustomerSegment: dto.canSetCustomerSegment ?? false,
-      canSetCustomerLocation: dto.canSetCustomerLocation ?? false,
+      canSetCustomerArea: dto.canSetCustomerArea ?? false,
       canPrintLineDiscount: dto.canPrintLineDiscount ?? false,
       canUseCardPayment: dto.canUseCardPayment ?? false,
       canRequestStock: dto.canRequestStock ?? false,
