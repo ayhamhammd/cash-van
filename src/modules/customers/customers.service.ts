@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -60,6 +61,17 @@ export interface CustomerVisitRow {
   visitNote: string | null;
   lat: number | null;
   lng: number | null;
+}
+
+/**
+ * The office permission to move a customer to another salesman — from the edit
+ * form, the reassign button or the bulk Excel assignment. Admins always pass.
+ */
+export const CUSTOMER_ASSIGN_SALESMAN_KEY = 'customers.assignSalesman';
+
+/** May this caller move customers between salesmen? */
+export function canAssignSalesman(user: { role?: string; permKeys?: string[] } | null | undefined): boolean {
+  return user?.role === 'admin' || (user?.permKeys ?? []).includes(CUSTOMER_ASSIGN_SALESMAN_KEY);
 }
 
 @Injectable()
@@ -356,8 +368,26 @@ export class CustomersService {
     return `CUST-${String(rows[0]?.n ?? '0').padStart(6, '0')}`;
   }
 
-  async update(id: string, dto: UpdateCustomerDto): Promise<Customer> {
+  async update(
+    id: string,
+    dto: UpdateCustomerDto,
+    opts: { canAssignSalesman?: boolean } = { canAssignSalesman: true },
+  ): Promise<Customer> {
     const customer = await this.findOneOrThrow(id);
+    // Moving a customer to another salesman is its own permission — it moves the
+    // shop's whole account, route stop and stock-on-credit with it. Sending the
+    // salesman it already has is not a change and is let through.
+    if (
+      dto.repId !== undefined &&
+      (dto.repId ?? null) !== (customer.repId ?? null) &&
+      !opts.canAssignSalesman
+    ) {
+      throw new ForbiddenException({
+        code: 'PERMISSION_REQUIRED',
+        message: "You don't have permission to change a customer's salesman.",
+        permission: CUSTOMER_ASSIGN_SALESMAN_KEY,
+      });
+    }
     const areaBefore = customer.areaId ?? null;
     if (dto.areaId && dto.areaId !== customer.areaId) {
       await this.areas.assertAssignable(dto.areaId);

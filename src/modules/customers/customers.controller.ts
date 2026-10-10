@@ -31,7 +31,7 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 
-import { CustomersService } from './customers.service';
+import { CustomersService, CUSTOMER_ASSIGN_SALESMAN_KEY, canAssignSalesman } from './customers.service';
 import { ErpSyncService } from '../erp-sync/erp-sync.service';
 import { RepScopeService } from '../users/rep-scope.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -43,7 +43,7 @@ import { ListCustomersQuery } from './dto/list-customers.query';
 import { ListVisitsQuery } from './dto/list-visits.query';
 import { CreateVisitDto } from './dto/create-visit.dto';
 import { ReassignCustomerDto } from './dto/reassign-customer.dto';
-import { RequirePermissions } from '../../common/decorators/permissions.decorator';
+import { RequirePermissions, RequirePermissionKeys } from '../../common/decorators/permissions.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
@@ -238,8 +238,12 @@ export class CustomersController {
   })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
   @ApiOkResponse({ description: 'Updated customer' })
-  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateCustomerDto) {
-    return this.customers.update(id, dto);
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateCustomerDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.customers.update(id, dto, { canAssignSalesman: canAssignSalesman(user) });
   }
 
   @Post(':id/location')
@@ -262,6 +266,7 @@ export class CustomersController {
 
   @Post(':id/reassign')
   @Roles('admin', 'manager')
+  @RequirePermissionKeys(CUSTOMER_ASSIGN_SALESMAN_KEY)
   @ApiOperation({
     summary: 'Reassign customer',
     description: 'Reassign a customer to a different rep. Admin/manager only.',
@@ -337,6 +342,7 @@ export class CustomersController {
 
   @Post('assign-salesmen')
   @Roles('admin', 'manager')
+  @RequirePermissionKeys(CUSTOMER_ASSIGN_SALESMAN_KEY)
   @UseInterceptors(FileInterceptor('file'))
   @ApiConsumes('multipart/form-data')
   @ApiBody({

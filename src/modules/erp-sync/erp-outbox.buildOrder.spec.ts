@@ -67,6 +67,27 @@ function build(opts: {
 }
 
 describe('ErpOutboxService.buildOrder (ORDER → ERP sales order)', () => {
+  describe("the rep's note", () => {
+    const body = async (opts: Parameters<typeof build>[0]) =>
+      ((await build(opts)) as { body: Record<string, unknown> }).body;
+
+    it('travels to the ERP order', async () => {
+      expect(
+        await body({
+          header: { voucherNumber: 'ORD-1', customerNumber: 'C-1', notes: 'deliver Sunday' },
+          lines: [line('A', '1', '1')],
+          items: { A: 'sku-a' },
+        }),
+      ).toMatchObject({ notes: 'deliver Sunday' });
+    });
+
+    it('is left off when the rep wrote none', async () => {
+      expect(
+        await body({ lines: [line('A', '1', '1')], items: { A: 'sku-a' } }),
+      ).not.toHaveProperty('notes');
+    });
+  });
+
   /**
    * Which van took the order.
    *

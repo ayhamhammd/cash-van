@@ -997,6 +997,9 @@ export class ErpOutboxService {
       body: {
         customerId: cust.erpId,
         ...(vanWarehouseCode ? { vanWarehouseCode } : {}),
+        // The rep's note — delivery instructions, a PO reference. Sent for a
+        // sale already; an order's was dropped here and never reached the ERP.
+        ...(header.notes ? { notes: header.notes } : {}),
         lines: orderLines,
       },
     };
@@ -1285,6 +1288,9 @@ export class ErpOutboxService {
         ...(await this.customerRef(header.customerNumber)),
         warehouseCode, // van, or the damaged warehouse for a damaged/expired return
         ...(damagedWh ? { reason: 'Damaged/expired return (quarantine)' } : {}),
+        // The rep's reason and note, as typed ("سبب: … — …"). The ERP keeps it as
+        // the credit note's reason when no quarantine reason is set.
+        ...(header.notes ? { notes: header.notes } : {}),
         originalInvoiceNumber,
         lines: lines.map((l) => ({
           skuCode: skuOf(l), // red goes back to the red SKU, not the base one
