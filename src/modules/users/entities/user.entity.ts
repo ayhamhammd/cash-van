@@ -111,6 +111,23 @@ export class User extends BaseEntity {
   @Column({ name: 'can_create_customer_direct', type: 'boolean', default: false })
   canCreateCustomerDirect!: boolean;
 
+  /**
+   * May this salesman pick the segment of a customer they create? Off by
+   * default: the app hides the picker, and the server drops a segmentId sent
+   * without it, so the office files the shop instead.
+   */
+  @Column({ name: 'can_set_customer_segment', type: 'boolean', default: false })
+  canSetCustomerSegment!: boolean;
+
+  /**
+   * May this salesman capture the GPS location of a customer they create? Off
+   * by default: the app hides the section (and stops requiring it), and the
+   * server drops coordinates sent without it. Only the create — moving an
+   * existing customer's pin is POST /customers/:id/location, unaffected.
+   */
+  @Column({ name: 'can_set_customer_location', type: 'boolean', default: false })
+  canSetCustomerLocation!: boolean;
+
   @Column({ name: 'can_edit_customer_credit', type: 'boolean', default: false })
   canEditCustomerCredit!: boolean;
 

@@ -25,6 +25,8 @@ export class UserResponseDto {
   @ApiPropertyOptional({ type: [String] }) repIds?: string[];
   @ApiProperty() canAddCustomer!: boolean;
   @ApiProperty() canCreateCustomerDirect!: boolean;
+  @ApiProperty() canSetCustomerSegment!: boolean;
+  @ApiProperty() canSetCustomerLocation!: boolean;
   @ApiProperty() canPrintLineDiscount!: boolean;
   @ApiProperty() canUseCardPayment!: boolean;
   @ApiProperty() canRequestStock!: boolean;
@@ -75,6 +77,8 @@ export class UserResponseDto {
       repScopeMode: u.repScopeMode,
       canAddCustomer: u.canAddCustomer,
       canCreateCustomerDirect: u.canCreateCustomerDirect,
+      canSetCustomerSegment: u.canSetCustomerSegment,
+      canSetCustomerLocation: u.canSetCustomerLocation,
       canPrintLineDiscount: u.canPrintLineDiscount,
       canUseCardPayment: u.canUseCardPayment,
       canRequestStock: u.canRequestStock,

@@ -111,6 +111,18 @@ export class CreateUserDto {
 
   @ApiPropertyOptional({
     description:
+      'Salesman may choose the segment of a customer they create. Off by default — without it the app hides the picker and the server ignores segmentId.',
+  })
+  @IsOptional() @IsBoolean() canSetCustomerSegment?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Salesman may capture the GPS location of a customer they create. Off by default — without it the app hides the section and the server ignores latitude/longitude.',
+  })
+  @IsOptional() @IsBoolean() canSetCustomerLocation?: boolean;
+
+  @ApiPropertyOptional({
+    description:
       "Show the discount value on each row of this salesman's printed receipt. Off by default — a per-line rate on a slip left at a counter is visible to the next customer.",
   })
   @IsOptional() @IsBoolean() canPrintLineDiscount?: boolean;
