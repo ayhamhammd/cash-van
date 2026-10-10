@@ -321,6 +321,8 @@ export class StockRequestsService {
       row.reviewerUser = reviewer.sub;
       row.decisionNote = dto.note ?? null;
       row.decidedAt = new Date();
+      row.approvedBy = reviewer.sub;
+      row.approvedAt = row.decidedAt;
       await m.save(StockRequest, row);
     });
 
@@ -333,6 +335,18 @@ export class StockRequestsService {
     return this.findOneOrThrow(row.id);
   }
 
+  /**
+   * Refuse a request — while it is pending, or after approving it as long as the
+   * goods have not been received.
+   *
+   * Taking back an approval is safe up to receipt because approval moves no
+   * stock: the goods are still in the warehouse until the salesman confirms them
+   * or the office attaches the transfer. Once either has happened there is a
+   * real voucher behind the request and refusing it would contradict the stock.
+   *
+   * The approver stays recorded (approvedBy); reviewerUser moves to whoever
+   * rejected it, and the salesman is told with the reason.
+   */
   async reject(
     id: string,
     reason: string,
@@ -341,8 +355,15 @@ export class StockRequestsService {
     await this.assertCan(reviewer, 'canApproveStockRequest', CANNOT_DECIDE);
     const row = await this.findOneOrThrow(id);
     if (row.repId) await this.repScope.assertCanSeeRep(reviewer, row.repId);
-    if (row.status !== 'pending') {
-      throw new ConflictException(`Request is already ${row.status}`);
+    const approvedNotReceived = row.status === 'approved' && !row.transferVoucherNumber;
+    if (row.status !== 'pending' && !approvedNotReceived) {
+      throw new ConflictException(
+        row.status === 'received' || row.transferVoucherNumber
+          ? `Cannot reject ${row.requestNumber}: the goods were already received${
+              row.transferVoucherNumber ? ` on voucher ${row.transferVoucherNumber}` : ''
+            }.`
+          : `Request is already ${row.status}`,
+      );
     }
     row.status = 'rejected';
     row.reviewerUser = reviewer.sub;
@@ -459,9 +480,10 @@ export class StockRequestsService {
   /**
    * Hide a decided request from the queue without destroying it.
    *
-   * Only requests that never moved stock. An approved-and-received one is the
-   * paperwork behind a real transfer voucher, and hiding it would leave that
-   * voucher with nothing explaining why it exists.
+   * Only requests that never moved stock — rejected, cancelled, or approved and
+   * not yet received. An approved-and-received one is the paperwork behind a
+   * real transfer voucher, and hiding it would leave that voucher with nothing
+   * explaining why it exists.
    */
   async softDelete(id: string, user: AuthenticatedUser): Promise<{ id: string }> {
     await this.assertCan(user, 'canApproveStockRequest', CANNOT_DECIDE);
@@ -480,6 +502,18 @@ export class StockRequestsService {
       );
     }
     await this.repo.softDelete(id);
+
+    // An approved request was the salesman's to collect. It now vanishes from
+    // their list, so say why rather than leave them looking for it.
+    if (row.status === 'approved') {
+      await this.notifications.notifyUser(row.requesterUser, {
+        kind: 'stock-request.decided',
+        titleAr: `تم حذف طلب البضاعة ${row.requestNumber} بعد الموافقة عليه — لن يتم تحميله`,
+        titleEn: `Stock request ${row.requestNumber} was deleted after approval — it will not be loaded`,
+        refType: 'stock-request',
+        refId: row.id,
+      });
+    }
     return { id };
   }
 

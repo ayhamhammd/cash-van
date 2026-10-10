@@ -1,4 +1,15 @@
-import { BadRequestException, Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiCreatedResponse,
@@ -10,6 +21,7 @@ import {
 } from '@nestjs/swagger';
 
 import { VoucherSummaryQuery } from './dto/voucher-summary.query';
+import { StockRequestsReportQueryDto } from './dto/stock-requests-report.query';
 import { ReportsService } from './reports.service';
 import {
   ReportsQueryDto,
@@ -61,6 +73,10 @@ function resolveRange(from?: string, to?: string): { from: string; to: string } 
   }
   return { from: start, to: end };
 }
+
+/** The report key for the stock requests report, and the blanket that grants every report. */
+const STOCK_REQUESTS_REPORT_KEY = 'reports.stockRequests';
+const ALL_REPORTS_KEY = 'reports.view';
 
 @ApiTags('reports')
 @ApiBearerAuth()
@@ -167,6 +183,31 @@ export class ReportsController {
     if (visible !== null && !visible.includes(repId)) return [];
     const range = resolveRange(from, to);
     return this.reports.salesmanDocuments(repId, range.from, range.to);
+  }
+
+  @Get('stock-requests')
+  @ApiOperation({
+    summary: 'Stock requests and their approvals',
+    description:
+      'Each goods request with its salesman, who approved it, who rejected it, the ' +
+      'source warehouse, whether the goods were received, and its lines (asked vs granted). ' +
+      'Filter by salesman, approver (approved or rejected by), received (yes = received, no = approved and not yet ' +
+      'received), status and date range. Rep-scoped. Needs the reports.stockRequests key ' +
+      '(or reports.view); admins pass.',
+  })
+  @ApiOkResponse({ description: '{ items, total, summary, reviewers }' })
+  async stockRequests(
+    @Query() q: StockRequestsReportQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    // The same rule the dashboard applies to every report tab, enforced here too:
+    // the queue behind this data is gated on the server, so the report must be.
+    const isAdmin = user.role === 'admin' || user.userType === 'ADMIN';
+    const keys = user.permKeys ?? [];
+    if (!isAdmin && !keys.includes(ALL_REPORTS_KEY) && !keys.includes(STOCK_REQUESTS_REPORT_KEY)) {
+      throw new ForbiddenException(`Missing permission: ${STOCK_REQUESTS_REPORT_KEY}`);
+    }
+    return this.reports.stockRequests(q, await this.repScope.visibleRepIds(user));
   }
 
   @Get('customers-by-rep')

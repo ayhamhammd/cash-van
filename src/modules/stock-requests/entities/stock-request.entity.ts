@@ -13,7 +13,8 @@ import { StockRequestItem } from './stock-request-item.entity';
 /**
  * pending    — the salesman submitted it; managers see it in the queue
  * approved   — a manager approved it; an ERP transfer is queued for the warehouse
- * rejected   — a manager refused it
+ * rejected   — a manager refused it, either while pending or after approving it
+ *              but before the goods were received
  * cancelled  — the requester withdrew it while still pending
  * received   — the salesman confirmed the goods reached the van; van stock moved
  *
@@ -76,8 +77,19 @@ export class StockRequest {
   @Column({ type: 'text', nullable: true })
   note?: string | null;
 
+  /** Whoever made the LAST decision — the approver, or a later rejecter. */
   @Column({ name: 'reviewer_user', type: 'uuid', nullable: true })
   reviewerUser?: string | null;
+
+  /**
+   * Who approved it, kept when the approval is later taken back. Only ever set
+   * by approve(); a rejection after approval moves reviewerUser, not this.
+   */
+  @Column({ name: 'approved_by', type: 'uuid', nullable: true })
+  approvedBy?: string | null;
+
+  @Column({ name: 'approved_at', type: 'timestamptz', nullable: true })
+  approvedAt?: Date | null;
 
   @Column({ name: 'decision_note', type: 'text', nullable: true })
   decisionNote?: string | null;

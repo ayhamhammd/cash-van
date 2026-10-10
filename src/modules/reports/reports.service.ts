@@ -6,6 +6,7 @@ import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
 import { CashAccountsService, SettleTransfers } from '../cash-accounts/cash-accounts.service';
 import { SalesmanSettlement } from './entities/salesman-settlement.entity';
 import { VoucherSummaryQuery } from './dto/voucher-summary.query';
+import { StockRequestsReportQueryDto } from './dto/stock-requests-report.query';
 
 /** One salesman's End-of-Day cash summary over a period (all money in fils). */
 export interface EodRow {
@@ -215,6 +216,64 @@ export interface CustomerOfRepRow {
   isActive: boolean;
   debtFils: number;
   creditLimitFils: number;
+}
+
+/** One line of a stock request: asked for, and what the office granted. */
+export interface StockRequestReportLine {
+  requestId: string;
+  itemNumber: string;
+  itemName: string;
+  unitName: string | null;
+  unitBaseQty: number;
+  /** What the salesman asked for, in their chosen unit. */
+  qtyOfUnit: number;
+  /** The same amount in pool units. */
+  baseQty: number;
+  /** Granted, in pool units. Null while pending; 0 means this line was refused. */
+  approvedBaseQty: number | null;
+}
+
+/** One stock request with who asked, who decided, and whether it arrived. */
+export interface StockRequestReportRow {
+  id: string;
+  requestNumber: string;
+  status: string;
+  createdAt: Date;
+  decidedAt: Date | null;
+  receivedAt: Date | null;
+  repId: string | null;
+  repName: string | null;
+  repCode: string | null;
+  /** Who approved it — kept even if the approval was later taken back. */
+  approverId: string | null;
+  approverName: string | null;
+  approvedAt: Date | null;
+  /** Whoever made the last decision: the approver, or whoever rejected it. */
+  reviewerId: string | null;
+  reviewerName: string | null;
+  note: string | null;
+  decisionNote: string | null;
+  vanStoreNumber: string;
+  sourceStoreNumber: string | null;
+  sourceStoreName: string | null;
+  transferVoucherNumber: string | null;
+  lines: StockRequestReportLine[];
+}
+
+/** Counts by status, over every filter EXCEPT status and received. */
+export interface StockRequestReportSummary {
+  total: number;
+  pending: number;
+  approved: number;
+  received: number;
+  rejected: number;
+  cancelled: number;
+}
+
+export interface StockRequestsReport extends Paged<StockRequestReportRow> {
+  summary: StockRequestReportSummary;
+  /** Everyone who has approved or rejected a visible request — the filter's options. */
+  reviewers: Array<{ id: string; name: string }>;
 }
 
 export interface RepLeaderboardRow {
@@ -1314,6 +1373,167 @@ export class ReportsService {
   }
 
 /**
+   * Stock (goods) requests with their decisions, newest first.
+   *
+   * One row per request: the salesman who asked, who approved it, who rejected
+   * it (while pending, or after approving it and before receipt), when, from
+   * which warehouse, and whether the goods reached the van. The lines ride along so the office can see what was asked for against
+   * what was granted — a partial approval is the case this report is read for.
+   *
+   * "Received" is the request's own state, not an inference: it turns `received`
+   * when the salesman confirms the goods are on the van, or when the office
+   * attaches the transfer that fulfilled it. `received=no` means APPROVED and not
+   * yet received; pending, rejected and cancelled requests can never be received,
+   * so they belong to neither answer.
+   *
+   * The summary counts ignore the status and received filters on purpose: they
+   * describe the salesman / approver / date selection, so ticking "received"
+   * still shows how many are waiting.
+   *
+   * Soft-deleted requests are left out, matching the queue the office cleared
+   * them from.
+   */
+  async stockRequests(
+    q: StockRequestsReportQueryDto,
+    visibleRepIds: string[] | null = null,
+  ): Promise<StockRequestsReport> {
+    /**
+     * WHERE tail + params, built once per query so the list, the count and the
+     * summary cannot disagree. `narrow` adds the status/received filters, which
+     * the summary leaves out.
+     */
+    const buildFilters = (params: unknown[], narrow: boolean): string => {
+      const bind = (v: unknown): string => {
+        params.push(v);
+        return `$${params.length}`;
+      };
+      let sql = ` AND sr.deleted_at IS NULL`;
+      sql += ` AND (${bind(visibleRepIds ?? null)}::uuid[] IS NULL OR sr.rep_id = ANY($${params.length}::uuid[]))`;
+      if (q.dateFrom) sql += ` AND sr.created_at >= ${bind(q.dateFrom)}::date`;
+      if (q.dateTo) sql += ` AND sr.created_at < (${bind(q.dateTo)}::date + INTERVAL '1 day')`;
+      if (q.repId) sql += ` AND sr.rep_id = ${bind(q.repId)}::uuid`;
+      // Approved OR rejected by this person: a request approved by one manager
+      // and taken back by another belongs to both of their decisions.
+      if (q.reviewerId) {
+        const who = bind(q.reviewerId);
+        sql += ` AND (sr.approved_by = ${who}::uuid OR sr.reviewer_user = ${who}::uuid)`;
+      }
+      if (narrow) {
+        if (q.received === 'yes') sql += ` AND sr.status = 'received'`;
+        if (q.received === 'no') sql += ` AND sr.status = 'approved'`;
+        if (q.status) sql += ` AND sr.status = ${bind(q.status)}`;
+      }
+      return sql;
+    };
+
+    const listParams: unknown[] = [q.offset ?? 0, q.limit ?? 25];
+    const listFilters = buildFilters(listParams, true);
+    const rows: Array<Omit<StockRequestReportRow, 'lines'>> = await this.ds.query(
+      `SELECT sr.id::text AS id,
+              sr.request_number AS "requestNumber",
+              sr.status,
+              sr.created_at AS "createdAt",
+              sr.decided_at AS "decidedAt",
+              sr.received_at AS "receivedAt",
+              sr.rep_id::text AS "repId",
+              COALESCE(r.name_ar, r.name_en, req.name) AS "repName",
+              r.code AS "repCode",
+              sr.approved_by::text AS "approverId",
+              app.name AS "approverName",
+              sr.approved_at AS "approvedAt",
+              sr.reviewer_user::text AS "reviewerId",
+              rev.name AS "reviewerName",
+              sr.note,
+              sr.decision_note AS "decisionNote",
+              sr.van_store_number AS "vanStoreNumber",
+              sr.source_store_number AS "sourceStoreNumber",
+              (SELECT w.wh_name FROM warehouses w
+                WHERE w.wh_number = sr.source_store_number LIMIT 1) AS "sourceStoreName",
+              sr.transfer_voucher_number AS "transferVoucherNumber"
+         FROM stock_requests sr
+         LEFT JOIN reps r ON r.id = sr.rep_id
+         LEFT JOIN users req ON req.id = sr.requester_user
+         LEFT JOIN users rev ON rev.id = sr.reviewer_user
+         LEFT JOIN users app ON app.id = sr.approved_by
+        WHERE TRUE${listFilters}
+        ORDER BY sr.created_at DESC, sr.request_number DESC
+        OFFSET $1 LIMIT $2`,
+      listParams,
+    );
+
+    const lines: StockRequestReportLine[] = rows.length
+      ? await this.ds.query(
+          `SELECT i.request_id::text AS "requestId",
+                  i.item_number AS "itemNumber",
+                  i.item_name AS "itemName",
+                  i.unit_name AS "unitName",
+                  i.unit_base_qty AS "unitBaseQty",
+                  i.qty_of_unit::float8 AS "qtyOfUnit",
+                  i.base_qty::float8 AS "baseQty",
+                  i.approved_base_qty::float8 AS "approvedBaseQty"
+             FROM stock_request_items i
+            WHERE i.request_id = ANY($1::uuid[])
+            ORDER BY i.item_name, i.item_number`,
+          [rows.map((r) => r.id)],
+        )
+      : [];
+    const linesOf = new Map<string, StockRequestReportLine[]>();
+    for (const l of lines) {
+      const list = linesOf.get(l.requestId) ?? [];
+      list.push(l);
+      linesOf.set(l.requestId, list);
+    }
+
+    const countParams: unknown[] = [];
+    const countFilters = buildFilters(countParams, true);
+    const [{ c: total }]: Array<{ c: number }> = await this.ds.query(
+      `SELECT COUNT(*)::int AS c FROM stock_requests sr WHERE TRUE${countFilters}`,
+      countParams,
+    );
+
+    const summaryParams: unknown[] = [];
+    const summaryFilters = buildFilters(summaryParams, false);
+    const byStatus: Array<{ status: string; c: number }> = await this.ds.query(
+      `SELECT sr.status, COUNT(*)::int AS c
+         FROM stock_requests sr
+        WHERE TRUE${summaryFilters}
+        GROUP BY sr.status`,
+      summaryParams,
+    );
+    const summary: StockRequestReportSummary = {
+      total: 0,
+      pending: 0,
+      approved: 0,
+      received: 0,
+      rejected: 0,
+      cancelled: 0,
+    };
+    for (const { status, c } of byStatus) {
+      summary.total += c;
+      if (status in summary) summary[status as keyof StockRequestReportSummary] = c;
+    }
+
+    // The filter offers whoever has approved or rejected a request this viewer
+    // can see — not every user who COULD decide one, most of whom never have.
+    const reviewers: Array<{ id: string; name: string }> = await this.ds.query(
+      `SELECT DISTINCT u.id::text AS id, u.name
+         FROM stock_requests sr
+         JOIN users u ON u.id = sr.approved_by OR u.id = sr.reviewer_user
+        WHERE sr.deleted_at IS NULL
+          AND ($1::uuid[] IS NULL OR sr.rep_id = ANY($1::uuid[]))
+        ORDER BY u.name`,
+      [visibleRepIds ?? null],
+    );
+
+    return {
+      items: rows.map((r) => ({ ...r, lines: linesOf.get(r.id) ?? [] })),
+      total,
+      summary,
+      reviewers,
+    };
+  }
+
+  /**
    * How the customer book is divided between the salesmen.
    *
    * Answers two questions on one screen: who is carrying how much of the book,
