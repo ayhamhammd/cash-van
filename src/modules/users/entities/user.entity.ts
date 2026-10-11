@@ -78,6 +78,24 @@ export class User extends BaseEntity {
   @Column({ name: 'can_make_collection', type: 'boolean', default: false })
   canMakeCollection!: boolean;
 
+  /**
+   * May move returnable containers — receive empties back from a customer, or
+   * hand crates out without a sale.
+   *
+   * OPT-IN (defaults false), unlike the capability flags around it. The
+   * SYSTEM-OVERVIEW §4.4 rule: a permission that gives something away must not
+   * be granted by omission on a server that has not heard of it. It is also
+   * only half the gate — `app_settings.containers_enabled` has to be on too, so
+   * switching the feature off at the office hides it from everyone regardless
+   * of what was granted here.
+   *
+   * It does NOT widen the return permission. Container documents may name only
+   * items flagged `is_returnable_container`, and at zero price; without that
+   * check this flag would be a way to move any product into a van for free.
+   */
+  @Column({ name: 'can_handle_containers', type: 'boolean', default: false })
+  canHandleContainers!: boolean;
+
   @Column({ name: 'can_edit_voucher', type: 'boolean', default: false })
   canEditVoucher!: boolean;
 

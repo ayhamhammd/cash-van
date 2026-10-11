@@ -16,6 +16,7 @@ export class UserResponseDto {
   @ApiProperty() canCreateSale!: boolean;
   @ApiProperty() canCreateReturn!: boolean;
   @ApiProperty() canMakeCollection!: boolean;
+  @ApiProperty() canHandleContainers!: boolean;
   @ApiProperty() canEditVoucher!: boolean;
   @ApiProperty({ enum: ['all', 'assigned'] }) repScopeMode!: 'all' | 'assigned';
   /**
@@ -73,6 +74,7 @@ export class UserResponseDto {
       canCreateSale: u.canCreateSale,
       canCreateReturn: u.canCreateReturn,
       canMakeCollection: u.canMakeCollection,
+      canHandleContainers: u.canHandleContainers,
       canEditVoucher: u.canEditVoucher,
       repScopeMode: u.repScopeMode,
       canAddCustomer: u.canAddCustomer,

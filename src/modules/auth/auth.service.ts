@@ -226,6 +226,9 @@ export class AuthService {
       canCreateSale: user.canCreateSale,
       canCreateReturn: user.canCreateReturn,
       canMakeCollection: user.canMakeCollection,
+      // Half the container gate; app_settings.containersEnabled is the other
+      // half, and the app requires both before it shows the action.
+      canHandleContainers: user.canHandleContainers,
       canEditVoucher: user.canEditVoucher,
       canAddCustomer: user.canAddCustomer,
       canCreateCustomerDirect: user.canCreateCustomerDirect,

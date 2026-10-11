@@ -84,6 +84,18 @@ export class AppSettings {
   @Column({ name: 'require_device_approval', type: 'boolean', default: false })
   requireDeviceApproval!: boolean;
 
+  /**
+   * Returnable containers: track the empty bucket/crate a product ships in, as
+   * van stock and as a per-customer obligation.
+   *
+   * Carried to the handset on `GET /company-info` like `damagedReturnsEnabled`,
+   * so it holds offline. Off by default: with no container items linked every
+   * balance is zero anyway, so this flag is what makes the screens and the rep's
+   * actions appear at all.
+   */
+  @Column({ name: 'containers_enabled', type: 'boolean', default: false })
+  containersEnabled!: boolean;
+
   @Column({ name: 'erp_sync_enabled', type: 'boolean', default: false })
   erpSyncEnabled!: boolean;
 

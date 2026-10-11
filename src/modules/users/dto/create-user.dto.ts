@@ -86,6 +86,7 @@ export class CreateUserDto {
   @IsOptional() @IsBoolean() canCreateReturn?: boolean;
   @ApiPropertyOptional({ description: 'May record a collection.' })
   @IsOptional() @IsBoolean() canMakeCollection?: boolean;
+  @IsOptional() @IsBoolean() canHandleContainers?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() canEditVoucher?: boolean;
   @ApiPropertyOptional({
     enum: ['all', 'assigned'],

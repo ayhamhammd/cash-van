@@ -83,6 +83,11 @@ const VAN_EFFECT: Record<string, 'in' | 'out' | 'reserve'> = {
   RETURN_IN: 'in',
   TRANSFER_IN: 'in',
   ORDER: 'reserve',
+  // Empties are real stock the rep is physically carrying: three buckets taken
+  // back ride in the van until they are unloaded at the warehouse like anything
+  // else. They move no money — see enforceContainerLines.
+  CONTAINER_IN: 'in',
+  CONTAINER_OUT: 'out',
 };
 
 /**
@@ -113,6 +118,8 @@ const VOUCHER_PREFIX: Record<string, string> = {
   ADJUSTMENT: 'ADJ',
   PAYMENT_IN: 'RCV',
   PAYMENT_OUT: 'PAY',
+  CONTAINER_IN: 'CIN',
+  CONTAINER_OUT: 'COUT',
 };
 import { CreateChequeDto } from './dto/create-cheque.dto';
 import {
@@ -129,6 +136,15 @@ export const PERM_RETURN_CREATE = 'vouchers.return.create';
 /** When set (with create), each return needs admin approval before it posts. */
 export const PERM_RETURN_APPROVAL = 'vouchers.return.approval';
 export const PERM_PRICE_OVERRIDE = 'vouchers.priceOverride';
+/**
+ * May move returnable containers (CONTAINER_IN / CONTAINER_OUT).
+ *
+ * Separate from the return keys on purpose. Collecting empties is routine, has
+ * no money in it, and should need no approval — while a goods return stays
+ * gated exactly as it was. Safe to grant widely only because a container
+ * document may name nothing but flagged container items, at zero price.
+ */
+export const PERM_CONTAINER_MOVE = 'vouchers.container.move';
 /**
  * The salesman may ASK a supervisor to put free items on a voucher.
  *
@@ -173,7 +189,17 @@ const STANDARD_TRANS_KINDS: ReadonlyArray<{
   { transKind: 'ADJUSTMENT', transName: 'تسوية', sign: 0 },
   { transKind: 'PAYMENT_IN', transName: 'سند قبض', sign: 0 },
   { transKind: 'PAYMENT_OUT', transName: 'سند صرف', sign: 0 },
+  // Returnable packaging. Signed like a return and a sale respectively, because
+  // that is how they move stock; they carry no value, so they reach no ledger.
+  { transKind: 'CONTAINER_IN', transName: 'استلام فوارغ', sign: 1 },
+  { transKind: 'CONTAINER_OUT', transName: 'تسليم فوارغ', sign: -1 },
 ];
+
+/** The two zero-value packaging documents. Neither is a sale, a return, or a visit. */
+export const CONTAINER_KINDS: ReadonlySet<string> = new Set([
+  'CONTAINER_IN',
+  'CONTAINER_OUT',
+]);
 
 /**
  * The rep's position at save time, as a pair or not at all.
@@ -820,6 +846,19 @@ export class VouchersService implements OnModuleInit {
           const tax = taxByItem.get(line.itemNumber);
           if (tax !== undefined) line.taxPercentage = tax;
         }
+      }
+
+      // A container document may name NOTHING but flagged containers, at zero
+      // price. This check — not an approval step — is what makes
+      // `can_handle_containers` safe to grant to every dairy rep: without it the
+      // flag would be a way to move any product in the catalogue into a van at
+      // no charge, with no manager ever seeing it.
+      //
+      // It runs here because the lines' items are already loaded for the tax
+      // overwrite above, and inside the transaction, so a concurrent edit that
+      // unflags an item cannot slip a document past it.
+      if (CONTAINER_KINDS.has(dto.transKind)) {
+        await this.enforceContainerLines(dto, items);
       }
 
       const settingsView = await this.settings.get().catch(() => null);
@@ -2073,6 +2112,48 @@ export class VouchersService implements OnModuleInit {
     return !user || user.userType === 'ADMIN' || user.canUseCardPayment;
   }
 
+  /**
+   * Guard the two zero-value packaging documents.
+   *
+   * Three separate refusals, each for a different way this could go wrong:
+   *
+   *  - the feature is off → the document should not exist at all, and an
+   *    installed APK that still offers the action must be told, not humoured.
+   *  - a line names something that is not a flagged container → the security
+   *    case. See the call site.
+   *  - a line carries a price → rejected rather than zeroed. Silently zeroing
+   *    would let a mispriced document post and look deliberate; the rep's app
+   *    sends 0 for these, so a non-zero price means something is wrong upstream.
+   */
+  private async enforceContainerLines(
+    dto: CreateVoucherDto,
+    items: ItemCart[],
+  ): Promise<void> {
+    if (!(await this.settings.containersEnabled())) {
+      throw new BadRequestException(
+        'CONTAINERS_DISABLED: returnable containers are not switched on for this company',
+      );
+    }
+    const byNumber = new Map(items.map((i) => [i.itemNumber, i]));
+    for (const line of dto.transactions) {
+      const item = byNumber.get(line.itemNumber);
+      if (!item) {
+        throw new BadRequestException(`Item ${line.itemNumber} not found`);
+      }
+      if (!item.isReturnableContainer) {
+        throw new BadRequestException(
+          `NOT_A_CONTAINER: ${line.itemNumber} is not a returnable container, ` +
+            'so it cannot be moved on a container voucher',
+        );
+      }
+      if (Number.parseFloat(line.unitPrice ?? '0') !== 0) {
+        throw new BadRequestException(
+          `CONTAINER_PRICE_NOT_ZERO: ${line.itemNumber} must move at zero price`,
+        );
+      }
+    }
+  }
+
   private async enforceSalesmanPolicy(dto: CreateVoucherDto): Promise<void> {
     const ctx = this.userCtx.get();
     if (!ctx) return; // internal call (job / approval execution) — trusted
@@ -2104,6 +2185,20 @@ export class VouchersService implements OnModuleInit {
       }
       if (!has(PERM_RETURN_CREATE)) {
         throw new ForbiddenException('RETURN_NOT_ALLOWED');
+      }
+    }
+
+    // 1b) Container documents — one flag, no approval step.
+    //
+    // Deliberately NOT folded into the RETURN gate above. Taking three empty
+    // buckets back is not a credit to anybody and carries no value, so routing
+    // it through a manager would make reps stop recording it, and an unrecorded
+    // empty is worse than no feature at all. What keeps the flag safe is
+    // enforceContainerLines(), not an approval: a container document may name
+    // nothing but flagged containers, at zero price.
+    if (CONTAINER_KINDS.has(dto.transKind)) {
+      if (!user.canHandleContainers && !has(PERM_CONTAINER_MOVE)) {
+        throw new ForbiddenException('CONTAINERS_NOT_ALLOWED');
       }
     }
 
