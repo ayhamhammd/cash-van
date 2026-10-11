@@ -582,6 +582,7 @@ export class ErpOutboxService {
     if (row.kind === 'SALES_RETURN') return this.buildReturn(row.ref);
     if (row.kind === 'SALES_ORDER') return this.buildOrder(row.ref);
     if (row.kind === 'STOCK_ADJUSTMENT') return this.buildAdjustment(row.ref);
+    if (row.kind === 'CONTAINER_MOVEMENT') return this.buildContainerMovement(row.ref);
     // STOCK_TRANSFER is handled as two calls in buildCalls (buildTransferCalls).
     if (row.kind === 'PAYMENT') return this.buildPayment(row.ref);
     if (row.kind === 'CASH_SETTLEMENT') return this.buildSettlement(row.ref);
@@ -1316,6 +1317,54 @@ export class ErpOutboxService {
         deviceId: header.userCode,
         warehouseCode: this.vanStoreOf(lines, header.userCode),
         type: header.transKind === 'IN' ? 'IN' : 'OUT',
+        items: lines.map((l) => ({
+          skuCode: skuOf(l),
+          quantity: exactQty(l.itemQty),
+        })),
+      },
+    };
+  }
+
+  /**
+   * A CONTAINER_IN / CONTAINER_OUT voucher → the ERP's container ledger.
+   *
+   * Not a stock adjustment, although it looks like one: the ERP has to record
+   * WHICH CUSTOMER is holding the packaging, and `stock_adjustments` has no
+   * customer column. The ERP endpoint posts the stock movement itself and
+   * writes the ledger row in the same transaction.
+   *
+   * `externalId` is the voucher number, which is what makes a retry idempotent
+   * — the same guarantee every other builder here relies on.
+   *
+   * No money is sent, because there is none: a container has no value and the
+   * ERP must not raise a credit note, a journal or a tax line for one.
+   */
+  private async buildContainerMovement(
+    voucherNumber: string,
+  ): Promise<{ path: string; body: Record<string, unknown> } | null> {
+    const header = await this.headers.findOne({ where: { voucherNumber } });
+    if (!header) return null;
+    const lines = await this.lines.find({ where: { voucherNumber } });
+    if (!lines.length) return null;
+    // A container movement without a customer has nobody to attribute the
+    // packaging to, so there is nothing the ERP could usefully record. Dropped
+    // rather than retried: no amount of retrying supplies a customer.
+    if (!header.customerNumber) {
+      this.logger.warn(
+        `container movement ${voucherNumber} has no customer — nothing to attribute, dropping`,
+      );
+      return null;
+    }
+    const skuOf = await this.erpSkuResolver(lines);
+    return {
+      path: 'container-movements',
+      body: {
+        externalId: voucherNumber,
+        direction: header.transKind === 'CONTAINER_IN' ? 'IN' : 'OUT',
+        customerCode: header.customerNumber,
+        salesmanCode: header.userCode,
+        warehouseCode: this.vanStoreOf(lines, header.userCode),
+        movedAt: header.inDate?.toISOString() ?? new Date().toISOString(),
         items: lines.map((l) => ({
           skuCode: skuOf(l),
           quantity: exactQty(l.itemQty),
