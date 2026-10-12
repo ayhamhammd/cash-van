@@ -26,6 +26,7 @@ import { CustomersModule } from './modules/customers/customers.module';
 import { VendorsModule } from './modules/vendors/vendors.module';
 import { WarehousesModule } from './modules/warehouses/warehouses.module';
 import { ItemsModule } from './modules/items/items.module';
+import { ContainersModule } from './modules/containers/containers.module';
 import { VouchersModule } from './modules/vouchers/vouchers.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { YearConfigModule } from './modules/year-config/year-config.module';
@@ -97,6 +98,7 @@ import { AreasModule } from './modules/areas/areas.module';
     WarehousesModule,
     ItemsModule,
     VouchersModule,
+    ContainersModule,
     ReportsModule,
     YearConfigModule,
     RepsModule,
