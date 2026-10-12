@@ -108,7 +108,13 @@ export class ReturnableContainers1728570000000 implements MigrationInterface {
                i.container_item_number                        AS container_item_number,
                vh.user_code,
                vh.in_date,
-               (vt.item_qty * COALESCE(vt.unit_base_qty, 1)
+               -- NET OF GOODS RETURNED. A tub that came back as PRODUCT took
+               -- its bucket with it, so it never stayed with the customer; an
+               -- empty handed back on its own is a CONTAINER_IN instead, so the
+               -- two cannot double-count. qty_returned is maintained by the
+               -- return allocator (migration ReturnAllocation).
+               ((vt.item_qty - COALESCE(vt.qty_returned, 0))
+                            * COALESCE(vt.unit_base_qty, 1)
                             * i.containers_per_base_unit)     AS qty
           FROM voucher_transactions vt
           JOIN voucher_headers vh ON vh.voucher_number = vt.voucher_number
