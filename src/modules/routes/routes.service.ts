@@ -151,6 +151,55 @@ export class RoutesService {
     }));
   }
 
+  /**
+   * Fill in each stop's customer name, code and position.
+   *
+   * `route_stops` stores a `customer_id` and nothing else, so a plan served as
+   * it is stored names nobody — which is exactly what the Daily-plans screen
+   * showed: a UUID fragment per stop, because that was the only thing it had.
+   * A stop the office cannot read is not a plan.
+   *
+   * One query for the whole set rather than a join on each read path: there are
+   * three of them (list, findOne, findByRepAndDate) and they all need the same
+   * thing.
+   *
+   * The fields are NOT columns — see RouteStop — so they are attached after the
+   * entities are built and never written back.
+   */
+  private async nameStops(plans: RoutePlan[]): Promise<void> {
+    const ids = [
+      ...new Set(plans.flatMap((p) => (p.stops ?? []).map((s) => s.customerId))),
+    ];
+    if (!ids.length) return;
+    const rows = await this.customers.find({
+      where: { id: In(ids) },
+      select: {
+        id: true,
+        customerName: true,
+        customerNumber: true,
+        latitude: true,
+        longitude: true,
+      },
+    });
+    const byId = new Map(rows.map((c) => [c.id, c]));
+    const num = (v: string | null | undefined): number | null => {
+      if (v == null) return null;
+      const n = Number.parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    for (const plan of plans) {
+      for (const stop of plan.stops ?? []) {
+        const c = byId.get(stop.customerId);
+        // A stop whose customer was deleted keeps its row and reads as unknown,
+        // rather than vanishing from a plan the rep is being measured against.
+        stop.customerName = c?.customerName ?? null;
+        stop.customerNumber = c?.customerNumber ?? null;
+        stop.lat = num(c?.latitude);
+        stop.lng = num(c?.longitude);
+      }
+    }
+  }
+
   async list(query: ListRoutesQuery): Promise<RoutePlan[]> {
     const qb = this.plans
       .createQueryBuilder('p')
@@ -159,7 +208,9 @@ export class RoutesService {
       .addOrderBy('s.stop_order', 'ASC');
     if (query.date) qb.andWhere('p.plan_date = :d', { d: query.date });
     if (query.repId) qb.andWhere('p.rep_id = :r', { r: query.repId });
-    return qb.getMany();
+    const plans = await qb.getMany();
+    await this.nameStops(plans);
+    return plans;
   }
 
   async findOne(id: string): Promise<RoutePlan> {
@@ -169,15 +220,18 @@ export class RoutesService {
       order: { stops: { stopOrder: 'ASC' } },
     });
     if (!plan) throw new NotFoundException(`Route plan ${id} not found`);
+    await this.nameStops([plan]);
     return plan;
   }
 
   async findByRepAndDate(repId: string, date: string): Promise<RoutePlan | null> {
-    return this.plans.findOne({
+    const plan = await this.plans.findOne({
       where: { repId, planDate: date },
       relations: { stops: true },
       order: { stops: { stopOrder: 'ASC' } },
     });
+    if (plan) await this.nameStops([plan]);
+    return plan;
   }
 
   async createPlan(dto: CreateRoutePlanDto): Promise<RoutePlan> {
