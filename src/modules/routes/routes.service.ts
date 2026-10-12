@@ -59,6 +59,18 @@ export class RoutesService {
    * A rep's customer check-ins within a date range (inclusive), newest first.
    * Powers the weekly-route "off-route" hint: the dashboard compares each
    * visit's weekday against the customer's journey-plan weekdays.
+   *
+   * THE CUSTOMER IS NAMED HERE, not looked up by the caller. This used to
+   * return `customerId` alone, and the route screen resolved it against the
+   * first 200 customers it had fetched — so every off-route visit to a customer
+   * outside that page rendered as the first eight characters of a UUID. The
+   * dashboard had no way to do better: the customer it needs is by definition
+   * one that is NOT in the rep's plan, so no plan-derived list can contain it.
+   *
+   * The location comes from the customer record, because `customer_visits`
+   * stores no position of its own — a check-in records that the rep was there,
+   * not where "there" was. So this is where the outlet IS, which is the useful
+   * answer anyway: it is what a supervisor needs to see on a map.
    */
   async repVisits(
     repId: string,
@@ -67,17 +79,48 @@ export class RoutesService {
   ): Promise<
     Array<{
       customerId: string;
+      customerName: string | null;
+      customerNumber: string | null;
       visitedAt: Date;
       hadSale: boolean;
       visitNote: string | null;
+      lat: number | null;
+      lng: number | null;
+      /** A readable place — the outlet's address, else its city. May be null. */
+      locationLabel: string | null;
     }>
   > {
     // Bucket by the business-local (Jordan) calendar date, not UTC. A visit at
     // 02:35 +03 is 23:35 UTC the previous day, so a naive UTC window would drop
     // it from "today". The dashboard sends Jordan-local dates, so compare against
     // the same zone.
-    const rows = await this.visits
+    // LEFT JOIN, not INNER: a visit whose customer was since deleted must still
+    // appear. Dropping it would quietly shrink the off-route count a supervisor
+    // is reading, which is worse than a row with no name on it.
+    const rows: Array<{
+      customer_id: string;
+      visited_at: Date;
+      had_sale: boolean;
+      visit_note: string | null;
+      customer_name: string | null;
+      customer_number: string | null;
+      latitude: string | null;
+      longitude: string | null;
+      address_ar: string | null;
+      city: string | null;
+    }> = await this.visits
       .createQueryBuilder('v')
+      .leftJoin(Customer, 'c', 'c.id = v.customer_id')
+      .select('v.customerId', 'customer_id')
+      .addSelect('v.visitedAt', 'visited_at')
+      .addSelect('v.hadSale', 'had_sale')
+      .addSelect('v.visitNote', 'visit_note')
+      .addSelect('c.customerName', 'customer_name')
+      .addSelect('c.customerNumber', 'customer_number')
+      .addSelect('c.latitude', 'latitude')
+      .addSelect('c.longitude', 'longitude')
+      .addSelect('c.addressAr', 'address_ar')
+      .addSelect('c.city', 'city')
       .where('v.rep_id = :repId', { repId })
       .andWhere(
         "(v.visited_at AT TIME ZONE 'Asia/Amman')::date BETWEEN :from AND :to",
@@ -85,12 +128,26 @@ export class RoutesService {
       )
       .orderBy('v.visited_at', 'DESC')
       .take(500)
-      .getMany();
+      .getRawMany();
+
+    // numeric(9,6) arrives as a string from pg. Parsed here so the dashboard and
+    // the handset both receive a number and neither has to guess.
+    const num = (v: string | null): number | null => {
+      if (v == null) return null;
+      const n = Number.parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    };
+
     return rows.map((v) => ({
-      customerId: v.customerId,
-      visitedAt: v.visitedAt,
-      hadSale: v.hadSale,
-      visitNote: v.visitNote ?? null,
+      customerId: v.customer_id,
+      customerName: v.customer_name ?? null,
+      customerNumber: v.customer_number ?? null,
+      visitedAt: v.visited_at,
+      hadSale: v.had_sale,
+      visitNote: v.visit_note ?? null,
+      lat: num(v.latitude),
+      lng: num(v.longitude),
+      locationLabel: v.address_ar?.trim() || v.city?.trim() || null,
     }));
   }
 
