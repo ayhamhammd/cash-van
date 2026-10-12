@@ -44,6 +44,8 @@ export interface AppSettingsView {
   tobaccoTaxEnabled: boolean;
   damagedReturnsEnabled: boolean;
   damagedWarehouseCode: string | null;
+  /** Returnable containers — the office switch the dashboard reads. */
+  containersEnabled: boolean;
   targetsIncludeTax: boolean;
   targetsSalesIncludeCash: boolean;
   accounting: {
@@ -459,6 +461,7 @@ export class SettingsService {
       tobaccoTaxEnabled: row.tobaccoTaxEnabled,
       damagedReturnsEnabled: row.damagedReturnsEnabled,
       damagedWarehouseCode: row.damagedWarehouseCode ?? null,
+      containersEnabled: row.containersEnabled,
       targetsIncludeTax: row.targetsIncludeTax,
       targetsSalesIncludeCash: row.targetsSalesIncludeCash,
       accounting: {
