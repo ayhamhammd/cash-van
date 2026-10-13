@@ -49,6 +49,19 @@ export class RouteStop {
   skipReason?: string | null;
 
   /** True when this stop was rolled forward from an earlier missed day. */
+  /**
+   * Who the stop is — filled in on read, never stored.
+   *
+   * `route_stops` holds a customer_id and nothing else, so a plan served as it
+   * is stored names nobody; the Daily-plans screen showed a UUID fragment per
+   * stop because that was all it had. RoutesService.nameStops fills these in on
+   * every read path. They are not @Column, so nothing writes them back.
+   */
+  customerName?: string | null;
+  customerNumber?: string | null;
+  lat?: number | null;
+  lng?: number | null;
+
   @Column({ name: 'carried_over', type: 'boolean', default: false })
   carriedOver!: boolean;
 }
