@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { OnEvent } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, LessThanOrEqual, Not, Repository } from 'typeorm';
@@ -65,6 +66,15 @@ const DRAIN_INTERVAL_MS = parseInt(process.env.ERP_OUTBOX_DRAIN_MS ?? '30000', 1
 const BATCH = 20;
 // How often to poll the ERP for the async JoFotara QR of already-pushed sales.
 const QR_RECONCILE_INTERVAL_MS = parseInt(process.env.ERP_QR_RECONCILE_MS ?? '30000', 10);
+/**
+ * How recent a sale counts as "the rep may still be standing there", in minutes.
+ *
+ * Sales inside this window are asked about on every reconcile tick; older ones
+ * share the rotating page. Generous on purpose — it costs nothing while few
+ * sales are that new, and the point is that a sale at the counter is never
+ * queued behind the backlog. See reconcileJofotaraQr.
+ */
+const QR_FRESH_WINDOW_MIN = 15;
 // A 429 is transient (the ERP per-key window resets in 60s), so we reschedule past
 // the window WITHOUT consuming a dead-letter attempt — rate limiting must never
 // permanently fail a document.
@@ -104,6 +114,12 @@ export class ErpOutboxService {
   private readonly logger = new Logger(ErpOutboxService.name);
   private draining = false;
   private reconcilingQr = false;
+  /**
+   * Vouchers being pushed by [pushPostedVoucher] right now, so a replayed event
+   * does not send the same document twice. The ERP dedups on `externalId`
+   * anyway, so this saves a round trip rather than preventing a double post.
+   */
+  private readonly pushingNow = new Set<string>();
   /**
    * Where the QR poll resumes: each tick takes the NEXT page of candidates, and
    * wraps to the start after the last. Without it every tick re-read the same
@@ -308,6 +324,73 @@ export class ErpOutboxService {
   }
 
   /**
+   * Push a just-posted voucher NOW, instead of waiting for the next drain tick.
+   *
+   * Why this exists: the van app holds the receipt for up to 8 seconds waiting
+   * for the sale's JoFotara QR (see migration JofotaraAutoSubmit). The QR cannot
+   * exist until the sale reaches the ERP and the ERP files it, and on the
+   * interval alone the sale sat in the queue for up to ERP_OUTBOX_DRAIN_MS
+   * before it was even sent. So the rep's 8 seconds expired before the first
+   * hop had happened, every sale printed without a QR, and the QR then turned up
+   * minutes later — which is the delay the field reported.
+   *
+   * This is ONLY a latency hint. It is emphatically NOT where the document is
+   * recorded: the outbox row was written inside the voucher's own transaction
+   * (`enqueueOutboxWithin`), and `ErpOutboxSweepService` is the backstop. So a
+   * lost event, a thrown listener or a redeploy mid-flight costs this sale a
+   * fast QR and nothing else — the drain picks it up on the next tick exactly as
+   * before. That distinction is the whole reason the old `onVoucherPosted`
+   * listener was removed (see erp-sync.service.ts): it was doing the ENQUEUE
+   * after the commit, so losing it lost the sale. Doing the PUSH here is safe in
+   * a way doing the enqueue here was not.
+   */
+  @OnEvent('erp.voucher.posted')
+  async pushPostedVoucher(payload: { voucherNumber?: string }): Promise<void> {
+    const ref = payload?.voucherNumber;
+    if (!ref || this.pushingNow.has(ref)) return;
+    // Claimed BEFORE the first await, or the guard is no guard: two events for
+    // one voucher would both read `has(ref) === false`, both wait on the config
+    // read, and both push. The ERP dedups on externalId so that cost a wasted
+    // round trip rather than a double invoice, but a check that does not hold
+    // under the concurrency it exists for is worse than none.
+    this.pushingNow.add(ref);
+    try {
+      // Same gate as the drain: with no ERP connection there is nothing to push,
+      // and the drain already does the explaining about why rows are waiting.
+      let cfg: Awaited<ReturnType<SettingsService['getErpConfig']>> | null = null;
+      try {
+        cfg = await this.settings.getErpConfig();
+      } catch {
+        return;
+      }
+      if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return;
+
+      // Only this voucher's own rows, and only ones actually due. A document the
+      // drain is already carrying, or one backing off after a failure, is left
+      // alone — jumping the backoff here would turn one ERP outage into a tight
+      // retry loop for every sale posted during it.
+      const due = await this.outbox.find({
+        where: {
+          ref,
+          status: 'pending',
+          nextAttemptAt: LessThanOrEqual(new Date()),
+        },
+        order: { createdAt: 'ASC' },
+      });
+      for (const row of due) await this.pushOne(row);
+    } catch (e) {
+      // An event listener that throws takes nothing with it but this optimisation.
+      this.logger.warn(
+        `immediate ERP push for voucher ${ref} failed, leaving it to the drain: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    } finally {
+      this.pushingNow.delete(ref);
+    }
+  }
+
+  /**
    * Fill in each posted SALE voucher's JoFotara QR from the ERP.
    *
    * The government returns the QR only after the ERP submits the invoice, so it
@@ -338,24 +421,41 @@ export class ErpOutboxService {
       // get a QR: ERP movement mirrors (ERP-MV-…, kind SALE) and sales not pushed
       // yet. They held the twenty slots forever, so an invoice further down was
       // never asked about: exported in the ERP, "pending" on the dashboard.
-      // And the page ROTATES (qrOffset), so no fixed set can starve the rest.
-      const candidates: Array<{ id: string; voucher_number: string; jofotara_status: string | null; jofotara_qr_code: string | null; invoice_number: string }> =
-        await this.headers.manager.query(
-          `SELECT h.id, h.voucher_number, h.jofotara_status, h.jofotara_qr_code,
-                  m.erp_code AS invoice_number
-             FROM voucher_headers h
-             JOIN erp_id_map m
-               ON m.entity = 'voucher' AND m.erp_id = h.voucher_number
-              AND m.erp_code IS NOT NULL AND m.erp_code <> ''
-            WHERE h.is_posted = TRUE
-              AND h.trans_kind = 'SALE'
-              AND h.jofotara_qr_code IS NULL
-              AND (h.jofotara_status IS NULL OR h.jofotara_status NOT IN ('REJECTED', 'ERROR'))
-            ORDER BY h.in_date DESC, h.id
-           OFFSET $1 LIMIT $2`,
-          [this.qrOffset, BATCH],
-        );
-      this.qrOffset = candidates.length < BATCH ? 0 : this.qrOffset + BATCH;
+      //
+      // Read in TWO passes, newest first, because rotating alone starved exactly
+      // the sale that matters. A rotating page means a given voucher is looked at
+      // once every ceil(N/BATCH) ticks, so with a few hundred QR-less sales — and
+      // that set only grows, since a sale the ERP never files stays in it forever
+      // — a rep standing at the counter waited minutes for a QR that was ready in
+      // seconds. Fresh sales are therefore read on EVERY tick, and the rotation
+      // is left to do what it is good for: working through the old backlog so a
+      // late QR still lands eventually.
+      //
+      // The two passes share one per-tick budget, so this asks the ERP no more
+      // questions per tick than the single query did. The fresh pass is capped at
+      // HALF of it rather than taking what it likes: a company with auto-submit
+      // off accumulates QR-less sales that never leave the window until they age
+      // out of it, and an uncapped fresh pass would let those fill every slot and
+      // stall the backlog completely — swapping one starvation for another.
+      const fresh = await this.qrCandidates(
+        `AND h.in_date >= now() - make_interval(mins => ${QR_FRESH_WINDOW_MIN})
+         ORDER BY h.in_date DESC, h.id
+         LIMIT ${Math.floor(BATCH / 2)}`,
+      );
+      const room = BATCH - fresh.length;
+      const backlog = room > 0
+        ? await this.qrCandidates(
+            `AND h.in_date < now() - make_interval(mins => ${QR_FRESH_WINDOW_MIN})
+             ORDER BY h.in_date DESC, h.id
+             OFFSET ${this.qrOffset} LIMIT ${room}`,
+          )
+        : [];
+      // Only the backlog rotates, and only by what was actually read, so a tick
+      // mostly filled by fresh sales does not skip past the old ones unseen.
+      if (room > 0) {
+        this.qrOffset = backlog.length < room ? 0 : this.qrOffset + room;
+      }
+      const candidates = [...fresh, ...backlog];
 
       for (const h of candidates) {
         const invoiceNumber = h.invoice_number;
@@ -468,6 +568,13 @@ export class ErpOutboxService {
           map.erpCode = row.ref;
           await this.idmap.save(map);
         }
+      }
+      if (row.kind === 'SALE_INVOICE') {
+        // The reply often already carries the QR. Taking it here is what makes
+        // the rep's 8-second wait winnable: the alternative is reconcileJofotaraQr
+        // discovering, a tick or several later, a value we were handed and threw
+        // away. Harmless when the ERP does not send one — the poll still covers it.
+        await this.captureJofotaraFromReply(row.ref, lastData);
       }
       if (row.kind === 'SALE_INVOICE' && row.resultRef) {
         await this.mapVoucher(row.ref, row.resultRef);
@@ -1457,6 +1564,93 @@ export class ErpOutboxService {
    * `journalId` elsewhere means "not reported", never "not posted" — which is
    * why `warnOnPostingGap` restricts its alarm to SALE_INVOICE.
    */
+  /**
+   * Mirror the JoFotara QR and status off a sales-invoice reply, when it has them.
+   *
+   * The ERP files the invoice with the government as part of accepting it (its
+   * auto-submit switch — mirrored here as `app_settings.jofotara_auto_submit`),
+   * so the create reply can already name the QR. Writing it here is the
+   * difference between a QR the rep can print and one that appears after they
+   * have driven away.
+   *
+   * Only ever FILLS IN: a blank in the reply never erases a QR we already hold,
+   * because an ERP that answers without the field (an older build, a reply shape
+   * that changes) must not undo a good value. Best-effort by design — the sale
+   * itself has already posted, so failing to record a QR must not fail it.
+   */
+  private async captureJofotaraFromReply(
+    voucherNumber: string,
+    data: unknown,
+  ): Promise<void> {
+    const found = this.extractJofotara(data);
+    if (!found.qrCode && !found.status) return;
+    try {
+      // One statement, and the COALESCEs say the rule outright: a QR is only
+      // ever filled in, never replaced (a replayed push must not clobber the
+      // one the poll may since have corrected), while a status that IS present
+      // in the reply is the newer fact and wins.
+      await this.headers.manager.query(
+        `UPDATE voucher_headers
+            SET jofotara_qr_code = COALESCE(jofotara_qr_code, $2),
+                jofotara_status  = COALESCE($3, jofotara_status)
+          WHERE voucher_number = $1`,
+        [voucherNumber, found.qrCode, found.status],
+      );
+    } catch (e) {
+      this.logger.warn(
+        `could not record the JoFotara QR for voucher ${voucherNumber}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Posted SALEs still missing a QR, narrowed by `tail` (the window, order and
+   * paging the caller wants). One definition of "candidate" for both passes of
+   * reconcileJofotaraQr, so the fresh pass and the backlog pass cannot drift
+   * into asking about different sets.
+   */
+  private qrCandidates(tail: string): Promise<
+    Array<{
+      id: string;
+      voucher_number: string;
+      jofotara_status: string | null;
+      jofotara_qr_code: string | null;
+      invoice_number: string;
+    }>
+  > {
+    return this.headers.manager.query(
+      `SELECT h.id, h.voucher_number, h.jofotara_status, h.jofotara_qr_code,
+              m.erp_code AS invoice_number
+         FROM voucher_headers h
+         JOIN erp_id_map m
+           ON m.entity = 'voucher' AND m.erp_id = h.voucher_number
+          AND m.erp_code IS NOT NULL AND m.erp_code <> ''
+        WHERE h.is_posted = TRUE
+          AND h.trans_kind = 'SALE'
+          AND h.jofotara_qr_code IS NULL
+          AND (h.jofotara_status IS NULL OR h.jofotara_status NOT IN ('REJECTED', 'ERROR'))
+        ${tail}`,
+    );
+  }
+
+  /** `jofotaraQrCode` / `jofotaraStatus` out of an ERP reply, at either nesting. */
+  private extractJofotara(data: unknown): {
+    qrCode: string | null;
+    status: string | null;
+  } {
+    if (!data || typeof data !== 'object') return { qrCode: null, status: null };
+    const top = data as Record<string, unknown>;
+    const d = (top.data as Record<string, unknown> | undefined) ?? top;
+    const str = (v: unknown): string | null =>
+      typeof v === 'string' && v.trim() !== '' ? v : null;
+    return {
+      qrCode: str(d?.jofotaraQrCode) ?? str(top.jofotaraQrCode),
+      status: str(d?.jofotaraStatus) ?? str(top.jofotaraStatus),
+    };
+  }
+
   private extractPostingInfo(data: unknown): {
     journalId: string | null;
     paymentSkipped: boolean;

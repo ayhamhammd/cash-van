@@ -44,6 +44,13 @@ export const envValidationSchema = Joi.object({
   // costs more to reconcile than simply waiting does.
   ERP_HTTP_TIMEOUT_MS: Joi.number().min(1000).default(60000),
   ERP_OUTBOX_DRAIN_MS: Joi.number().min(5000).default(30000),
+  // How often an already-pushed sale is polled for the JoFotara QR the ERP
+  // files asynchronously. Validated for the same reason as the drain, and
+  // bounded above as well: the van app holds a receipt for only 8 seconds
+  // waiting for that QR, so a generous value here does not slow printing — it
+  // decides how long a QR that missed the push reply takes to turn up at all,
+  // and a careless 300000 would put the old five-minute delay straight back.
+  ERP_QR_RECONCILE_MS: Joi.number().min(5000).max(120000).default(30000),
   // How often the staged-document queue promotes what the handset has sent.
   // Faster than the ERP drain on purpose: this one stands between a rep making
   // a sale and that sale existing.
