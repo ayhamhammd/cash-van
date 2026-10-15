@@ -12,6 +12,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
+# Git Bash / MSYS on Windows rewrites any ARGUMENT that looks like a unix path
+# into a Windows one before the program sees it. NEXT_PUBLIC_API_BASE_URL is
+# "/api/v1", so --build-arg arrived as "D:/Git/api/v1", and THAT is the string
+# compiled into the browser bundle as the axios baseURL. Every API call then
+# resolved against a path that does not exist: the login POST never reached the
+# backend, the dashboard reported a failed sign-in, and the API log stayed
+# empty because nothing ever arrived. No build step failed, which is what made
+# it expensive to find.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
+
 PLATFORM="linux/amd64"
 FRONTEND_DIR="${FRONTEND_DIR:-../cash-van-dashboard-frontend}"
 API_IMAGE="cashvan-api:prod"
@@ -51,6 +62,17 @@ echo "==> Verifying the Maps-key placeholder landed in $WEB_IMAGE ..."
 docker run --rm --entrypoint sh "$WEB_IMAGE" \
   -c 'grep -rq "__RUNTIME_GOOGLE_MAPS_API_KEY__" .next/static' \
   || { echo "ERROR: placeholder token missing from $WEB_IMAGE .next/static." >&2; exit 1; }
+
+echo "==> Verifying the API base URL survived into $WEB_IMAGE ..."
+# Guards the mangling above, and anything else that could alter the baked
+# value. The dashboard MUST call a relative "/api/v1": that is what lets one
+# image serve any host behind the same-origin proxy.
+baked="$(docker run --rm --entrypoint sh "$WEB_IMAGE" -c 'grep -rho "apiBaseUrl:[^,}]*" .next/static/chunks | head -1' || true)"
+echo "    $baked"
+case "$baked" in
+  *'"/api/v1"'*) ;;
+  *) echo "ERROR: dashboard baked apiBaseUrl is not \"/api/v1\" -> ${baked:-<none>}" >&2; exit 1 ;;
+esac
 
 echo "==> Verifying both images are $PLATFORM ..."
 for img in "$API_IMAGE" "$WEB_IMAGE"; do
