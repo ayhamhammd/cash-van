@@ -28,6 +28,15 @@ describe('outboxKindForVoucher', () => {
     expect(outboxKindForVoucher('TRANSFER', 'TRF-110101000001')).toBe('STOCK_TRANSFER');
   });
 
+  it('sends both container documents to the one ERP ledger endpoint', () => {
+    // Returnable packaging is NOT a stock adjustment, although it moves van
+    // stock like one: the ERP has to record which customer is holding the
+    // empties, and `stock_adjustments` has no customer column. So both
+    // directions go out as CONTAINER_MOVEMENT and the body carries the sign.
+    expect(outboxKindForVoucher('CONTAINER_IN', 'CIN-110101000001')).toBe('CONTAINER_MOVEMENT');
+    expect(outboxKindForVoucher('CONTAINER_OUT', 'COUT-110101000001')).toBe('CONTAINER_MOVEMENT');
+  });
+
   it('refuses a voucher mirrored IN from the ERP', () => {
     // Pushing one back would hand the ERP its own invoice as a new one. The
     // guard used to live in the listener; it had to move with the logic.
@@ -45,6 +54,8 @@ describe('outboxKindForVoucher', () => {
     // ErpSyncModule (that direction is already taken), which is why this lives
     // in a dependency-free file both can read.
     expect(Object.keys(OUTBOX_KIND_BY_TRANS).sort()).toEqual([
+      'CONTAINER_IN',
+      'CONTAINER_OUT',
       'IN',
       'ORDER',
       'OUT',

@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
-import { User } from '../users/entities/user.entity';
+import { UsersModule } from '../users/users.module';
 import { ContainersController } from './containers.controller';
 import { ContainersService } from './containers.service';
 
@@ -11,9 +10,12 @@ import { ContainersService } from './containers.service';
  * The write side is VouchersModule: containers move by posting a CONTAINER_IN /
  * CONTAINER_OUT voucher, so the permission and the container-only line check
  * have exactly one home.
+ *
+ * UsersModule for `RepScopeService`, which answers "whose customers may this
+ * caller see?" for the whole dashboard — asked here rather than answered again.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([User])],
+  imports: [UsersModule],
   controllers: [ContainersController],
   providers: [ContainersService],
   exports: [ContainersService],

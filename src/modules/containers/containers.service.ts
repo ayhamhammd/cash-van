@@ -29,10 +29,25 @@ export interface ContainerTotalRow {
 export interface ContainerBalanceQuery {
   customerNumber?: string;
   containerItemNumber?: string;
-  /** Restrict to the containers this rep's customers hold. */
+  /**
+   * Show only what this salesman last moved — a FILTER the dashboard offers,
+   * not a permission. Who may see what is [visibleRepIds].
+   */
   userCode?: string;
   /** Only rows older than this many days — the chase list. */
   minDaysOutstanding?: number;
+  /**
+   * Which salesmen's customers the caller may see, per docs/SPEC-rep-scoped-users.md:
+   *
+   *   null / undefined → unrestricted, no filter
+   *   string[]         → these rep ids only, and an EMPTY array sees NOTHING
+   *
+   * Scoped on who owns the CUSTOMER (`customers.rep_id`), not on who last
+   * moved the packaging: the rep who has to collect the empties is the one
+   * whose customer is holding them, and a balance must not drop off their list
+   * because a colleague covered the round that put it there.
+   */
+  visibleRepIds?: string[] | null;
   limit?: number;
   offset?: number;
 }
@@ -67,10 +82,17 @@ export class ContainersService {
       where.push(`cb.container_item_number = ${bind(q.containerItemNumber)}`);
     }
     if (q.userCode) where.push(`cb.last_user_code = ${bind(q.userCode)}`);
-    // A customer who has returned everything is not interesting, and the view
-    // already drops a net zero. Only a POSITIVE balance is something owed; a
-    // negative one means more came back than went out, which is a data question
-    // for the office rather than a chase, so it is shown but never aged.
+    // Fail closed: an EMPTY array must see nothing, which `= ANY('{}')` gives,
+    // and only null/undefined means unrestricted. A customer with no `rep_id`
+    // is invisible to a scoped caller for the same reason — nothing proves the
+    // row is theirs — while the office, being unrestricted, still sees it.
+    if (q.visibleRepIds != null) {
+      where.push(`c.rep_id = ANY(${bind(q.visibleRepIds)}::uuid[])`);
+    }
+    // The view already drops a net zero, so every row here is a real holding.
+    // Only a POSITIVE balance is something owed; a negative one means more came
+    // back than went out, which is a data question for the office rather than a
+    // chase, so it is shown but never aged.
     if (q.minDaysOutstanding != null) {
       where.push(
         `cb.oldest_out_at IS NOT NULL AND cb.oldest_out_at <= now() - make_interval(days => ${bind(
@@ -115,19 +137,41 @@ export class ContainersService {
     }));
   }
 
-  /** One line per kind of container: how many are out, and with how many customers. */
-  async totals(userCode?: string): Promise<ContainerTotalRow[]> {
+  /**
+   * One line per kind of container: how many are out, and with how many
+   * customers.
+   *
+   * Scoped the same way as [balances] and off the same view, so the totals a
+   * supervisor sees are the sum of the rows they can open — a header that does
+   * not add up to its own list is worse than no header.
+   */
+  async totals(
+    opts: { userCode?: string; visibleRepIds?: string[] | null } = {},
+  ): Promise<ContainerTotalRow[]> {
+    const params: unknown[] = [];
+    const where: string[] = [];
+    const bind = (v: unknown): string => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+
+    if (opts.userCode) where.push(`cb.last_user_code = ${bind(opts.userCode)}`);
+    if (opts.visibleRepIds != null) {
+      where.push(`c.rep_id = ANY(${bind(opts.visibleRepIds)}::uuid[])`);
+    }
+
     const rows: Array<Record<string, unknown>> = await this.dataSource.query(
       `SELECT cb.container_item_number,
               COALESCE(i.name_ar, i.item_name)     AS container_name,
               SUM(cb.outstanding)::numeric(14,3)   AS outstanding,
               COUNT(DISTINCT cb.customer_number)::int AS customers
          FROM container_balances cb
-         LEFT JOIN item_cart i ON i.item_number = cb.container_item_number
-        ${userCode ? 'WHERE cb.last_user_code = $1' : ''}
+         LEFT JOIN customers c ON c.customer_number = cb.customer_number
+         LEFT JOIN item_cart i ON i.item_number     = cb.container_item_number
+        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
         GROUP BY cb.container_item_number, COALESCE(i.name_ar, i.item_name)
         ORDER BY 3 DESC`,
-      userCode ? [userCode] : [],
+      params,
     );
     return rows.map((r) => ({
       containerItemNumber: String(r.container_item_number),
@@ -143,8 +187,14 @@ export class ContainersService {
    * Returns a row per container kind, and an empty array when they hold
    * nothing. Deliberately the same shape as [balances] so the app has one
    * parser.
+   *
+   * `visibleRepIds` is passed through rather than ignored: asking for one
+   * customer by number must not reach further than listing them would.
    */
-  async forCustomer(customerNumber: string): Promise<ContainerBalanceRow[]> {
-    return this.balances({ customerNumber, limit: 100 });
+  async forCustomer(
+    customerNumber: string,
+    visibleRepIds?: string[] | null,
+  ): Promise<ContainerBalanceRow[]> {
+    return this.balances({ customerNumber, visibleRepIds, limit: 100 });
   }
 }

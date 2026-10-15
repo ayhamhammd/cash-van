@@ -195,3 +195,103 @@ describe('container documents — the line check', () => {
     ).rejects.toThrow('CONTAINERS_DISABLED');
   });
 });
+
+// ── (3) what a container document must NOT touch ─────────────────────────────
+
+/**
+ * The two things a container document is quietly adjacent to and must stay out
+ * of. Both hold today by an early return on `transKind`, which is exactly the
+ * kind of thing a later edit widens without noticing — so each gets a test with
+ * an ordinary SALE beside it as the control.
+ */
+describe('a container document moves no money and is not a visit', () => {
+  interface Debt {
+    applyCreditVoucherToDebt(em: unknown, dto: CreateVoucherDto): Promise<void>;
+  }
+
+  /** Captures every statement the debt path would run. */
+  function debtPath() {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const em = {
+      query: (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        return Promise.resolve([]);
+      },
+    };
+    return { svc: Object.create(VouchersService.prototype) as Debt, em, queries };
+  }
+
+  // As the app sends it, but with a CREDIT payment line bolted on: the worst
+  // case, where something upstream has put money on a document that has none.
+  const withCredit = (transKind: string): CreateVoucherDto =>
+    ({
+      transKind,
+      voucherNumber: 'CIN-1',
+      userCode: '101',
+      customerNumber: 'CUST-1',
+      transactions: [{ itemNumber: 'BUCKET-6', itemQty: '3', unitPrice: '0.000' }],
+      payments: [{ amount: '25.000', paymentType: 'CREDIT' }],
+    }) as CreateVoucherDto;
+
+  it('leaves the customer’s debt alone even when a CREDIT line rides along', async () => {
+    // Collecting empties is not a credit note and lending crates is not a sale.
+    // If this ever moved total_debt, a rep taking back three buckets would
+    // change what the customer owes.
+    for (const kind of ['CONTAINER_IN', 'CONTAINER_OUT']) {
+      const { svc, em, queries } = debtPath();
+      await svc.applyCreditVoucherToDebt(em, withCredit(kind));
+      expect(queries).toEqual([]);
+    }
+  });
+
+  it('still moves the debt for a credit SALE — the control', async () => {
+    const { svc, em, queries } = debtPath();
+    await svc.applyCreditVoucherToDebt(em, withCredit('SALE'));
+    expect(queries).toHaveLength(1);
+    expect(queries[0].sql).toMatch(/UPDATE customers/);
+  });
+
+  interface Visit {
+    recordSaleVisit(
+      dto: CreateVoucherDto,
+      loc: { saleLat: number | null; saleLng: number | null },
+    ): Promise<void>;
+  }
+
+  function visitPath() {
+    const svc = Object.create(VouchersService.prototype) as Visit;
+    const recordVisit = jest.fn();
+    const resolveRep = jest.fn().mockResolvedValue({ id: 'rep-1' });
+    Object.defineProperty(svc, 'customersService', {
+      value: { recordVisit },
+      configurable: true,
+    });
+    Object.defineProperty(svc, 'resolveRep', { value: resolveRep, configurable: true });
+    Object.defineProperty(svc, 'dataSource', {
+      value: {
+        manager: {},
+        getRepository: () => ({ findOne: async () => ({ id: 'cust-1' }) }),
+      },
+      configurable: true,
+    });
+    return { svc, recordVisit, resolveRep };
+  }
+
+  it('does not count as a call on the customer', async () => {
+    // Collecting empties is not a sales call. Counted as one it would inflate
+    // visit coverage, and the number the office manages reps by would quietly
+    // reward driving around picking up buckets.
+    for (const kind of ['CONTAINER_IN', 'CONTAINER_OUT']) {
+      const { svc, recordVisit, resolveRep } = visitPath();
+      await svc.recordSaleVisit(withCredit(kind), { saleLat: null, saleLng: null });
+      expect(recordVisit).not.toHaveBeenCalled();
+      expect(resolveRep).not.toHaveBeenCalled(); // returns before it even looks
+    }
+  });
+
+  it('still records the visit for a SALE — the control', async () => {
+    const { svc, recordVisit } = visitPath();
+    await svc.recordSaleVisit(withCredit('SALE'), { saleLat: null, saleLng: null });
+    expect(recordVisit).toHaveBeenCalledTimes(1);
+  });
+});

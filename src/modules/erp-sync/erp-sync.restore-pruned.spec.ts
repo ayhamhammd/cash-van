@@ -46,6 +46,14 @@ function matchingItem(sku: string, deletedAt: Date | null) {
     isTobaccoProduct: false,
     tobaccoTaxProfileId: null as string | null,
     consumerPriceFils: null as number | null,
+    // Returnable packaging joins itemFingerprint, so these have to carry what
+    // the sweep computes for an ordinary product — which is also what the
+    // migration defaults every existing row to. Omit them and the fingerprint
+    // diffs on every sweep, which would read here as a failure of the
+    // skip-write and in production as the UPDATE storm it is meant to prevent.
+    isReturnableContainer: false,
+    containerItemNumber: null as string | null,
+    containersPerBaseUnit: 1,
     deletedAt,
   };
 }

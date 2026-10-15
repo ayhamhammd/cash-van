@@ -15,8 +15,9 @@ export class ContainerBalanceQueryDto {
 
   @ApiPropertyOptional({
     description:
-      'Restrict to the containers held by this salesman’s customers. A salesman ' +
-      'calling this endpoint is pinned to their own code regardless of what they send.',
+      'Show only the balances this salesman last moved. A filter, not a ' +
+      'capability: who may see which customers is decided from the token’s rep ' +
+      'scope, so this can narrow a caller’s own view but never widen it.',
   })
   @IsOptional()
   @IsString()
