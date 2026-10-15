@@ -79,6 +79,25 @@ export class SyncController {
     return this.sync.ingestCollection(dto, user);
   }
 
+  @Get('vouchers/:voucherNumber/jofotara')
+  @ApiOperation({
+    summary: 'Ask again for a sale’s JoFotara QR',
+    description:
+      'For the handset to call while it is still holding the receipt, when the ' +
+      'QR was not yet issued at the moment the voucher was saved. Asks the ERP ' +
+      'about this one invoice directly, so it answers at once rather than ' +
+      'waiting for the background poll to come round. ' +
+      '`{ voucherNumber, jofotaraQrCode, jofotaraStatus }`, with a null QR ' +
+      'meaning it still is not issued — print without it.',
+  })
+  @ApiOkResponse({ description: '{ voucherNumber, jofotaraQrCode, jofotaraStatus }' })
+  jofotaraQr(
+    @Param('voucherNumber') voucherNumber: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.sync.jofotaraQrFor(voucherNumber, user);
+  }
+
   @Get('status')
   @ApiOperation({
     summary: 'Has the server got these documents?',

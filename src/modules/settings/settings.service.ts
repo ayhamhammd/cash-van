@@ -206,6 +206,27 @@ export class SettingsService {
     return row?.containersEnabled === true;
   }
 
+  /**
+   * Does the ERP file invoices with JoFotara by itself?
+   *
+   * Mirrored from the ERP's own switch (GET /organization). Three answers, and
+   * the third is why this returns a nullable:
+   *
+   *   true  → an invoice will get a QR, so waiting for one is worthwhile
+   *   false → the ERP never files it, so NO sale will ever have a QR
+   *   null  → not known (never pulled, or an ERP too old to say)
+   *
+   * Null is treated as true by callers, deliberately: a missing QR on an invoice
+   * that WAS filed is worse than a receipt that waited a moment for nothing.
+   */
+  async jofotaraAutoSubmit(): Promise<boolean | null> {
+    const row = await this.repo.findOne({
+      where: { id: 1 },
+      select: { id: true, jofotaraAutoSubmit: true },
+    });
+    return row?.jofotaraAutoSubmit ?? null;
+  }
+
   /** Program feature: route damaged/expired returns to quarantine, not sellable van stock. */
   async damagedReturnsEnabled(): Promise<boolean> {
     const row = await this.repo.findOne({
