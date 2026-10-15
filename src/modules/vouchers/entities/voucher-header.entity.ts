@@ -138,9 +138,14 @@ export class VoucherHeader extends BaseEntity {
   taxExemptionAppliedAt?: Date | null;
 
   // ── JoFotara e-invoice ────────────────────────────────────────────────────
-  // The government QR string + submission status, mirrored from the ERP invoice
-  // by the outbox reconciler once the document is submitted and validated. Null
-  // until then (the print layer shows "pending"). See VoucherJofotaraQr migration.
+  // The government QR string + submission status, mirrored from the ERP invoice.
+  // Three ways in, in the order they are tried, because a rep is holding the
+  // receipt: the reply to the ERP push often names the QR outright; else the
+  // sync intake asks the ERP about this invoice directly the moment the sale is
+  // saved; else `reconcileJofotaraQr` mirrors it on a later tick. Null until one
+  // of them lands (the print layer shows "pending"), which is a normal state —
+  // the ERP files with the government asynchronously. See the VoucherJofotaraQr
+  // migration and docs/SPEC-jofotara-qr-on-print.md.
   @Column({ name: 'jofotara_qr_code', type: 'text', nullable: true })
   jofotaraQrCode?: string | null;
 
