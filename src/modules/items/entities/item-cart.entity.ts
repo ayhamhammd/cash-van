@@ -95,6 +95,40 @@ export class ItemCart extends BaseEntity {
   @Column({ name: 'is_tobacco_product', type: 'boolean', default: false })
   isTobaccoProduct!: boolean;
 
+  // ── Returnable packaging (mirrored from the ERP; see migration 0181) ──────
+  // An empty container is an item in its own right and is NEVER SOLD — the
+  // customer is handed a tub of halloumi, not a bucket. So an ordinary item
+  // points at the container it ships in, containers going out are DERIVED from
+  // sale lines, and only the movement of empties is a document. See
+  // docs/PLAN-returnable-containers.md.
+
+  /** This item IS an empty container. Zero price; only container documents may name it. */
+  @Column({ name: 'is_returnable_container', type: 'boolean', default: false })
+  isReturnableContainer!: boolean;
+
+  /**
+   * The container this item ships in, by `item_number` — null for everything
+   * that does not ship in one.
+   *
+   * An item_number rather than an id because erp-sync has already resolved the
+   * ERP's container SKU through `erp_id_map`, and a voucher line names items
+   * this way. Nothing else in the schema would let a line reference it.
+   */
+  @Column({ name: 'container_item_number', type: 'text', nullable: true })
+  containerItemNumber?: string | null;
+
+  /**
+   * Containers per BASE PIECE, not per line.
+   *
+   * A 6 kg tub carries one bucket; a carton of four tubs carries four. The
+   * outstanding-balance derivation multiplies BASE PIECES
+   * (`item_qty × unit_base_qty`) by this, so a line entered in cartons counts
+   * four containers and not one — the single most likely place for this feature
+   * to under-count.
+   */
+  @Column({ name: 'containers_per_base_unit', type: 'integer', default: 1 })
+  containersPerBaseUnit!: number;
+
   /** FK to tobacco_tax_profiles (no DB constraint — profile may be deactivated). */
   @Column({ name: 'tobacco_tax_profile_id', type: 'uuid', nullable: true })
   tobaccoTaxProfileId?: string | null;

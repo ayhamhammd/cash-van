@@ -47,6 +47,9 @@ export class UsersService {
       canCreateSale: dto.canCreateSale ?? false,
       canCreateReturn: dto.canCreateReturn ?? false,
       canMakeCollection: dto.canMakeCollection ?? false,
+      // Opt-in: a permission that gives something away is never granted by
+      // omission. See user.entity.ts canHandleContainers.
+      canHandleContainers: dto.canHandleContainers ?? false,
       canEditVoucher: dto.canEditVoucher ?? false,
       canAddCustomer: dto.canAddCustomer ?? false,
       canCreateCustomerDirect: dto.canCreateCustomerDirect ?? false,

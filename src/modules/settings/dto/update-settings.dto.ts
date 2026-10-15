@@ -120,6 +120,18 @@ export class UpdateAppSettingsDto {
   damagedReturnsEnabled?: boolean;
 
   @ApiPropertyOptional({
+    example: false,
+    description:
+      'Program feature: returnable containers — track the empty bucket, crate ' +
+      'or basket a product ships in, as van stock and as a per-customer ' +
+      'obligation. OFF ⇒ the container actions and reports do not appear and ' +
+      'no container document may be posted.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  containersEnabled?: boolean;
+
+  @ApiPropertyOptional({
     example: true,
     description: 'Program feature: salesman target figures and progress include tax (OFF ⇒ before tax).',
   })

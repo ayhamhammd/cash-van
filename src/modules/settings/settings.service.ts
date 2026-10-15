@@ -44,6 +44,8 @@ export interface AppSettingsView {
   tobaccoTaxEnabled: boolean;
   damagedReturnsEnabled: boolean;
   damagedWarehouseCode: string | null;
+  /** Returnable containers — the office switch the dashboard reads. */
+  containersEnabled: boolean;
   targetsIncludeTax: boolean;
   targetsSalesIncludeCash: boolean;
   accounting: {
@@ -189,6 +191,21 @@ export class SettingsService {
     return row?.salesmanActivationEnabled === true;
   }
 
+  /**
+   * Program feature: track the empty bucket/crate a product ships in.
+   *
+   * Read on every container document, so a company that has not switched the
+   * feature on cannot accumulate packaging movements through an installed APK
+   * that still offers the action.
+   */
+  async containersEnabled(): Promise<boolean> {
+    const row = await this.repo.findOne({
+      where: { id: 1 },
+      select: { id: true, containersEnabled: true },
+    });
+    return row?.containersEnabled === true;
+  }
+
   /** Program feature: route damaged/expired returns to quarantine, not sellable van stock. */
   async damagedReturnsEnabled(): Promise<boolean> {
     const row = await this.repo.findOne({
@@ -325,6 +342,7 @@ export class SettingsService {
     timezone: string;
     locale: string;
     damagedReturnsEnabled: boolean;
+    containersEnabled: boolean;
     jofotaraAutoSubmit: boolean | null;
   }> {
     const row = await this.requireRow();
@@ -341,6 +359,9 @@ export class SettingsService {
       locale: row.locale,
       // Lets the app limit return reasons to damaged/expired when the feature is on.
       damagedReturnsEnabled: row.damagedReturnsEnabled,
+      // Half the container gate. Cached on the handset so the actions stay
+      // hidden offline too; the rep's own permission is the other half.
+      containersEnabled: row.containersEnabled,
       // Whether a sale will get a JoFotara QR at all; null = not known, so the app waits.
       jofotaraAutoSubmit: row.jofotaraAutoSubmit ?? null,
     };
@@ -440,6 +461,7 @@ export class SettingsService {
       tobaccoTaxEnabled: row.tobaccoTaxEnabled,
       damagedReturnsEnabled: row.damagedReturnsEnabled,
       damagedWarehouseCode: row.damagedWarehouseCode ?? null,
+      containersEnabled: row.containersEnabled,
       targetsIncludeTax: row.targetsIncludeTax,
       targetsSalesIncludeCash: row.targetsSalesIncludeCash,
       accounting: {

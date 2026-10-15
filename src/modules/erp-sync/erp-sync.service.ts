@@ -170,6 +170,15 @@ interface ErpSku {
   isTobaccoProduct?: boolean;
   tobaccoTaxProfileId?: string | null; // ERP profile id
   consumerPrice?: number | string | null; // JOD major
+  // ── Returnable packaging (product-level; see ERP migration 0181) ───────────
+  /** This item IS an empty container (bucket, crate, basket). */
+  isReturnableContainer?: boolean;
+  /** The container this item ships in — the container product's BASE sku id. */
+  containerSkuId?: string | null;
+  /** Fallback when that sku is not in erp_id_map yet; matches ItemCart.itemNumber. */
+  containerSkuCode?: string | null;
+  /** Containers per base piece: 1 per 6 kg tub, 4 per carton of four. */
+  containersPerBaseUnit?: number | string | null;
 }
 
 /** A tobacco tax profile from the ERP `GET /api/v1/tobacco-tax-profiles`. */
@@ -4833,6 +4842,47 @@ export class ErpSyncService {
       item.consumerPriceFils = null;
     }
 
+    // Returnable packaging. The link arrives as the container's BASE sku and is
+    // resolved to a local item_number through erp_id_map — the same resolution
+    // every other sku reference goes through — because a voucher line can only
+    // name an item that way.
+    //
+    // An UNRESOLVED link is stored as null rather than guessed at. The container
+    // item may simply not have been synced yet (catalogue order is not
+    // guaranteed), and the next sync pass fixes it; inventing an item_number
+    // would attach every bucket to the wrong item until someone noticed.
+    item.isReturnableContainer = base.isReturnableContainer ?? false;
+    if (item.isReturnableContainer) {
+      // A container does not itself ship in a container — the DB CHECK enforces
+      // it, and the ERP refuses to save such a product in the first place.
+      item.containerItemNumber = null;
+      item.containersPerBaseUnit = 1;
+    } else if (base.containerSkuId || base.containerSkuCode) {
+      const mapped = base.containerSkuId
+        ? await this.idmap.findOne({
+            where: { entity: 'item', erpId: String(base.containerSkuId) },
+          })
+        : null;
+      const resolved =
+        mapped?.localId ??
+        (base.containerSkuCode
+          ? (await this.items.findOne({ where: { itemNumber: base.containerSkuCode } }))
+              ?.itemNumber ?? null
+          : null);
+      item.containerItemNumber = resolved;
+      const per = Number(base.containersPerBaseUnit ?? 1);
+      item.containersPerBaseUnit = Number.isFinite(per) && per > 0 ? Math.round(per) : 1;
+      if (!resolved) {
+        this.logger.debug(
+          `item ${itemNumber}: container sku ${base.containerSkuId ?? base.containerSkuCode} ` +
+            'not resolved yet — will link on a later pass',
+        );
+      }
+    } else {
+      item.containerItemNumber = null;
+      item.containersPerBaseUnit = 1;
+    }
+
     const itemChanged = isNew || wasDeleted || before !== this.itemFingerprint(item);
     // Skipping the write when nothing moved is not just about the signal: it
     // spares the database a full-catalogue UPDATE storm every five minutes.
@@ -4926,6 +4976,10 @@ export class ErpSyncService {
       i.sku, i.name, i.nameAr, i.nameEn, i.barcode, i.price, i.cost,
       i.isActive, i.imageUrl, i.isTobaccoProduct, i.tobaccoTaxProfileId,
       i.consumerPriceFils, i.categoryId,
+      // Required, not cosmetic: the caller skips the save when the fingerprint
+      // is unchanged, so a container link left out here would be computed on
+      // every sync and persisted on none of them.
+      i.isReturnableContainer, i.containerItemNumber, i.containersPerBaseUnit,
     ]);
   }
 

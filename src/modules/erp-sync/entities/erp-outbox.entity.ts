@@ -27,7 +27,12 @@ export type ErpOutboxKind =
   // Carries no stock movement — the movement is the TRANSFER voucher the van
   // raises on receipt, which queues separately as STOCK_TRANSFER.
   | 'VAN_STOCK_REQUEST'
-  | 'CUSTOMER_AREA';
+  | 'CUSTOMER_AREA'
+  // Returnable packaging moving between a van and a customer. Its own kind
+  // rather than STOCK_ADJUSTMENT because the ERP has to record WHO is holding
+  // the containers, and a stock adjustment carries no customer — which is the
+  // whole reason the ERP needs a ledger of its own for these.
+  | 'CONTAINER_MOVEMENT';
 export type ErpOutboxStatus = 'pending' | 'posted' | 'failed' | 'dead_letter';
 
 /** Outbound queue: van transactions to push to the ERP (idempotent by `ref`). */
