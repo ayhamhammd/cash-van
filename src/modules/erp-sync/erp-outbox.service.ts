@@ -75,6 +75,14 @@ const QR_RECONCILE_INTERVAL_MS = parseInt(process.env.ERP_QR_RECONCILE_MS ?? '30
  * queued behind the backlog. See reconcileJofotaraQr.
  */
 const QR_FRESH_WINDOW_MIN = 15;
+/**
+ * Gap between direct QR requests while a receipt is waiting (see awaitJofotaraQr).
+ *
+ * The ERP is itself waiting on the government, so asking it rapidly answers
+ * nothing it did not answer the first time; this is paced to fit two or three
+ * attempts into the few seconds the handset holds the receipt.
+ */
+const QR_DIRECT_RETRY_MS = 1200;
 // A 429 is transient (the ERP per-key window resets in 60s), so we reschedule past
 // the window WITHOUT consuming a dead-letter attempt — rate limiting must never
 // permanently fail a document.
@@ -458,34 +466,15 @@ export class ErpOutboxService {
       const candidates = [...fresh, ...backlog];
 
       for (const h of candidates) {
-        const invoiceNumber = h.invoice_number;
         try {
-          // The ERP matches `number` as a SUBSTRING (ilike %n%), so the page can
-          // hold other invoices whose number contains this one. Only an exact
-          // match is this invoice: the old fallback to the first row copied a
-          // DIFFERENT invoice's QR onto this voucher whenever the exact one was
-          // not on the page.
-          const res = await this.erp.list<{
-            invoiceNumber: string;
-            jofotaraStatus?: string | null;
-            jofotaraQrCode?: string | null;
-          }>('sales-invoices', { number: invoiceNumber, pageSize: 50 });
-          const row = res.data.find((r) => r.invoiceNumber === invoiceNumber);
-          if (!row) continue;
-
-          const patch: { jofotaraStatus?: string; jofotaraQrCode?: string } = {};
-          if (row.jofotaraStatus && row.jofotaraStatus !== h.jofotara_status) {
-            patch.jofotaraStatus = row.jofotaraStatus;
-          }
-          if (row.jofotaraQrCode && row.jofotaraQrCode !== h.jofotara_qr_code) {
-            patch.jofotaraQrCode = row.jofotaraQrCode;
-          }
-          if (Object.keys(patch).length > 0) {
-            await this.headers.update({ id: h.id }, patch);
-          }
+          await this.askErpForQr(h.voucher_number, h.invoice_number, {
+            id: h.id,
+            status: h.jofotara_status,
+            qrCode: h.jofotara_qr_code,
+          });
         } catch (e) {
           this.logger.warn(
-            `JoFotara QR reconcile failed for voucher ${h.voucher_number} (invoice ${invoiceNumber}): ${
+            `JoFotara QR reconcile failed for voucher ${h.voucher_number} (invoice ${h.invoice_number}): ${
               e instanceof Error ? e.message : String(e)
             }`,
           );
@@ -493,6 +482,134 @@ export class ErpOutboxService {
       }
     } finally {
       this.reconcilingQr = false;
+    }
+  }
+
+  /**
+   * Ask the ERP for ONE invoice's JoFotara state and mirror it onto the voucher.
+   *
+   * Shared by the background poll and the direct request the sync intake makes
+   * the moment a sale is saved, so the two cannot disagree about how an invoice
+   * is matched — and that matching is the whole subtlety here. The ERP matches
+   * `number` as a SUBSTRING (ilike %n%), so the page can hold other invoices
+   * whose number merely CONTAINS this one. Only an exact match is this invoice:
+   * an earlier fallback to the first row of the page copied a different
+   * invoice's QR onto the voucher whenever the exact one was not on it.
+   *
+   * Returns what the ERP said, or null when it has nothing for this invoice yet.
+   */
+  private async askErpForQr(
+    voucherNumber: string,
+    invoiceNumber: string,
+    known: { id?: string; status: string | null; qrCode: string | null },
+  ): Promise<{ qrCode: string | null; status: string | null } | null> {
+    const res = await this.erp.list<{
+      invoiceNumber: string;
+      jofotaraStatus?: string | null;
+      jofotaraQrCode?: string | null;
+    }>('sales-invoices', { number: invoiceNumber, pageSize: 50 });
+    const row = res.data.find((r) => r.invoiceNumber === invoiceNumber);
+    if (!row) return null;
+
+    const patch: { jofotaraStatus?: string; jofotaraQrCode?: string } = {};
+    if (row.jofotaraStatus && row.jofotaraStatus !== known.status) {
+      patch.jofotaraStatus = row.jofotaraStatus;
+    }
+    if (row.jofotaraQrCode && row.jofotaraQrCode !== known.qrCode) {
+      patch.jofotaraQrCode = row.jofotaraQrCode;
+    }
+    if (Object.keys(patch).length > 0) {
+      await this.headers.update(known.id ? { id: known.id } : { voucherNumber }, patch);
+    }
+    return {
+      qrCode: row.jofotaraQrCode ?? known.qrCode,
+      status: row.jofotaraStatus ?? known.status,
+    };
+  }
+
+  /**
+   * Get a just-saved sale's JoFotara QR now, for the receipt about to print.
+   *
+   * Called straight after the sync intake saves the voucher. It does, in order,
+   * exactly what the rep is waiting on and nothing else:
+   *
+   *   1. push the sale to the ERP, if that has not already happened — the QR
+   *      cannot exist before the ERP has the invoice;
+   *   2. read what the push reply left on the voucher (often the QR itself);
+   *   3. failing that, ask the ERP about THIS invoice directly, and keep asking
+   *      until `deadlineMs` runs out.
+   *
+   * Step 3 is the point of the method. The background poll gets to a given
+   * voucher once per rotation, which is minutes on a busy database; asking about
+   * one invoice by number is one request and answers immediately.
+   *
+   * Bounded, and gives up quietly. A QR that has not been issued yet is a normal
+   * answer, not a failure: the ERP files with the government asynchronously, so
+   * past the deadline the right thing is to let the receipt print without one
+   * and leave the poll to fill it in. The sale is already saved either way —
+   * nothing here can affect whether it exists.
+   */
+  async awaitJofotaraQr(
+    voucherNumber: string,
+    deadlineMs: number,
+  ): Promise<{ qrCode: string | null; status: string | null }> {
+    const until = Date.now() + Math.max(0, deadlineMs);
+    const stored = async () => {
+      const row = await this.headers.findOne({
+        where: { voucherNumber },
+        select: { voucherNumber: true, jofotaraQrCode: true, jofotaraStatus: true },
+      });
+      return {
+        qrCode: row?.jofotaraQrCode ?? null,
+        status: row?.jofotaraStatus ?? null,
+      };
+    };
+
+    try {
+      // The event listener normally has this in flight already; awaiting it here
+      // makes the order deterministic for the request that is waiting on it.
+      await this.pushPostedVoucher({ voucherNumber });
+
+      let have = await stored();
+      if (have.qrCode) return have;
+
+      let cfg: Awaited<ReturnType<SettingsService['getErpConfig']>> | null = null;
+      try {
+        cfg = await this.settings.getErpConfig();
+      } catch {
+        return have;
+      }
+      if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return have;
+
+      for (let attempt = 0; Date.now() < until; attempt++) {
+        // Re-read the mapping each time: on the first pass around, the push may
+        // only just have created the invoice this needs the number of.
+        const map = await this.idmap.findOne({
+          where: { entity: 'voucher', erpId: voucherNumber },
+        });
+        const invoiceNumber = map?.erpCode;
+        if (invoiceNumber) {
+          const said = await this.askErpForQr(voucherNumber, invoiceNumber, {
+            status: have.status,
+            qrCode: have.qrCode,
+          });
+          if (said?.qrCode) return said;
+          if (said?.status) have = { ...have, status: said.status };
+        }
+        // Spaced out, not spun: the ERP is waiting on the government, and asking
+        // it ten times a second answers nothing it did not answer the first time.
+        const left = until - Date.now();
+        if (left <= 0) break;
+        await new Promise((r) => setTimeout(r, Math.min(QR_DIRECT_RETRY_MS, left)));
+      }
+      return have;
+    } catch (e) {
+      this.logger.warn(
+        `direct JoFotara QR request for voucher ${voucherNumber} failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      return stored().catch(() => ({ qrCode: null, status: null }));
     }
   }
 

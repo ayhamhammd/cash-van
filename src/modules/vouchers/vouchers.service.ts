@@ -1621,6 +1621,39 @@ export class VouchersService implements OnModuleInit {
     return this.headersRepo.save(header);
   }
 
+  /**
+   * Just enough of a voucher to answer "whose sale is this, and has its QR
+   * arrived?" — for the handset asking again while it holds the receipt.
+   *
+   * Narrow on purpose: `findOneOrThrow` keys off the uuid and pulls the lines
+   * and payments with it, which is a lot of rows to move for two columns on a
+   * request a rep is waiting on.
+   */
+  async jofotaraSnapshot(voucherNumber: string): Promise<{
+    userCode: string;
+    transKind: string;
+    jofotaraQrCode: string | null;
+    jofotaraStatus: string | null;
+  } | null> {
+    const row = await this.headersRepo.findOne({
+      where: { voucherNumber },
+      select: {
+        voucherNumber: true,
+        userCode: true,
+        transKind: true,
+        jofotaraQrCode: true,
+        jofotaraStatus: true,
+      },
+    });
+    if (!row) return null;
+    return {
+      userCode: row.userCode,
+      transKind: row.transKind,
+      jofotaraQrCode: row.jofotaraQrCode ?? null,
+      jofotaraStatus: row.jofotaraStatus ?? null,
+    };
+  }
+
   async findOneOrThrow(id: string): Promise<VoucherHeader> {
     const header = await this.headersRepo.findOne({
       where: { id },

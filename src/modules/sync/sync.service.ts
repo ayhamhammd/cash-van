@@ -48,6 +48,20 @@ export interface IntakeResult {
   error?: string | null;
   /** True only while the server still intends to try again. */
   retryable: boolean;
+  /**
+   * The sale's JoFotara QR, requested directly the moment the voucher was
+   * saved, so the receipt about to print can carry it.
+   *
+   * Null is a normal answer, not an error: the ERP files with the government
+   * asynchronously, so a QR may simply not have been issued yet. The handset
+   * should print without it rather than hold the rep up — `jofotaraStatus` says
+   * where it got to, and the voucher carries the QR once it arrives.
+   *
+   * Absent entirely for anything that is not a posted SALE.
+   */
+  jofotaraQrCode?: string | null;
+  /** `SUBMITTED`, `PENDING`, `REJECTED`… as the ERP reports it. */
+  jofotaraStatus?: string | null;
 }
 
 /**
@@ -60,6 +74,16 @@ export type IntakeVerdict = 'accepted' | 'posted' | 'rejected';
 
 const NO_STORE = 'NA';
 const MOVES_VAN_STOCK = new Set(['SALE', 'RETURN']);
+/**
+ * How long the intake may hold a sale's reply waiting for its JoFotara QR.
+ *
+ * Deliberately UNDER the few seconds the van app itself waits before printing,
+ * so the server answering is never what makes the rep wait longer; and bounded
+ * because past it the honest answer is "not issued yet, print without it". Set
+ * to 0 to switch the wait off and go back to the QR arriving on the voucher
+ * some seconds later. Validated in validation.schema.ts.
+ */
+const QR_WAIT_MS = parseInt(process.env.SYNC_QR_WAIT_MS ?? '4000', 10);
 
 @Injectable()
 export class SyncService {
@@ -110,8 +134,9 @@ export class SyncService {
     // We lost the race, or this is an ordinary replay. Either way another
     // request owns this document; answer from its row rather than making a
     // second one. This is the NORMAL path for a handset retrying a request that
-    // timed out after the server had already accepted it.
-    if (!claim.won) return this.resultFor(claim.row);
+    // timed out after the server had already accepted it — and that handset is
+    // still standing there waiting to print, so it gets the QR as well.
+    if (!claim.won) return this.withJofotaraQr(this.resultFor(claim.row), voucher.transKind);
 
     // Resolve the store the number is keyed off: a line's store, else the rep's
     // van store. Inject it onto storeless lines so stock moves from the van.
@@ -132,7 +157,93 @@ export class SyncService {
     claim.row.assignedNumber = assignedNumber;
 
     await this.promoteVoucher(claim.row, store);
-    return this.resultFor(await this.inbox.findOneByOrFail({ id: claim.row.id }));
+    return this.withJofotaraQr(
+      this.resultFor(await this.inbox.findOneByOrFail({ id: claim.row.id })),
+      voucher.transKind,
+    );
+  }
+
+  /**
+   * Put the sale's JoFotara QR on the intake reply, asking the ERP for it now.
+   *
+   * The van app holds a receipt for a few seconds waiting for this QR. Before,
+   * nothing requested it: the sale was queued, pushed on a 30-second timer, and
+   * the QR mirrored across by a rotating poll — so it reached the handset
+   * minutes later and every receipt printed blank. Asking for it here, by
+   * invoice number, is one request and answers at once.
+   *
+   * Skipped, rather than waited out, whenever no QR can come of it:
+   *
+   *   - the document is not a posted SALE (nothing else is filed with JoFotara);
+   *   - the ERP's auto-submit switch is known to be OFF, so the invoice is never
+   *     filed at all and waiting would delay every receipt for nothing. NULL
+   *     means "not known" and still waits — see SettingsService;
+   *   - the budget is configured to zero.
+   *
+   * Never throws and never changes the verdict. The sale is saved; the QR is a
+   * convenience on top, and a failure to fetch one must not turn a posted sale
+   * into anything else.
+   */
+  /**
+   * Answer "is the QR there yet?" for one sale, for the handset still holding
+   * the receipt after the intake reply came back without one.
+   *
+   * Asks the ERP about this invoice directly, which is one request and answers
+   * at once — the alternative is the rotating background poll, which on a busy
+   * database reaches a given voucher minutes later. A null QR is a normal
+   * answer: it has not been issued, so print without it.
+   *
+   * Scoped like posting one: a rep may ask about their OWN sale, and about
+   * someone else's only with permission to act on their behalf
+   * (`resolveActingRep` is the same rule the intake applies, so the two cannot
+   * drift apart).
+   */
+  async jofotaraQrFor(
+    voucherNumber: string,
+    actor: AuthenticatedUser,
+  ): Promise<{
+    voucherNumber: string;
+    jofotaraQrCode: string | null;
+    jofotaraStatus: string | null;
+  }> {
+    const snap = await this.vouchers.jofotaraSnapshot(voucherNumber.trim());
+    if (!snap) throw new NotFoundException(`Voucher ${voucherNumber} not found`);
+    await this.resolveActingRep(snap.userCode, null, actor);
+
+    // Already here, or never coming: either way, no ERP call.
+    if (snap.jofotaraQrCode || snap.transKind !== 'SALE') {
+      return {
+        voucherNumber,
+        jofotaraQrCode: snap.jofotaraQrCode,
+        jofotaraStatus: snap.jofotaraStatus,
+      };
+    }
+    if ((await this.settings.jofotaraAutoSubmit()) === false) {
+      return { voucherNumber, jofotaraQrCode: null, jofotaraStatus: snap.jofotaraStatus };
+    }
+
+    const qr = await this.erpOutbox.awaitJofotaraQr(voucherNumber, QR_WAIT_MS);
+    return { voucherNumber, jofotaraQrCode: qr.qrCode, jofotaraStatus: qr.status };
+  }
+
+  private async withJofotaraQr(
+    result: IntakeResult,
+    transKind?: string,
+  ): Promise<IntakeResult> {
+    if (result.status !== 'posted' || transKind !== 'SALE') return result;
+    if (QR_WAIT_MS <= 0 || !result.voucherNumber) return result;
+    try {
+      if ((await this.settings.jofotaraAutoSubmit()) === false) return result;
+      const qr = await this.erpOutbox.awaitJofotaraQr(result.voucherNumber, QR_WAIT_MS);
+      return { ...result, jofotaraQrCode: qr.qrCode, jofotaraStatus: qr.status };
+    } catch (e) {
+      this.logger.warn(
+        `could not get a JoFotara QR for ${result.voucherNumber} in time: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      return result;
+    }
   }
 
   async ingestCollection(

@@ -111,6 +111,21 @@ export class SyncVoucherResultDto {
   retryable!: boolean;
 
   @ApiPropertyOptional() error?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'The sale’s JoFotara QR, requested from the ERP the moment the voucher ' +
+      'was saved — print this on the receipt. Null means it has not been issued ' +
+      'yet (the ERP files asynchronously): print without it rather than holding ' +
+      'the rep up, and read it from the voucher later. Absent for anything that ' +
+      'is not a posted SALE.',
+  })
+  jofotaraQrCode?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Where the filing got to — SUBMITTED, PENDING, REJECTED… as the ERP reports it.',
+  })
+  jofotaraStatus?: string | null;
 }
 
 /** Query for `GET /sync/status` — the refs the handset still holds locally. */
