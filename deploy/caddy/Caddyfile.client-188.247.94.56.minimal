@@ -1,0 +1,14 @@
+# Minimal — a like-for-like copy of what 77.245.5.113 actually runs.
+#
+# This is NOT the full config in Caddyfile.client-188.247.94.56. It reproduces
+# the live arrangement exactly: Caddy fronts the ERP over HTTPS and nothing
+# else. VanFlow keeps answering on plain HTTP through cashvan-proxy on :3001,
+# which is how the old server was set up.
+#
+# Use this to get the new server running identically, with no new moving parts.
+# Switch to the full file when the router forwards 80/443 and you are ready to
+# put the dashboard behind HTTPS too — at which point admin passwords stop
+# crossing the network in clear text.
+188.247.94.56.sslip.io {
+	reverse_proxy erp-app:3000
+}
