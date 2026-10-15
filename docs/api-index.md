@@ -39,6 +39,16 @@ Compact list of every endpoint for AI context. Full spec: [openapi.yaml](openapi
 - `POST /api/v1/collections/batch-deposit` — Batch deposit
 - `GET /api/v1/collections/summary` — Daily collection summary
 
+## containers
+
+Returnable packaging (empty buckets, crates). Read-only: containers MOVE by
+posting a `CONTAINER_IN` / `CONTAINER_OUT` voucher. Rep-scoped — a salesman sees
+their own customers. See [PLAN-returnable-containers.md](PLAN-returnable-containers.md).
+
+- `GET /api/v1/containers/balances` — Outstanding containers per (customer, container), with aging
+- `GET /api/v1/containers/totals` — Outstanding per kind of container, and with how many customers
+- `GET /api/v1/containers/customers/{customerNumber}` — What one customer is holding
+
 ## credit-notes
 
 - `GET /api/v1/credit-notes` — List credit notes
@@ -205,6 +215,22 @@ Compact list of every endpoint for AI context. Full spec: [openapi.yaml](openapi
 - `GET /api/v1/settings` — Get app settings
 - `PATCH /api/v1/settings` — Update app settings
 - `PATCH /api/v1/settings/jofotara` — Set JoFotara credentials
+
+## sync
+
+What the handset posts to. The verdict is in the BODY (`status`:
+`accepted` | `posted` | `rejected`), not the HTTP code — the reply always 202s,
+because "the server has taken responsibility" and "the document posted" are
+different facts. Pass `clientRef` for idempotent retries.
+
+- `POST /api/v1/sync/vouchers` — Stage & post a voucher. For a posted SALE the reply also carries `jofotaraQrCode` + `jofotaraStatus`, requested the moment the voucher was saved, so the receipt can print with the QR. A null QR means "not issued yet" — print without it.
+- `POST /api/v1/sync/collections` — Stage & post a cash/cheque collection
+- `GET /api/v1/sync/vouchers/{voucherNumber}/jofotara` — Ask again for a sale's QR, while the handset still holds the receipt. Answers at once rather than waiting for the background poll. Own sale only, unless permitted to act on another rep's behalf
+- `GET /api/v1/sync/status` — Which of these clientRefs the server has (the handset outbox reconciliation). A ref MISSING from the reply never arrived and must be re-posted
+- `GET /api/v1/sync/inbox` — Staged documents (admin/manager)
+- `PATCH /api/v1/sync/inbox/{id}` — Edit a staged document (admin/manager)
+- `POST /api/v1/sync/inbox/{id}/retry` — Retry promotion (admin/manager)
+- `DELETE /api/v1/sync/inbox/{id}` — Discard a staged document (admin/manager)
 
 ## tax
 
