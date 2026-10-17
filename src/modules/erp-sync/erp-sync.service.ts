@@ -1321,6 +1321,11 @@ export class ErpSyncService {
       .andWhere(
         "NOT EXISTS (SELECT 1 FROM erp_outbox o WHERE o.ref = c.id::text AND o.kind = 'PAYMENT')",
       )
+      // A receipt mirrored IN from the ERP is confirmed too. Offering it for
+      // export would hand the ERP its own receipt back as a new one.
+      .andWhere(
+        "NOT EXISTS (SELECT 1 FROM erp_id_map m WHERE m.entity = 'receipt' AND m.local_id = c.id::text)",
+      )
       .orderBy('c.collectedAt', 'DESC')
       .take(500)
       .getMany();

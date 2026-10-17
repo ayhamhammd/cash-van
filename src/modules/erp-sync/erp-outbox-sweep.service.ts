@@ -47,8 +47,9 @@ export class ErpOutboxSweepService {
 
     this.sweeping = true;
     try {
+      const collections = await this.queueUnqueuedCollections();
       const missing = await this.findUnqueued();
-      if (missing.length === 0) return { found: 0, queued: 0 };
+      if (missing.length === 0) return { found: collections, queued: collections };
 
       // Loud on purpose. Silence here is the expected state, so a message means
       // something is creating posted vouchers outside the transactional path.
@@ -69,7 +70,7 @@ export class ErpOutboxSweepService {
         await this.outbox.enqueue(kind, m.voucher_number);
         queued++;
       }
-      return { found: missing.length, queued };
+      return { found: missing.length + collections, queued: queued + collections };
     } finally {
       this.sweeping = false;
     }
@@ -81,6 +82,40 @@ export class ErpOutboxSweepService {
    * `ERP-` numbers are excluded: those were mirrored IN from the ERP, and
    * pushing one back would hand the ERP its own invoice as a new one.
    */
+  /**
+   * Confirmed collections with no ERP outbox row — queued now.
+   *
+   * A collection reaches the outbox only through the `erp.collection.confirmed`
+   * event fired after it commits. It is not inside a voucher transaction, so
+   * nothing re-queued one whose event was lost — the ERP connection off at that
+   * moment, the process restarting in between — and a receipt the customer was
+   * handed simply never reached the ERP, visible only to someone who opened the
+   * manual-export list.
+   *
+   * Receipts mirrored IN from the ERP are confirmed too, and are excluded by
+   * their `receipt` id-map row: pushing one back would hand the ERP its own
+   * receipt as a new one and credit the customer twice.
+   */
+  private async queueUnqueuedCollections(): Promise<number> {
+    const rows: Array<{ id: string }> = await this.ds.query(
+      `SELECT c.id
+         FROM collections c
+        WHERE c.status = 'confirmed'
+          AND c.created_at < now() - ($1 || ' minutes')::interval
+          AND NOT EXISTS (SELECT 1 FROM erp_outbox o WHERE o.ref = c.id::text AND o.kind = 'PAYMENT')
+          AND NOT EXISTS (SELECT 1 FROM erp_id_map m WHERE m.entity = 'receipt' AND m.local_id = c.id::text)
+        ORDER BY c.created_at
+        LIMIT $2`,
+      [GRACE_MINUTES, LIMIT],
+    );
+    if (rows.length === 0) return 0;
+    this.logger.warn(
+      `${rows.length} confirmed collection(s) had no ERP outbox row — queueing them.`,
+    );
+    for (const r of rows) await this.outbox.enqueue('PAYMENT', r.id);
+    return rows.length;
+  }
+
   private async findUnqueued(): Promise<
     Array<{ voucher_number: string; trans_kind: string }>
   > {
