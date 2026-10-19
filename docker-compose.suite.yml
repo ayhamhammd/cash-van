@@ -150,6 +150,10 @@ services:
       # one product's secret leaking must not hand over the other.
       ERP_BASE_URL: http://erp-app:3000
       ERP_INTERNAL_SECRET: ${ERP_INTERNAL_SECRET:-local-suite-erp-secret}
+      # When to sweep for annual fees that have fallen due. Empty uses the
+      # nightly 2am default; set it to drive the sweep in a test without
+      # waiting for the small hours.
+      BILLING_CRON: ${BILLING_CRON:-}
       PLATFORM_ADMIN_EMAIL: ${PLATFORM_ADMIN_EMAIL:-admin@7software.local}
       PLATFORM_ADMIN_PASSWORD: ${PLATFORM_ADMIN_PASSWORD:-platform1234}
       CORS_ORIGINS: http://localhost:3400,http://localhost:3300
