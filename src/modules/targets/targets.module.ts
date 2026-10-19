@@ -1,15 +1,15 @@
 import { Module } from '@nestjs/common';
 import { UsersModule } from '../users/users.module';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { SalesTarget } from './entities/sales-target.entity';
 import { TargetsService } from './targets.service';
 import { TargetsController } from './targets.controller';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 /** Per-salesman monthly sales targets (on sale amount or qty) + actuals. */
 @Module({
   imports: [
-    UsersModule,TypeOrmModule.forFeature([SalesTarget])],
+    UsersModule,TenantOrmModule.forFeature([SalesTarget])],
   controllers: [TargetsController],
   providers: [TargetsService],
 })

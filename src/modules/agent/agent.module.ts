@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { AgentController } from './agent.controller';
 import { AgentService } from './agent.service';
@@ -16,6 +15,7 @@ import { AgentConversation } from './entities/agent-conversation.entity';
 import { AgentReport } from './entities/agent-report.entity';
 import { AiMessage } from './entities/ai-message.entity';
 import { AiProviderResolver } from './llm/ai-provider.resolver';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 /**
  * AI report agent: natural-language prompt → read-only SELECT → rendered report.
@@ -24,7 +24,7 @@ import { AiProviderResolver } from './llm/ai-provider.resolver';
  * the global StorageService for report bytes and the global SettingsService.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([AgentConversation, AgentReport, AiMessage])],
+  imports: [TenantOrmModule.forFeature([AgentConversation, AgentReport, AiMessage])],
   controllers: [AgentController],
   providers: [
     AiProviderResolver,

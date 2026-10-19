@@ -16,6 +16,7 @@ import { verifyActivationKey } from './activation-key';
 import { CreateRepDto } from './dto/create-rep.dto';
 import { UpdateRepDto } from './dto/update-rep.dto';
 import { ListRepsQuery } from './dto/list-reps.query';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 export interface RepKpis {
   todayRevenueFils: number;
@@ -35,8 +36,7 @@ export class RepsService {
   constructor(
     @InjectRepository(Rep)
     private readonly repo: Repository<Rep>,
-    @InjectDataSource()
-    private readonly dataSource: DataSource,
+    private readonly dataSource: TenantDataSource,
     private readonly erpSync: ErpSyncService,
     private readonly settings: SettingsService,
     private readonly users: UsersService,

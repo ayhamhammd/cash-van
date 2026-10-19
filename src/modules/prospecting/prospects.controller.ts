@@ -37,9 +37,12 @@ import {
   UpdateProspectDto,
 } from './dto/prospect.dto';
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('prospecting')
 @ApiBearerAuth()
 @Controller({ path: 'prospecting', version: '1' })
+@RequiresFeature('prospecting')
 export class ProspectsController {
   constructor(
     private readonly prospects: ProspectsService,

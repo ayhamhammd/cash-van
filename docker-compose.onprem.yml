@@ -1,0 +1,142 @@
+# A CUSTOMER'S OWN SERVER. No control plane anywhere.
+#
+# This is the deployment most of the existing customers actually run: cash-van
+# and the ERP on one machine at their site, reachable on a static IP, installed
+# before 7CRM existed and working with or without it. They have no licence key,
+# no company code, and nothing to phone home to.
+#
+# It has its own compose file because the difference is not a flag — it is the
+# ABSENCE of things:
+#
+#   · no CRM_BASE_URL          → licensing is off; every feature is on
+#   · no INTERNAL_PROVISION_SECRET → the provisioning endpoints are switched off,
+#                                    not merely unguarded
+#   · no ERP_INTERNAL_SECRET   → the ERP answers nothing service-to-service
+#   · the two products are introduced by HAND, on the settings screen
+#
+# Everything the control-plane work added has to be invisible here. The way to
+# know that is to run it, which is what scripts/e2e/onprem.mjs does.
+#
+#   docker compose -f docker-compose.onprem.yml up -d --build
+#   node scripts/e2e/onprem.mjs
+#
+# Ports are offset so this can run alongside the hosted suite.
+#
+#   cash-van API → http://localhost:3600
+#   ERP          → http://localhost:3700
+
+name: vanflow-onprem
+
+services:
+  db:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: cashvan
+      POSTGRES_PASSWORD: onprem_local_pw
+      POSTGRES_DB: cashvan
+    volumes:
+      - onprem_cashvan_pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U cashvan -d cashvan']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [onprem]
+
+  api:
+    build:
+      context: .
+      target: production
+    image: vanflow-suite/cashvan-api:local
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USERNAME: cashvan
+      DB_PASSWORD: onprem_local_pw
+      DB_NAME: cashvan
+      DB_SSL: 'false'
+      DB_APP_USERNAME: cashvan_app
+      DB_APP_PASSWORD: cashvan_app_local_pw
+      # One company on this machine, and no key to name it, so the request has
+      # to fall back to it. This is the whole reason the fallback exists.
+      TENANT_FALLBACK_ENABLED: 'true'
+      JWT_SECRET: onprem-jwt-secret-change-me
+      PHONE_HASH_SECRET: onprem-phone-hash-secret
+      # DELIBERATELY ABSENT — do not add these back:
+      #   CRM_BASE_URL              (licensing off)
+      #   INTERNAL_PROVISION_SECRET (provisioning endpoints off)
+      CORS_ORIGINS: '*'
+      JOBS_ENABLED: 'false'
+      JOFOTARA_MOCK: 'true'
+      SWAGGER_ENABLED: 'true'
+    command: ['npm', 'run', 'start:deploy']
+    ports: ['3600:3000']
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [onprem]
+    restart: unless-stopped
+
+  erp-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: manager
+      POSTGRES_DB: erp_database
+    volumes:
+      - onprem_erp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d erp_database']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [onprem]
+
+  erp-migrate:
+    build:
+      context: ../ERP
+      target: builder
+    image: vanflow-suite/erp-migrate:local
+    command: ['sh', '-c', 'npm run db:push:force && npm run db:rls']
+    environment:
+      DATABASE_URL: postgresql://postgres:manager@erp-db:5432/erp_database
+    depends_on:
+      erp-db:
+        condition: service_healthy
+    networks: [onprem]
+    restart: 'no'
+
+  erp:
+    build:
+      context: ../ERP
+      target: runner
+      args:
+        NEXT_PUBLIC_APP_URL: http://localhost:3700
+    image: vanflow-suite/erp-app:local
+    environment:
+      DATABASE_URL: postgresql://postgres:manager@erp-db:5432/erp_database
+      APP_DATABASE_URL: postgresql://erp_app:erp_app_local_pw@erp-db:5432/erp_database
+      SESSION_SECRET: onprem-erp-session-secret-32chars-min
+      NEXT_PUBLIC_APP_URL: http://localhost:3700
+      # DELIBERATELY ABSENT: CRM_BASE_URL, CRM_INTERNAL_SECRET,
+      # INTERNAL_PROVISION_SECRET. With no CRM the licence check allows
+      # everything, and the login screen shows no key field at all.
+    ports: ['3700:3000']
+    depends_on:
+      erp-db:
+        condition: service_healthy
+      erp-migrate:
+        condition: service_completed_successfully
+    networks: [onprem]
+    restart: unless-stopped
+
+volumes:
+  onprem_cashvan_pgdata:
+  onprem_erp_pgdata:
+
+networks:
+  onprem:
+    driver: bridge

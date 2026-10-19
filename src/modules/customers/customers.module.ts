@@ -1,5 +1,4 @@
 import { Module, OnApplicationBootstrap, Logger } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Customer } from './entities/customer.entity';
 import { CustomerAiProfile } from './entities/customer-ai-profile.entity';
@@ -17,10 +16,11 @@ import { CustomerProximityService } from './customer-proximity.service';
 import { CustomersController } from './customers.controller';
 import { JobsService } from '../../common/jobs/jobs.service';
 import { UsersModule } from '../users/users.module';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [UsersModule, forwardRef(() => ApprovalsModule), 
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       PendingCustomerPhoto,
       Customer,
       CustomerAiProfile,
@@ -31,7 +31,7 @@ import { UsersModule } from '../users/users.module';
   ],
   controllers: [CustomersController],
   providers: [CustomersService, CustomerProximityService],
-  exports: [CustomersService, CustomerProximityService, TypeOrmModule],
+  exports: [CustomersService, CustomerProximityService, TenantOrmModule],
 })
 export class CustomersModule implements OnApplicationBootstrap {
   private readonly logger = new Logger(CustomersModule.name);

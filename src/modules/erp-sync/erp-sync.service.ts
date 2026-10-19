@@ -1,3 +1,5 @@
+import { UserContextService } from '../../common/context/user-context.service';
+import { TenantScope } from '../../common/tenancy/tenant-scope.service';
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { OnEvent } from '@nestjs/event-emitter';
@@ -28,6 +30,7 @@ import { ErpOutbox } from './entities/erp-outbox.entity';
 import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
 import { ErpOutboxKind } from './entities/erp-outbox.entity';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 /** cash-van voucher kind → ERP outbox kind (per-kind outbound, same kind preserved). */
 // Read from process.env for the same reason as ERP_OUTBOX_DRAIN_MS: @Interval()
@@ -236,13 +239,18 @@ interface StockTarget {
 @Injectable()
 export class ErpSyncService {
   private readonly logger = new Logger(ErpSyncService.name);
-  private pulling = false;
+  /**
+   * Companies with a pull in flight. A single boolean would have one tenant's
+   * slow sync suppress every other tenant's.
+   */
+  private readonly pulling = new Set<string>();
   private webhookTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly erp: ErpHttpClient,
     private readonly settings: SettingsService,
-    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly tenants: TenantScope,
+    private readonly dataSource: TenantDataSource,
     @InjectRepository(ItemCart) private readonly items: Repository<ItemCart>,
     @InjectRepository(TobaccoTaxProfile) private readonly tobaccoProfiles: Repository<TobaccoTaxProfile>,
     @InjectRepository(Warehouse) private readonly whs: Repository<Warehouse>,
@@ -263,11 +271,17 @@ export class ErpSyncService {
     private readonly outbox: ErpOutboxService,
     @InjectRepository(ErpOutbox) private readonly outboxRepo: Repository<ErpOutbox>,
     private readonly events: EventEmitter2,
+    // Read only for the tenant id an event carries with it — see `detached`.
+    private readonly userCtx: UserContextService,
   ) {}
 
   /** Queue a posted cash-van voucher for push to the ERP, by kind. */
   @OnEvent('erp.voucher.posted')
   async onVoucherPosted(p: { voucherNumber: string; transKind: string }): Promise<void> {
+    return this.detached(`voucher ${p.voucherNumber}`, () => this.mirrorVoucher(p));
+  }
+
+  private async mirrorVoucher(p: { voucherNumber: string; transKind: string }): Promise<void> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
     if (!cfg?.enabled) return;
     // Always auto-push (owner decision). `directExport` used to park the voucher
@@ -369,6 +383,17 @@ export class ErpSyncService {
     taxNumber?: string | null;
     creditLimit?: number | null;
   }): Promise<void> {
+    return this.detached(`customer ${p.code}`, () => this.mirrorNewCustomer(p));
+  }
+
+  private mirrorNewCustomer(p: {
+    code: string;
+    name: string;
+    phone?: string | null;
+    email?: string | null;
+    taxNumber?: string | null;
+    creditLimit?: number | null;
+  }): Promise<void> {
     return this.pushCustomer(p.code, p.name, {
       phone: p.phone ?? undefined,
       email: p.email ?? undefined,
@@ -379,7 +404,18 @@ export class ErpSyncService {
 
   /** A cash-van customer EDIT → PATCH the mapped ERP customer (or create if unmapped). */
   @OnEvent('erp.customer.updated')
-  async onCustomerUpdated(p: {
+  onCustomerUpdated(p: {
+    code: string;
+    name: string;
+    phone?: string | null;
+    email?: string | null;
+    taxNumber?: string | null;
+    creditLimit?: number | null;
+  }): Promise<void> {
+    return this.detached(`customer ${p.code}`, () => this.mirrorCustomerEdit(p));
+  }
+
+  private async mirrorCustomerEdit(p: {
     code: string;
     name: string;
     phone?: string | null;
@@ -413,7 +449,11 @@ export class ErpSyncService {
   }
 
   @OnEvent('erp.item.created')
-  onItemCreated(p: {
+  onItemCreated(p: Parameters<ErpSyncService['mirrorNewItem']>[0]): Promise<void> {
+    return this.detached(`item ${p.itemNumber}`, () => this.mirrorNewItem(p));
+  }
+
+  private mirrorNewItem(p: {
     itemNumber: string;
     name: string;
     priceFils: number;
@@ -429,7 +469,13 @@ export class ErpSyncService {
 
   /** A confirmed collection → an ERP customer receipt (best-effort, ERP off = no-op). */
   @OnEvent('erp.collection.confirmed')
-  async onCollectionConfirmed(p: { collectionId: string }): Promise<void> {
+  onCollectionConfirmed(p: { collectionId: string }): Promise<void> {
+    return this.detached(`collection ${p.collectionId}`, () =>
+      this.mirrorCollection(p),
+    );
+  }
+
+  private async mirrorCollection(p: { collectionId: string }): Promise<void> {
     const cfg = await this.settings.getErpConfig().catch(() => null);
     if (!cfg?.enabled) return;
     // Always auto-push — see onVoucherPosted.
@@ -596,7 +642,11 @@ export class ErpSyncService {
 
   /** Mirror cash-van company name + tax mode into the ERP org settings. */
   @OnEvent('erp.settings.updated')
-  async onSettingsUpdated(p: {
+  onSettingsUpdated(p: Parameters<ErpSyncService['mirrorSettings']>[0]): Promise<void> {
+    return this.detached('company details', () => this.mirrorSettings(p));
+  }
+
+  private async mirrorSettings(p: {
     name: string;
     salesTaxMode: string;
     logoUrl?: string | null;
@@ -624,7 +674,11 @@ export class ErpSyncService {
 
   /** On ERP (re)connect, pull company info from the ERP organization right away. */
   @OnEvent('erp.connected')
-  async onErpConnected(): Promise<void> {
+  onErpConnected(): Promise<void> {
+    return this.detached('first sync after connecting', () => this.onFirstConnect());
+  }
+
+  private async onFirstConnect(): Promise<void> {
     try {
       await this.pullOrganization();
     } catch (e) {
@@ -737,6 +791,45 @@ export class ErpSyncService {
   }
 
   /**
+   * Run mirroring work on a connection of its own.
+   *
+   * Every `@OnEvent` handler in this file is STARTED inside an HTTP request and
+   * FINISHES after it. Nobody awaits the promise the emitter hands back, so by
+   * the time the first query runs, the request's transaction has committed and
+   * its connection has gone back to the pool — taking the `app.tenant_id`
+   * binding with it, because that is set per transaction on purpose.
+   *
+   * The symptom was a pair of lies in the log, one after the other:
+   *
+   *   pushCustomer CUST-000001 failed, queued: app_settings row missing
+   *   enqueue CUSTOMER CUST-000001 failed: Query runner already released
+   *
+   * Neither is true. The settings row exists; no tenant was bound, so
+   * row-level security hid it. And the queue that exists precisely to catch a
+   * failed push could not write either, so the customer was lost in silence —
+   * created in VanFlow, absent from the ERP, and nothing anywhere to retry.
+   *
+   * The tenant id survives even though the connection does not: CLS is
+   * AsyncLocalStorage and follows the continuation. So each handler reads it
+   * and opens a scope of its own.
+   */
+  private async detached(what: string, fn: () => Promise<void>): Promise<void> {
+    const tenantId = this.userCtx.getTenantId();
+    if (!tenantId) {
+      this.logger.warn(
+        `${what}: no company is bound to this event, so it cannot be mirrored ` +
+          'to the ERP. Whatever emitted it ran outside a request.',
+      );
+      return;
+    }
+    try {
+      await this.tenants.runWith(tenantId, fn);
+    } catch (e) {
+      this.logger.warn(`${what} failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /**
    * SAFETY-NET inbound pull every 5 min when ERP mode is on. The fast path is
    * the ERP webhook (`triggerWebhookSync`) which fires an immediate pull the
    * moment ERP data changes; this slow poll only reconciles anything a missed
@@ -745,16 +838,27 @@ export class ErpSyncService {
    */
   @Interval(PULL_INTERVAL_MS)
   async scheduledPull(): Promise<void> {
-    if (this.pulling) return;
+    // Once per company: ERP credentials and the sync cursor both live in that
+    // company's app_settings, and a tick with no tenant bound reads neither.
+    await this.tenants.forEachTenant(
+      (tenantId) => this.pullForTenant(tenantId),
+      (tenantId, e) =>
+        this.logger.warn(
+          `scheduled ERP pull failed for tenant ${tenantId}: ${e instanceof Error ? e.message : e}`,
+        ),
+    );
+  }
+
+  /** One company's inbound pull. Runs inside that tenant's scope. */
+  private async pullForTenant(tenantId: string): Promise<void> {
+    if (this.pulling.has(tenantId)) return;
     const cfg = await this.settings.getErpConfig().catch(() => null);
     if (!cfg?.enabled || !cfg.baseUrl || !cfg.apiKey) return;
-    this.pulling = true;
+    this.pulling.add(tenantId);
     try {
       await this.syncNow();
-    } catch (e) {
-      this.logger.warn(`scheduled ERP pull failed: ${e instanceof Error ? e.message : e}`);
     } finally {
-      this.pulling = false;
+      this.pulling.delete(tenantId);
     }
   }
 
@@ -764,12 +868,18 @@ export class ErpSyncService {
    * multi-line save) coalesces into ONE sync. Fire-and-forget — the webhook
    * returns 200 right away; the pull runs ~1s later, after the ERP transaction
    * has committed.
+   *
+   * The webhook is authenticated by a shared secret and carries no tenant, so
+   * this pulls for EVERY company rather than guessing which one the ERP change
+   * belonged to. Each company's pull is a no-op unless its own ERP sync is
+   * switched on, so the cost is small. Narrowing it needs the webhook to
+   * identify its ERP organisation — part of the CRM/ERP pairing work.
    */
   triggerWebhookSync(): void {
     if (this.webhookTimer) return; // a sync is already scheduled within the window
     this.webhookTimer = setTimeout(() => {
       this.webhookTimer = null;
-      if (this.pulling) {
+      if (this.pulling.size > 0) {
         // A sync is mid-flight; reschedule so changes after it still get pulled.
         this.triggerWebhookSync();
         return;

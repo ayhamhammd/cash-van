@@ -1,3 +1,4 @@
+import { ensureTenantIsolation } from '../../common/tenancy/ensure-tenant-isolation';
 import {
   Injectable,
   Logger,
@@ -6,6 +7,7 @@ import {
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 /**
  * Keeps `rep_location_events` monthly partitions ahead of the calendar.
@@ -22,7 +24,7 @@ import { DataSource } from 'typeorm';
 export class PartitionMaintenanceService implements OnApplicationBootstrap {
   private readonly logger = new Logger(PartitionMaintenanceService.name);
 
-  constructor(@InjectDataSource() private readonly ds: DataSource) {}
+  constructor(private readonly ds: TenantDataSource) {}
 
   async onApplicationBootstrap(): Promise<void> {
     try {
@@ -51,6 +53,7 @@ export class PartitionMaintenanceService implements OnApplicationBootstrap {
       PARTITION OF "rep_location_events"
       FOR VALUES FROM ('${from}') TO ('${to}')
     `);
+    await ensureTenantIsolation(this.ds, tableName, this.logger);
     this.logger.log(
       `Ensured partition ${tableName} (range ${from} → ${to})`,
     );

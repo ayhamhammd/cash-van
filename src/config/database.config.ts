@@ -8,16 +8,29 @@ export const typeOrmAsyncConfig: TypeOrmModuleAsyncOptions = {
     type: 'postgres',
     host: config.get<string>('database.host'),
     port: config.get<number>('database.port'),
-    username: config.get<string>('database.username'),
-    password: config.get<string>('database.password'),
+    // The RUNNING APP prefers the unprivileged role, so row-level security
+    // applies to it — a superuser silently ignores every policy. Migrations run
+    // through data-source.ts, which always uses the owning DB_USERNAME.
+    username:
+      config.get<string>('database.appUsername') ||
+      config.get<string>('database.username'),
+    password:
+      config.get<string>('database.appUsername')
+        ? config.get<string>('database.appPassword')
+        : config.get<string>('database.password'),
     database: config.get<string>('database.database'),
     ssl: config.get<boolean>('database.ssl')
       ? { rejectUnauthorized: false }
       : false,
     logging: config.get<boolean>('database.logging'),
-    entities: [__dirname + '/../**/*.entity.{ts,js}'],
-    // Also register entities provided via forFeature() that the glob misses —
-    // notably @ViewEntity files (e.g. *.view.ts like ItemBalanceView).
+    // *.view.ts is listed explicitly because @ViewEntity files do not match the
+    // *.entity.ts glob. They used to arrive via TypeOrmModule.forFeature, but
+    // feature modules now use TenantOrmModule.forFeature (which hands out
+    // tenant-scoped repositories) and no longer feed autoLoadEntities.
+    entities: [
+      __dirname + '/../**/*.entity.{ts,js}',
+      __dirname + '/../**/*.view.{ts,js}',
+    ],
     autoLoadEntities: true,
     migrations: [__dirname + '/../database/migrations/*.{ts,js}'],
     migrationsRun: false,

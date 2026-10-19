@@ -11,6 +11,9 @@ import { Server, Socket } from 'socket.io';
 import { ACCESS_TOKEN_COOKIE } from '../common/auth/auth-cookie';
 import { RepScopeService } from '../modules/users/rep-scope.service';
 import { AuthenticatedUser } from '../common/decorators/current-user.decorator';
+import { DEFAULT_TENANT_ID } from '../common/constants/tenancy';
+import { UserContextService } from '../common/context/user-context.service';
+import { TenantScope } from '../common/tenancy/tenant-scope.service';
 
 /** Room every salesman socket joins, so a signal can reach all vans at once. */
 export const REPS_ROOM = 'reps';
@@ -23,6 +26,21 @@ export const repRoom = (repId: string) => `rep:${repId}`;
  */
 export const SCOPE_ALL_ROOM = 'scope:all';
 export const watchRoom = (repId: string) => `watch:${repId}`;
+
+/** Every socket of one company, used by the operational broadcast. */
+export const TENANT_ALL_ROOM = 'all';
+
+/**
+ * Namespaces a room to one company.
+ *
+ * Every room name goes through this, which is what keeps the tenants apart:
+ * rep ids and user ids are uuids and would not collide by accident, but
+ * `reps` and `scope:all` are shared names, and an un-namespaced broadcast on
+ * either would deliver one company's live rep positions to another's
+ * dashboard.
+ */
+export const tenantRoom = (tenantId: string, room: string) =>
+  `t:${tenantId}:${room}`;
 
 /**
  * Operational realtime stream.
@@ -55,6 +73,8 @@ export class EventsGateway implements OnGatewayConnection {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly repScope: RepScopeService,
+    private readonly userCtx: UserContextService,
+    private readonly tenants: TenantScope,
   ) {}
 
   handleConnection(client: Socket): void {
@@ -67,19 +87,32 @@ export class EventsGateway implements OnGatewayConnection {
     try {
       const payload = this.jwt.verify(token, {
         secret: this.config.getOrThrow<string>('jwt.secret'),
-      }) as { sub: string; role?: string; repId?: string | null };
+      }) as {
+        sub: string;
+        role?: string;
+        repId?: string | null;
+        tid?: string;
+      };
       client.data.userId = payload.sub;
       client.data.role = payload.role ?? 'viewer';
+
+      // The company comes from the signed token, like every other room input.
+      const tenantId = payload.tid ?? DEFAULT_TENANT_ID;
+      client.data.tenantId = tenantId;
+      const room = (name: string) => tenantRoom(tenantId, name);
+
+      // Receives the operational broadcast for this company and no other.
+      void client.join(room(TENANT_ALL_ROOM));
 
       // Room membership comes from the token, not from the client. A socket that
       // could name its own room could subscribe to a rival van's stock.
       const repId = payload.repId ?? null;
       client.data.repId = repId;
       if (repId) {
-        void client.join(repRoom(repId));
-        void client.join(REPS_ROOM);
+        void client.join(room(repRoom(repId)));
+        void client.join(room(REPS_ROOM));
         // A salesman watches only themselves.
-        void client.join(watchRoom(repId));
+        void client.join(room(watchRoom(repId)));
         return;
       }
 
@@ -104,16 +137,22 @@ export class EventsGateway implements OnGatewayConnection {
    * when you widen a supervisor's scope and they say they still cannot see it.
    */
   private async joinWatchRooms(client: Socket, userId: string): Promise<void> {
+    const tenantId = client.data.tenantId as string;
+    const room = (name: string) => tenantRoom(tenantId, name);
     try {
-      const visible = await this.repScope.visibleRepIds({
-        sub: userId,
-        repId: null,
-      } as AuthenticatedUser);
+      // The lookup itself has to run as this socket's tenant — rep_scope rows
+      // are behind row-level security like everything else.
+      const visible = await this.tenants.runWith(tenantId, () =>
+        this.repScope.visibleRepIds({
+          sub: userId,
+          repId: null,
+        } as AuthenticatedUser),
+      );
       if (visible === null) {
-        await client.join(SCOPE_ALL_ROOM);
+        await client.join(room(SCOPE_ALL_ROOM));
         return;
       }
-      await Promise.all(visible.map((id) => client.join(watchRoom(id))));
+      await Promise.all(visible.map((id) => client.join(room(watchRoom(id)))));
     } catch (e) {
       // Fail CLOSED: a socket that joins nothing sees nothing, which is the
       // right outcome when we cannot establish what it is allowed to see.
@@ -121,10 +160,24 @@ export class EventsGateway implements OnGatewayConnection {
     }
   }
 
-  /** Broadcast an event to every connected client. */
-  broadcast(event: string, payload: unknown): void {
-    if (!this.server) return;
-    this.server.emit(event, payload);
+  /**
+   * The company an emit belongs to.
+   *
+   * Domain events are emitted synchronously from inside the request that caused
+   * them, so the request's tenant is still on the async context. Background work
+   * has no request, and must pass `tenantId` explicitly — returning null there
+   * makes the emit a no-op, which is the safe direction: better a dashboard that
+   * refreshes a second late than one company's event on another's screen.
+   */
+  private tenantOf(explicit?: string | null): string | null {
+    return explicit ?? this.userCtx.getTenantId();
+  }
+
+  /** Broadcast an event to every client of one company. */
+  broadcast(event: string, payload: unknown, tenantId?: string | null): void {
+    const tenant = this.tenantOf(tenantId);
+    if (!this.server || !tenant) return;
+    this.server.to(tenantRoom(tenant, TENANT_ALL_ROOM)).emit(event, payload);
   }
 
   /**
@@ -134,11 +187,18 @@ export class EventsGateway implements OnGatewayConnection {
    * A null/unknown repId goes to `scope:all` only — if we cannot say whose event
    * it is, no scoped supervisor should be told about it.
    */
-  broadcastForRep(event: string, payload: unknown, repId?: string | null): void {
-    if (!this.server) return;
+  broadcastForRep(
+    event: string,
+    payload: unknown,
+    repId?: string | null,
+    tenantId?: string | null,
+  ): void {
+    const tenant = this.tenantOf(tenantId);
+    if (!this.server || !tenant) return;
+    const room = (name: string) => tenantRoom(tenant, name);
     const target = repId
-      ? this.server.to([SCOPE_ALL_ROOM, watchRoom(repId)])
-      : this.server.to(SCOPE_ALL_ROOM);
+      ? this.server.to([room(SCOPE_ALL_ROOM), room(watchRoom(repId))])
+      : this.server.to(room(SCOPE_ALL_ROOM));
     target.emit(event, payload);
   }
 
@@ -149,15 +209,22 @@ export class EventsGateway implements OnGatewayConnection {
    * van that is offline or asleep. Nothing is queued: the app reconciles by
    * pulling on next foreground, so a missed signal costs freshness, not data.
    */
-  emitToRep(repId: string, event: string, payload: unknown): void {
-    if (!this.server || !repId) return;
-    this.server.to(repRoom(repId)).emit(event, payload);
+  emitToRep(
+    repId: string,
+    event: string,
+    payload: unknown,
+    tenantId?: string | null,
+  ): void {
+    const tenant = this.tenantOf(tenantId);
+    if (!this.server || !repId || !tenant) return;
+    this.server.to(tenantRoom(tenant, repRoom(repId))).emit(event, payload);
   }
 
-  /** Send to every connected salesman, but not to dashboard-only sockets. */
-  emitToAllReps(event: string, payload: unknown): void {
-    if (!this.server) return;
-    this.server.to(REPS_ROOM).emit(event, payload);
+  /** Send to every connected salesman of one company, not to dashboards. */
+  emitToAllReps(event: string, payload: unknown, tenantId?: string | null): void {
+    const tenant = this.tenantOf(tenantId);
+    if (!this.server || !tenant) return;
+    this.server.to(tenantRoom(tenant, REPS_ROOM)).emit(event, payload);
   }
 
   private extractToken(client: Socket): string | null {

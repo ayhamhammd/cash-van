@@ -18,11 +18,14 @@ import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('erp-sync')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Roles('admin')
 @Controller({ path: 'erp', version: '1' })
+@RequiresFeature('erp_sync')
 export class ErpSyncController {
   constructor(
     private readonly sync: ErpSyncService,

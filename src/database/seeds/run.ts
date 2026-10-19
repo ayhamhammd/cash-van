@@ -1,107 +1,93 @@
 import 'reflect-metadata';
-import * as bcrypt from 'bcrypt';
-import type {
-  DeepPartial,
-  FindOptionsWhere,
-  ObjectLiteral,
-  Repository,
-} from 'typeorm';
 
 import dataSource from '../data-source';
-import { User } from '../../modules/users/entities/user.entity';
-import { TransactionKind } from '../../modules/vouchers/entities/transaction-kind.entity';
+import { seedTenant } from './tenant-seed';
 
 /**
- * Minimal production seed: the default **admin login** plus the **transaction
- * kinds** the vouchers module reads at runtime. NO demo business data — a fresh
+ * Minimal production seed: the **transaction kinds** the vouchers module reads
+ * at runtime, plus — for a single-company install only — a default admin login. NO demo business data — a fresh
  * deploy comes up empty and is filled from the ERP sync / the dashboard.
  * Idempotent: every row is upserted on a natural key, so re-running is safe.
+ *
+ * Runs ONCE PER COMPANY. Transaction kinds and users are per-tenant now, and a
+ * pass with no tenant bound writes NULL into a NOT NULL `tenant_id` — which
+ * fails the seed, and with it `start:deploy`, on every single deploy.
  */
 async function seed(): Promise<void> {
   await dataSource.initialize();
-  const qr = dataSource.createQueryRunner();
-  await qr.connect();
-  await qr.startTransaction();
 
-  /**
-   * Find-or-create on a natural key. Looks at soft-deleted rows too so a row
-   * that still occupies its UNIQUE key is recovered instead of colliding on a
-   * plain insert — keeps re-seeding idempotent instead of crashing the deploy.
-   */
-  async function upsert<T extends ObjectLiteral>(
-    repo: Repository<T>,
-    where: FindOptionsWhere<NoInfer<T>> | FindOptionsWhere<NoInfer<T>>[],
-    data: DeepPartial<NoInfer<T>>,
-  ): Promise<T> {
-    const found = await repo.findOne({ where, withDeleted: true });
-    if (found) {
-      if ((found as { deletedAt?: Date | null }).deletedAt) {
-        await repo.recover(found);
-      }
-      return found;
-    }
-    return repo.save(repo.create(data));
-  }
+  const tenants: {
+    id: string;
+    code: string;
+    name: string;
+    crmTenantId: string | null;
+  }[] = await dataSource.query(
+    `SELECT id, code, name, crm_tenant_id AS "crmTenantId"
+       FROM tenants WHERE status = 'active' ORDER BY created_at`,
+  );
 
-  try {
-    const m = qr.manager;
-
-    // ── transaction kinds (system reference — read by the vouchers module) ─
-    const kindsRepo = m.getRepository(TransactionKind);
-    const kinds: Array<Partial<TransactionKind>> = [
-      { transKind: 'SALE', transName: 'بيع', sign: -1 }, // van out
-      { transKind: 'RETURN', transName: 'مرتجع', sign: 1 }, // van in
-      { transKind: 'ORDER', transName: 'طلبية', sign: 0 }, // reserve until fulfilled
-      { transKind: 'TRANSFER_IN', transName: 'تحميل المركبة', sign: 1 }, // van in
-      { transKind: 'TRANSFER_OUT', transName: 'تنزيل المركبة', sign: -1 }, // van out
-      { transKind: 'TRANSFER', transName: 'تحويل بين المخازن', sign: 0 }, // stock → stock (uses from/to store)
-      { transKind: 'IN', transName: 'إدخال للمخزن', sign: 1 }, // stock in (to_store)
-      { transKind: 'OUT', transName: 'إخراج من المخزن', sign: -1 }, // stock out (from_store)
-      { transKind: 'PURCHASE', transName: 'شراء', sign: 1 }, // warehouse in
-      { transKind: 'ADJUSTMENT', transName: 'تسوية', sign: 0 },
-      { transKind: 'PAYMENT_IN', transName: 'سند قبض', sign: 0 },
-      { transKind: 'PAYMENT_OUT', transName: 'سند صرف', sign: 0 },
-    ];
-    for (const k of kinds) {
-      await upsert(kindsRepo, { transKind: k.transKind }, k);
-    }
-
-    // ── admin user (the only login) ────────────────────────────────────────
-    const usersRepo = m.getRepository(User);
-    const adminHash = await bcrypt.hash('admin1234', 12);
-    await upsert(
-      usersRepo,
-      { userNumber: 'admin' },
-      {
-        userNumber: 'admin',
-        name: 'Default Admin',
-        nameAr: 'المدير',
-        nameEn: 'Default Admin',
-        role: 'admin',
-        passwordHash: adminHash,
-        userType: 'ADMIN',
-        isActive: true,
-        canMakeVoucher: true,
-        canEditVoucher: true,
-        canAddCustomer: true,
-        canEditCustomerCredit: true,
-        canAddItems: true,
-        canEditExpiry: true,
-      },
-    );
-
-    await qr.commitTransaction();
+  if (tenants.length === 0) {
     // eslint-disable-next-line no-console
-    console.log('Seed completed: admin login + transaction kinds (no demo data).');
-  } catch (err) {
-    await qr.rollbackTransaction();
-    // eslint-disable-next-line no-console
-    console.error('Seed failed', err);
-    process.exitCode = 1;
-  } finally {
-    await qr.release();
+    console.warn('No tenants found — run the migrations first.');
     await dataSource.destroy();
+    return;
   }
+
+  for (const tenant of tenants) {
+    const qr = dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
+    try {
+      // Binds this transaction to the company, so the tenant_id column
+      // defaults resolve and the policies let the writes through.
+      await qr.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenant.id]);
+
+      // The default `admin` / `admin1234` login is ONLY for an install that
+      // would otherwise have nobody who could sign in — a single-company or
+      // on-premise deployment coming up for the first time.
+      //
+      // It must never reach a company provisioned from the CRM. Those get
+      // their admin from the CRM, and handing them a second one with a
+      // password published in every README hands the company to anyone who
+      // has seen its licence key — which is on every phone and browser the
+      // customer owns. That is not a theoretical leak: this loop used to run
+      // `withAdmin: true` for every tenant on every deploy.
+      //
+      // Both conditions, not either: CRM-linked companies are excluded
+      // outright, and a company that already has users does not need a
+      // fallback login inventing for it.
+      const isCrmLinked = tenant.crmTenantId !== null;
+      const [{ count }]: { count: string }[] = await qr.query(
+        `SELECT count(*)::text AS count FROM users WHERE tenant_id = $1`,
+        [tenant.id],
+      );
+      const withAdmin = !isCrmLinked && count === '0';
+
+      await seedTenant(qr.manager, tenant.id, {
+        withAdmin,
+        // The company's own name and code, not the placeholder defaults. A
+        // settings row saying "My Company / C001" in every company is worse
+        // than none: it looks configured, so nobody goes and fixes it.
+        companyName: tenant.name,
+        companyNumber: tenant.code,
+      });
+      await qr.commitTransaction();
+      // eslint-disable-next-line no-console
+      console.log(
+        `Seeded ${tenant.code}: transaction kinds` +
+          (withAdmin ? ' + default admin login.' : ' (no default admin).'),
+      );
+    } catch (err) {
+      await qr.rollbackTransaction();
+      // eslint-disable-next-line no-console
+      console.error(`Seed failed for ${tenant.code}`, err);
+      process.exitCode = 1;
+    } finally {
+      await qr.release();
+    }
+  }
+
+  await dataSource.destroy();
 }
 
-seed();
+void seed();

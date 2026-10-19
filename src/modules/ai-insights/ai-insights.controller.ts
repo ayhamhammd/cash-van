@@ -5,11 +5,14 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { AiInsightsService } from './ai-insights.service';
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('ai')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Roles('admin', 'manager', 'supervisor')
 @Controller({ path: 'ai', version: '1' })
+@RequiresFeature('ai')
 export class AiInsightsController {
   constructor(private readonly service: AiInsightsService) {}
 

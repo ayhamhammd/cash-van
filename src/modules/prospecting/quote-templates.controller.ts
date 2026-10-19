@@ -36,9 +36,12 @@ import {
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('prospecting')
 @ApiBearerAuth()
 @Controller({ path: 'quote-templates', version: '1' })
+@RequiresFeature('prospecting')
 export class QuoteTemplatesController {
   constructor(
     private readonly templates: QuoteTemplatesService,

@@ -1,0 +1,258 @@
+# The whole VanFlow suite on one machine, built from source.
+#
+# Brings up BOTH products with their own databases, wired together the way the
+# deployed environments are: the CRM provisions companies into cash-van over
+# HTTP, and each app talks to its own Postgres.
+#
+# Layout assumption — the four repos are siblings on disk:
+#   Projects/cash-van             (this repo — the van backend)
+#   Projects/Flow-Van-Frontend    (the van dashboard)
+#   Projects/7CRM                 (the CRM backend)
+#   Projects/7CRM-Frontend        (the CRM dashboard)
+#   Projects/ERP                  (the ERP)
+#
+#   docker compose -f docker-compose.suite.yml up -d --build
+#
+#   Van dashboard  → http://localhost:3300     admin / admin1234
+#   Van API        → http://localhost:3100/docs
+#   CRM dashboard  → http://localhost:3400
+#   CRM API        → http://localhost:3200/docs  admin@7software.local / platform1234
+#   ERP            → http://localhost:3500      sign up, then create an organisation
+#
+# Ports deliberately avoid 3000-3002, which the day-to-day dev stack uses.
+
+name: vanflow-suite
+
+services:
+  # ── cash-van ────────────────────────────────────────────────────────────────
+  cashvan-db:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: cashvan
+      POSTGRES_PASSWORD: ${CASHVAN_DB_PASSWORD:-cashvan_local_pw}
+      POSTGRES_DB: cashvan
+    volumes:
+      - suite_cashvan_pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U cashvan -d cashvan']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [suite]
+
+  cashvan-api:
+    build:
+      context: .
+      target: production
+    image: vanflow-suite/cashvan-api:local
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: cashvan-db
+      DB_PORT: 5432
+      # Migrations and the seed run as the OWNER; see DB_APP_* below for why the
+      # running app does not.
+      DB_USERNAME: cashvan
+      DB_PASSWORD: ${CASHVAN_DB_PASSWORD:-cashvan_local_pw}
+      DB_NAME: cashvan
+      DB_SSL: 'false'
+      # The unprivileged role the app connects as, so row-level security applies
+      # to it. A superuser ignores RLS entirely — without this the tenant
+      # isolation is decorative, and the API refuses to boot if it is pointed at
+      # a role that can bypass.
+      DB_APP_USERNAME: cashvan_app
+      DB_APP_PASSWORD: ${CASHVAN_APP_DB_PASSWORD:-cashvan_app_local_pw}
+      # Single deployment holding several companies, but local login still has
+      # to work without the CRM — see TenantScopeInterceptor.
+      TENANT_FALLBACK_ENABLED: 'true'
+      JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret-change-me}
+      PHONE_HASH_SECRET: ${PHONE_HASH_SECRET:-local-dev-phone-hash-secret}
+      INTERNAL_PROVISION_SECRET: ${INTERNAL_PROVISION_SECRET:-local-suite-secret}
+      # Where to ask "whose key is this, and may they work today". Container to
+      # container, so the service name. Blank would switch licensing off.
+      CRM_BASE_URL: http://crm-api:3000
+      CORS_ORIGINS: http://localhost:3300,http://localhost:3400
+      JOBS_ENABLED: 'false'
+      JOFOTARA_MOCK: 'true'
+      # Local test stack: keep the API docs reachable despite NODE_ENV=production.
+      SWAGGER_ENABLED: 'true'
+    command: ['npm', 'run', 'start:deploy']
+    ports: ['3100:3000']
+    depends_on:
+      cashvan-db:
+        condition: service_healthy
+    networks: [suite]
+    restart: unless-stopped
+
+  cashvan-dashboard:
+    build:
+      context: ../Flow-Van-Frontend
+      args:
+        # Baked into the browser bundle at build time, so it must be the URL the
+        # BROWSER uses — localhost:3100, not the container name.
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:3100/api/v1
+        NEXT_PUBLIC_WS_URL: http://localhost:3100
+        NEXT_PUBLIC_AI_ENABLED: 'false'
+        NEXT_PUBLIC_DEFAULT_LOCALE: ar
+    image: vanflow-suite/cashvan-dashboard:local
+    ports: ['3300:3000']
+    depends_on: [cashvan-api]
+    networks: [suite]
+    restart: unless-stopped
+
+  # ── 7CRM ────────────────────────────────────────────────────────────────────
+  crm-db:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: crm
+      POSTGRES_PASSWORD: ${CRM_DB_PASSWORD:-crm_local_pw}
+      POSTGRES_DB: crm
+    volumes:
+      - suite_crm_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U crm -d crm']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [suite]
+
+  crm-api:
+    build:
+      context: ../7CRM
+      target: production
+    image: vanflow-suite/crm-api:local
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: crm-db
+      DB_PORT: 5432
+      DB_USERNAME: crm
+      DB_PASSWORD: ${CRM_DB_PASSWORD:-crm_local_pw}
+      DB_NAME: crm
+      DB_SSL: 'false'
+      # Signing keypair for the tokens cash-van and the ERP will verify. Local
+      # throwaway values; every real environment gets its own, and the issuer
+      # MUST differ per environment or a dev token is a production token.
+      AUTH_ISSUER: http://localhost:3200
+      AUTH_KEY_ID: crm-local-1
+      AUTH_PRIVATE_KEY: ${CRM_AUTH_PRIVATE_KEY:?run scripts/gen-crm-keys.sh and source the generated .env.suite}
+      AUTH_PUBLIC_KEY: ${CRM_AUTH_PUBLIC_KEY:?run scripts/gen-crm-keys.sh and source the generated .env.suite}
+      # Encrypts stored licence keys so a customer who loses one can be shown
+      # it again instead of being re-keyed across every device they own.
+      # Rotating this makes existing keys unrecoverable — they keep WORKING
+      # (that is the hash), they just can no longer be displayed.
+      LICENSE_KEY_SECRET: ${LICENSE_KEY_SECRET:-local-suite-license-secret}
+      # Container-to-container, so the service name rather than localhost.
+      CASHVAN_BASE_URL: http://cashvan-api:3000
+      CASHVAN_INTERNAL_SECRET: ${INTERNAL_PROVISION_SECRET:-local-suite-secret}
+      # Container to container. A separate secret from cash-van's on purpose:
+      # one product's secret leaking must not hand over the other.
+      ERP_BASE_URL: http://erp-app:3000
+      ERP_INTERNAL_SECRET: ${ERP_INTERNAL_SECRET:-local-suite-erp-secret}
+      PLATFORM_ADMIN_EMAIL: ${PLATFORM_ADMIN_EMAIL:-admin@7software.local}
+      PLATFORM_ADMIN_PASSWORD: ${PLATFORM_ADMIN_PASSWORD:-platform1234}
+      CORS_ORIGINS: http://localhost:3400,http://localhost:3300
+      SWAGGER_ENABLED: 'true'
+    ports: ['3200:3000']
+    depends_on:
+      crm-db:
+        condition: service_healthy
+    networks: [suite]
+    restart: unless-stopped
+
+  crm-dashboard:
+    build:
+      context: ../7CRM-Frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:3200/api/v1
+    image: vanflow-suite/crm-dashboard:local
+    ports: ['3400:3000']
+    depends_on: [crm-api]
+    networks: [suite]
+    restart: unless-stopped
+
+  # ── ERP ─────────────────────────────────────────────────────────────────────
+  # Already multi-tenant on its own terms: one `organizations` row per company,
+  # filtered in application code rather than by row-level security. The CRM does
+  # NOT provision into it yet — that link is Phase 5 — so companies are created
+  # here through the ERP's own sign-up / org-selection screen.
+  erp-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${ERP_DB_PASSWORD:-manager}
+      POSTGRES_DB: erp_database
+    volumes:
+      - suite_erp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d erp_database']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [suite]
+
+  # One-shot: pushes the schema from src/db/schema.ts, then exits. The ERP uses
+  # `db:push` rather than a migration chain — see the note in its own compose
+  # file — so this runs from the builder stage, which carries drizzle-kit.
+  erp-migrate:
+    build:
+      context: ../ERP
+      target: builder
+    image: vanflow-suite/erp-migrate:local
+    # push, THEN re-apply the company isolation rules. Not optional and not
+    # reorderable: `push` reconciles the database to schema.ts and switches
+    # row-level security OFF on every table it does not see marked there. The
+    # policies survive but stop applying, so the locks look present and are not.
+    # Through a shell, because `&&` is shell syntax: compose runs a plain
+    # `command:` string as argv with no shell, so the second half was silently
+    # never executed — push ran, the isolation step did not, and the locks
+    # stayed off.
+    command: ['sh', '-c', 'npm run db:push:force && npm run db:rls']
+    environment:
+      DATABASE_URL: postgresql://postgres:${ERP_DB_PASSWORD:-manager}@erp-db:5432/erp_database
+    depends_on:
+      erp-db:
+        condition: service_healthy
+    networks: [suite]
+    restart: 'no'
+
+  erp-app:
+    build:
+      context: ../ERP
+      target: runner
+      args:
+        NEXT_PUBLIC_APP_URL: http://localhost:3500
+    image: vanflow-suite/erp-app:local
+    environment:
+      DATABASE_URL: postgresql://postgres:${ERP_DB_PASSWORD:-manager}@erp-db:5432/erp_database
+      SESSION_SECRET: ${ERP_SESSION_SECRET:-local-suite-erp-session-secret-32chars-min}
+      INTERNAL_PROVISION_SECRET: ${ERP_INTERNAL_SECRET:-local-suite-erp-secret}
+      # Where the ERP asks whether a company may work today, and what it bought.
+      # Unset on an on-premise install: the licence check then allows everything,
+      # because there is nothing for that machine to phone home to.
+      CRM_BASE_URL: http://crm-api:3000
+      CRM_INTERNAL_SECRET: ${ERP_INTERNAL_SECRET:-local-suite-erp-secret}
+      # The unprivileged role that scoped queries use, so row-level security
+      # applies to them. DATABASE_URL above stays the owner while pages are
+      # migrated one at a time; when the last one is converted this becomes the
+      # only connection string.
+      APP_DATABASE_URL: postgresql://erp_app:${ERP_APP_DB_PASSWORD:-erp_app_local_pw}@erp-db:5432/erp_database
+      NEXT_PUBLIC_APP_URL: http://localhost:3500
+    ports: ['3500:3000']
+    depends_on:
+      erp-db:
+        condition: service_healthy
+      erp-migrate:
+        condition: service_completed_successfully
+    networks: [suite]
+    restart: unless-stopped
+
+volumes:
+  suite_cashvan_pgdata:
+  suite_crm_pgdata:
+  suite_erp_pgdata:
+
+networks:
+  suite:
+    driver: bridge

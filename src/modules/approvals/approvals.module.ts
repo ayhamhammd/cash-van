@@ -1,5 +1,4 @@
 import { Module, forwardRef } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ApprovalRequest } from './entities/approval-request.entity';
 import { Rep } from '../reps/entities/rep.entity';
@@ -11,11 +10,12 @@ import { ApprovalsController } from './approvals.controller';
 import { VouchersModule } from '../vouchers/vouchers.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { UsersModule } from '../users/users.module';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
     UsersModule,
-    TypeOrmModule.forFeature([ApprovalRequest, Rep, User, PendingCustomerPhoto]),
+    TenantOrmModule.forFeature([ApprovalRequest, Rep, User, PendingCustomerPhoto]),
     // Approving a CUSTOMER_CREATE request creates the customer; CustomersModule
     // files those requests. Circular by nature, so forwardRef on both sides.
     forwardRef(() => CustomersModule),

@@ -1,3 +1,4 @@
+import { TenantCounters } from '../../common/tenancy/tenant-counters.service';
 import {
   BadRequestException,
   ConflictException,
@@ -68,6 +69,7 @@ export class CustomersService {
     private readonly pendingPhotos: Repository<PendingCustomerPhoto>,
     @InjectRepository(Customer)
     private readonly customers: Repository<Customer>,
+    private readonly counters: TenantCounters,
     @InjectRepository(CustomerAiProfile)
     private readonly aiProfiles: Repository<CustomerAiProfile>,
     @InjectRepository(CustomerVisit)
@@ -240,12 +242,10 @@ export class CustomersService {
     return saved;
   }
 
-  /** Next serial customer number: CUST-000001. */
+  /** Next serial customer number: CUST-000001. Per tenant, not database-wide. */
   private async nextCustomerNumber(): Promise<string> {
-    const rows: Array<{ n: string }> = await this.customers.query(
-      "SELECT nextval('customer_number_seq') AS n",
-    );
-    return `CUST-${String(rows[0]?.n ?? '0').padStart(6, '0')}`;
+    const n = await this.counters.next('customer');
+    return `CUST-${String(n).padStart(6, '0')}`;
   }
 
   async update(id: string, dto: UpdateCustomerDto): Promise<Customer> {

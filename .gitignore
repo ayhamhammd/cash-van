@@ -22,3 +22,4 @@ deploy/caddy/Caddyfile
 # tarball — build artifacts, not source.
 dist-windows/
 dist-windows-update/
+.env.suite

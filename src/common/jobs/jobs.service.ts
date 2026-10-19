@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import PgBoss = require('pg-boss');
 
 import { UserContext, UserContextService } from '../context/user-context.service';
+import { TenantScope } from '../tenancy/tenant-scope.service';
 
 export type EnqueueOptions = PgBoss.SendOptions & {
   /** Identifier visible in logs and pg-boss dashboard. */
@@ -51,6 +52,9 @@ export class JobsService implements OnModuleInit, OnApplicationShutdown {
   constructor(
     private readonly config: ConfigService,
     @Optional() private readonly userCtx?: UserContextService,
+    // Optional for the same reason as userCtx: CLI scripts construct this
+    // service without the full application context.
+    @Optional() private readonly tenantScope?: TenantScope,
   ) {
     this.enabled = config.get<boolean>('jobs.enabled', true);
   }
@@ -106,6 +110,11 @@ export class JobsService implements OnModuleInit, OnApplicationShutdown {
    * Register a handler. The handler runs inside CLS populated with the
    * captured user context, so role checks and audit logs work as if the job
    * were a request from that user.
+   *
+   * It also runs bound to that user's COMPANY. The tenant travels in the same
+   * captured context, and without re-binding it to the connection the handler
+   * would run with no `app.tenant_id` — every read filtered to nothing, and the
+   * job quietly doing nothing at all.
    */
   async register<T>(queue: string, handler: JobHandler<T>, concurrency = 1): Promise<void> {
     if (!this.boss) return;
@@ -118,7 +127,12 @@ export class JobsService implements OnModuleInit, OnApplicationShutdown {
           await handler(payload.data, job);
           return;
         }
-        await this.userCtx.runWith(payload.ctx, () => handler(payload.data, job));
+        const run = () => handler(payload.data, job);
+        await this.userCtx.runWith(payload.ctx, () =>
+          this.tenantScope && payload.ctx.tenantId
+            ? this.tenantScope.runWith(payload.ctx.tenantId, run)
+            : run(),
+        );
       },
     );
   }

@@ -1,5 +1,5 @@
+import { TenantDataSource } from '../../../common/tenancy/tenant-data-source.service';
 import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
-import { DataSource } from 'typeorm';
 
 import type { AllocatedLine, AllocationPlan } from './allocate';
 import { VouchersService } from '../vouchers.service';
@@ -32,7 +32,7 @@ import type { CreateVoucherDto } from '../dto/create-voucher.dto';
 @Injectable()
 export class ReturnCreateService {
   constructor(
-    private readonly ds: DataSource,
+    private readonly ds: TenantDataSource,
     private readonly vouchers: VouchersService,
   ) {}
 

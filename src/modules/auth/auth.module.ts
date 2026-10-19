@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
@@ -11,10 +10,11 @@ import { UsersModule } from '../users/users.module';
 import { RepsModule } from '../reps/reps.module';
 import { DevicesModule } from '../devices/devices.module';
 import { User } from '../users/entities/user.entity';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User]),
+    TenantOrmModule.forFeature([User]),
     UsersModule,
     RepsModule,
     DevicesModule,

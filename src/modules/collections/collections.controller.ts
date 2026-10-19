@@ -32,10 +32,13 @@ import {
   type AuthenticatedUser,
 } from '../../common/decorators/current-user.decorator';
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('collections')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'collections', version: '1' })
+@RequiresFeature('collections')
 export class CollectionsController {
   constructor(
     private readonly collections: CollectionsService,

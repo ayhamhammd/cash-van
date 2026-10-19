@@ -26,10 +26,13 @@ import { ReconcileChequeDto } from './dto/collection-actions.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('cheques')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'cheques', version: '1' })
+@RequiresFeature('collections')
 export class ChequesController {
   constructor(private readonly cheques: ChequesService) {}
 

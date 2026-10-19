@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { Customer } from '../customers/entities/customer.entity';
@@ -10,6 +9,7 @@ import { OfferRedemption } from './entities/offer-redemption.entity';
 import { OffersController } from './offers.controller';
 import { OffersService } from './offers.service';
 import { OffersEngineService } from './offers-engine.service';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 /**
  * Offers engine. Registers the offer + redemption tables and read-only access to
@@ -19,7 +19,7 @@ import { OffersEngineService } from './offers-engine.service';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       Offer,
       OfferRedemption,
       ItemCart,

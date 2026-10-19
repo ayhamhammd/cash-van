@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Rep } from './entities/rep.entity';
 import { RepLocationEvent } from './entities/rep-location-event.entity';
@@ -12,10 +11,11 @@ import { RepStatusService } from './rep-status.service';
 import { PartitionMaintenanceService } from './partition-maintenance.service';
 import { ErpSyncModule } from '../erp-sync/erp-sync.module';
 import { UsersModule } from '../users/users.module';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Rep, RepLocationEvent, RepStatus]),
+    TenantOrmModule.forFeature([Rep, RepLocationEvent, RepStatus]),
     ErpSyncModule,
     UsersModule,
   ],

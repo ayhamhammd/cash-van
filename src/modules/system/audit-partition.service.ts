@@ -1,7 +1,9 @@
+import { ensureTenantIsolation } from '../../common/tenancy/ensure-tenant-isolation';
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 /**
  * Keeps `audit_log` monthly partitions ahead of the calendar (mirrors plan 02).
@@ -11,7 +13,7 @@ import { DataSource } from 'typeorm';
 export class AuditPartitionService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AuditPartitionService.name);
 
-  constructor(@InjectDataSource() private readonly ds: DataSource) {}
+  constructor(private readonly ds: TenantDataSource) {}
 
   async onApplicationBootstrap(): Promise<void> {
     try {
@@ -33,6 +35,7 @@ export class AuditPartitionService implements OnApplicationBootstrap {
       CREATE TABLE IF NOT EXISTS "${table}"
       PARTITION OF "audit_log" FOR VALUES FROM ('${from}') TO ('${to}')
     `);
+    await ensureTenantIsolation(this.ds, table, this.logger);
     this.logger.log(`Ensured audit partition ${table} (${from} → ${to})`);
   }
 

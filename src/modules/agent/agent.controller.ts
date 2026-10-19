@@ -35,10 +35,13 @@ import { ChatDto } from './dto/chat.dto';
 import { RenameSessionDto, SessionListQuery } from './dto/session.dto';
 import type { AgentEvent } from './agent.types';
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('ai-agent')
 @ApiBearerAuth()
 @UseGuards(AdminGuard)
 @Controller({ path: 'agent', version: '1' })
+@RequiresFeature('ai')
 export class AgentController {
   constructor(
     private readonly agent: AgentService,

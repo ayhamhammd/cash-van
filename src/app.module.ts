@@ -4,7 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EventEmitterModule } from '@nestjs/event-emitter';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 
 import configuration from './config/configuration';
 import { envValidationSchema } from './config/validation.schema';
@@ -16,6 +16,11 @@ import { PermissionsGuard } from './common/guards/permissions.guard';
 import { TrackingTokenGuard } from './common/guards/tracking-token.guard';
 
 import { UserContextModule } from './common/context/user-context.module';
+import { TenancyModule } from './common/tenancy/tenancy.module';
+import { TenantsModule } from './modules/tenants/tenants.module';
+import { LicensingModule } from './common/licensing/licensing.module';
+import { LicenseGuard } from './common/licensing/license.guard';
+import { TenantScopeInterceptor } from './common/tenancy/tenant-scope.interceptor';
 import { StorageModule } from './common/storage/storage.module';
 import { CacheModule } from './common/cache/cache.module';
 import { JobsModule } from './common/jobs/jobs.module';
@@ -118,13 +123,24 @@ import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module
     TargetsModule,
     ArModule,
     CashAccountsModule,
+    TenancyModule,
+    TenantsModule,
+    LicensingModule,
   ],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // FIRST: resolves the licence key into the request context before the auth
+    // guards run. Login has no token, so this is the only thing that can say
+    // which company to look the user up in.
+    { provide: APP_GUARD, useClass: LicenseGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: TrackingTokenGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
+    // Runs after the guards above, so the JWT strategy has already put the
+    // tenant on the request context by the time this binds it to the database
+    // connection.
+    { provide: APP_INTERCEPTOR, useClass: TenantScopeInterceptor },
   ],
 })
 export class AppModule {}

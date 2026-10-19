@@ -5,6 +5,12 @@ export interface UserContext {
   userId: string;
   role: string;
   repId?: string | null;
+  /**
+   * Company this request belongs to. Bound to the database connection as
+   * `app.tenant_id`, which is what every row-level security policy reads —
+   * see `1723700000000-TenancyAndRls`. Null only on unauthenticated routes.
+   */
+  tenantId?: string | null;
 }
 
 export const USER_CTX_KEY = 'userCtx';
@@ -42,6 +48,10 @@ export class UserContextService {
 
   getRepId(): string | null {
     return this.get()?.repId ?? null;
+  }
+
+  getTenantId(): string | null {
+    return this.get()?.tenantId ?? null;
   }
 
   /**

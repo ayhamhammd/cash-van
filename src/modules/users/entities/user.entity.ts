@@ -13,6 +13,19 @@ export type RepScopeMode = 'all' | 'assigned';
 
 @Entity({ name: 'users' })
 export class User extends BaseEntity {
+  /**
+   * The company this user belongs to.
+   *
+   * Read-only: the column has a database default of `app.tenant_id`, which is
+   * bound to the connection for the request, so letting TypeORM write it would
+   * only create a way to write the WRONG one. It is mapped at all because login
+   * has to stamp it into the token — a token without it falls back to the
+   * default company, which means a signed-in user of one company reading and
+   * writing another's data.
+   */
+  @Column({ name: 'tenant_id', type: 'uuid', insert: false, update: false })
+  tenantId!: string;
+
   @Index('uq_users_user_number', { unique: true })
   @Column({ name: 'user_number', type: 'text' })
   userNumber!: string;

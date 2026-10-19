@@ -6,6 +6,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ConfigService } from '@nestjs/config';
 
 import { RepStatus } from '../modules/reps/entities/rep-status.entity';
+import { TenantScope } from '../common/tenancy/tenant-scope.service';
 
 /**
  * Every 60s, finds active reps whose last liveness signal (heartbeat or GPS
@@ -25,19 +26,29 @@ export class HeartbeatWatchdogService {
     @InjectRepository(RepStatus)
     private readonly statuses: Repository<RepStatus>,
     private readonly bus: EventEmitter2,
+    private readonly tenants: TenantScope,
     config: ConfigService,
   ) {
     const minutes = config.get<number>('heartbeat.offlineThresholdMin') ?? 10;
     this.thresholdMs = minutes * 60_000;
   }
 
+  /**
+   * Runs the check once per company.
+   *
+   * A cron tick has no request behind it and therefore no tenant bound to the
+   * connection, so a single un-scoped pass would read zero reps and quietly
+   * alert nobody.
+   */
   @Cron(CronExpression.EVERY_MINUTE, { name: 'rep-offline-watchdog' })
   async tick(): Promise<void> {
-    try {
-      await this.check();
-    } catch (err) {
-      this.logger.warn(`heartbeat check failed: ${(err as Error).message}`);
-    }
+    await this.tenants.forEachTenant(
+      () => this.check(),
+      (tenantId, err) =>
+        this.logger.warn(
+          `heartbeat check failed for tenant ${tenantId}: ${(err as Error).message}`,
+        ),
+    );
   }
 
   async check(now: Date = new Date()): Promise<void> {

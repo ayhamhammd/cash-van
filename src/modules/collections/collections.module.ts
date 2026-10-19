@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Collection } from './entities/collection.entity';
 import { Cheque } from './entities/cheque.entity';
@@ -13,10 +12,11 @@ import { ChequesService } from './cheques.service';
 import { CollectionsController } from './collections.controller';
 import { ChequesController } from './cheques.controller';
 import { ReferenceController } from './reference.controller';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Collection, Cheque, Rep, Customer]),
+    TenantOrmModule.forFeature([Collection, Cheque, Rep, Customer]),
     CustomersModule,
     UsersModule,
   ],

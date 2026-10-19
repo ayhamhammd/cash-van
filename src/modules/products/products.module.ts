@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
@@ -28,10 +27,11 @@ import { VanStockController } from './van-stock.controller';
 import { PriceRulesController } from './price-rules.controller';
 import { CustomerPricesController } from './customer-prices.controller';
 import { PriceListsController } from './price-lists.controller';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       ItemCart,
       ItemUnit,
       ProductCategory,

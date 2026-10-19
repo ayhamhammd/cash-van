@@ -14,6 +14,7 @@ import { AccountEntryKind, AccountTransaction } from './entities/account-transac
 import { CreateCashAccountDto } from './dto/create-cash-account.dto';
 import { UpdateCashAccountDto } from './dto/update-cash-account.dto';
 import { SettingsService } from '../settings/settings.service';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 export interface AccountView extends CashAccount {
   balanceFils: number;
@@ -40,7 +41,7 @@ export class CashAccountsService {
   constructor(
     @InjectRepository(CashAccount) private readonly accounts: Repository<CashAccount>,
     @InjectRepository(AccountTransaction) private readonly txns: Repository<AccountTransaction>,
-    @InjectDataSource() private readonly ds: DataSource,
+    private readonly ds: TenantDataSource,
     private readonly settings: SettingsService,
   ) {}
 

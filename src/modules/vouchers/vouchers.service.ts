@@ -113,6 +113,7 @@ const VOUCHER_PREFIX: Record<string, string> = {
   PAYMENT_OUT: 'PAY',
 };
 import { CreateChequeDto } from './dto/create-cheque.dto';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 
 /** Permission keys gating sensitive salesman actions (F10). */
@@ -179,7 +180,7 @@ export function saleLocationOf(dto: {
 @Injectable()
 export class VouchersService implements OnModuleInit {
   constructor(
-    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly dataSource: TenantDataSource,
     @InjectRepository(VoucherHeader)
     private readonly headersRepo: Repository<VoucherHeader>,
     @InjectRepository(PaymentCheque)

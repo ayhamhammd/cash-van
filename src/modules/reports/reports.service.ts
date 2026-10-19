@@ -6,6 +6,7 @@ import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
 import { CashAccountsService, SettleTransfers } from '../cash-accounts/cash-accounts.service';
 import { SalesmanSettlement } from './entities/salesman-settlement.entity';
 import { VoucherSummaryQuery } from './dto/voucher-summary.query';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 /** One salesman's End-of-Day cash summary over a period (all money in fils). */
 export interface EodRow {
@@ -181,7 +182,7 @@ interface RawPing {
 @Injectable()
 export class ReportsService {
   constructor(
-    @InjectDataSource() private readonly ds: DataSource,
+    private readonly ds: TenantDataSource,
     @InjectRepository(SalesmanSettlement)
     private readonly settlements: Repository<SalesmanSettlement>,
     private readonly erpOutbox: ErpOutboxService,

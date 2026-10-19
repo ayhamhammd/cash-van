@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 export type Tone = 'info' | 'warn' | 'good';
 export type Trend = 'up' | 'down' | 'flat';
@@ -30,7 +31,7 @@ export interface AiInsights {
  */
 @Injectable()
 export class AiInsightsService {
-  constructor(@InjectDataSource() private readonly ds: DataSource) {}
+  constructor(private readonly ds: TenantDataSource) {}
 
   async insights(): Promise<AiInsights> {
     const [briefing, forecast, recommendations, ocr] = await Promise.all([

@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { VoucherHeader } from './entities/voucher-header.entity';
 import { VoucherTransaction } from './entities/voucher-transaction.entity';
@@ -20,10 +19,11 @@ import { OffersModule } from '../offers/offers.module';
 import { ReturnsController } from './returns/returns.controller';
 import { ReturnCandidatesService } from './returns/candidates';
 import { ReturnCreateService } from './returns/create';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       VoucherHeader,
       VoucherTransaction,
       Payment,

@@ -1,5 +1,5 @@
+import { TenantDataSource } from '../../../common/tenancy/tenant-data-source.service';
 import { Injectable } from '@nestjs/common';
-import { DataSource } from 'typeorm';
 
 /**
  * Which sale lines a returned item could have come from.
@@ -52,7 +52,7 @@ export interface CandidateQuery {
 
 @Injectable()
 export class ReturnCandidatesService {
-  constructor(private readonly ds: DataSource) {}
+  constructor(private readonly ds: TenantDataSource) {}
 
   async find(q: CandidateQuery): Promise<ReturnCandidate[]> {
     if (q.itemNumbers.length === 0) return [];

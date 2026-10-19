@@ -13,6 +13,7 @@
     "key": "ts-node -r tsconfig-paths/register scripts/activation-key.ts",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "test": "jest",
+    "test:db": "jest --testPathIgnorePatterns=[] --testRegex '.*\\.integration\\.spec\\.ts$' --runInBand",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:e2e": "jest --config ./test/jest-e2e.json",
@@ -112,6 +113,9 @@
     "testEnvironment": "node",
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
+    "testPathIgnorePatterns": [
+      "\\.integration\\.spec\\.ts$"
+    ],
     "moduleFileExtensions": [
       "js",
       "json",

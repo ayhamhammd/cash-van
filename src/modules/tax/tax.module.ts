@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { CreditNote } from './entities/credit-note.entity';
 import { CreditNoteLine } from './entities/credit-note-line.entity';
@@ -22,10 +21,11 @@ import { TaxReportController } from './tax-report.controller';
 
 import { SettingsModule } from '../settings/settings.module';
 import { UsersModule } from '../users/users.module';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       CreditNote,
       CreditNoteLine,
       TaxLedgerEntry,

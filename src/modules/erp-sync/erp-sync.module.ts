@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity';
@@ -28,11 +27,12 @@ import { ErpIdMap } from './entities/erp-id-map.entity';
 import { ErpSyncCursor } from './entities/erp-sync-cursor.entity';
 import { ErpOutbox } from './entities/erp-outbox.entity';
 import { StockRequest } from '../stock-requests/entities/stock-request.entity';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 /** ERP (erp-saas) integration — inbound catalog pull + outbound van-txn push. */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       ItemCart,
       TobaccoTaxProfile,
       Warehouse,

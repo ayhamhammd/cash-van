@@ -92,7 +92,13 @@ export class AuthService {
     const permKeys = user.permissions ?? [];
     const payload: JwtPayload = {
       sub: user.id,
-      v: 2,
+      // v3 carries `tid`. This is not cosmetic: without it every authenticated
+      // request fell back to the DEFAULT company, so a signed-in Alpha admin
+      // read and WROTE Beta's — and DEFAULT's — data. The licence key resolves
+      // the company for the login itself, but the token is what carries it for
+      // every request afterwards, and it was dropping it on the floor.
+      v: 3,
+      tid: user.tenantId,
       userNumber: user.userNumber,
       userType: user.userType,
       role: user.role ?? 'viewer',

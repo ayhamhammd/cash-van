@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 
 import { AuditLog } from './entities/audit-log.entity';
@@ -14,9 +13,10 @@ import { NotificationDispatcher } from './notification-dispatcher.service';
 import { RuleEvaluator } from './rule-evaluator.service';
 import { NotificationRulesService } from './notification-rules.service';
 import { NotificationRulesController } from './notification-rules.controller';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([AuditLog, NotificationRule])],
+  imports: [TenantOrmModule.forFeature([AuditLog, NotificationRule])],
   controllers: [AuditController, NotificationRulesController],
   providers: [
     AuditService,

@@ -1,3 +1,4 @@
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 import {
   BadRequestException,
   ConflictException,
@@ -9,7 +10,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 
 import { StockRequest, StockRequestStatus } from './entities/stock-request.entity';
@@ -63,7 +64,7 @@ export class StockRequestsService {
     private readonly repScope: RepScopeService,
     private readonly notifications: NotificationsService,
     private readonly events: EventEmitter2,
-    private readonly dataSource: DataSource,
+    private readonly dataSource: TenantDataSource,
   ) {}
 
   // ── Creation (mobile) ──────────────────────────────────────────────────────

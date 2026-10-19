@@ -128,6 +128,31 @@ export class AppSettings {
   @Column({ name: 'ai_api_key_encrypted', type: 'text', nullable: true, select: false })
   aiApiKeyEncrypted?: string | null;
 
+  /**
+   * Where the AI key came from, and therefore who is billed for it.
+   *
+   * `platform` means 7Software is paying. It has to be recorded rather than
+   * guessed from whether a key is present, because "on our key" and "no AI at
+   * all" look identical from that angle and cost very different amounts.
+   */
+  @Column({ name: 'ai_key_source', type: 'text', default: 'none' })
+  aiKeySource!: 'company' | 'platform' | 'none';
+
+  /**
+   * The Google Maps key for THIS company.
+   *
+   * Used to live in the dashboard's build, which meant one key shared by every
+   * customer, no way to attribute usage, and a rebuild to change it.
+   */
+  @Column({ name: 'google_maps_key_encrypted', type: 'text', nullable: true, select: false })
+  googleMapsKeyEncrypted?: string | null;
+
+  @Column({ name: 'google_maps_key_last4', type: 'text', nullable: true })
+  googleMapsKeyLast4?: string | null;
+
+  @Column({ name: 'keys_set_at', type: 'timestamptz', nullable: true })
+  keysSetAt?: Date | null;
+
   @Column({ name: 'ai_api_key_last4', type: 'text', nullable: true })
   aiApiKeyLast4?: string | null;
 

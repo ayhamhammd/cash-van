@@ -1,17 +1,17 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { EventsGateway } from './events.gateway';
 import { EventBridgeService } from './event-bridge.service';
 import { HeartbeatWatchdogService } from './heartbeat-watchdog.service';
 import { RepStatus } from '../modules/reps/entities/rep-status.entity';
 import { UsersModule } from '../modules/users/users.module';
+import { TenantOrmModule } from '../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [UsersModule, 
-    TypeOrmModule.forFeature([RepStatus]),
+    TenantOrmModule.forFeature([RepStatus]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

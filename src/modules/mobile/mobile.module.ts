@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Rep } from '../reps/entities/rep.entity';
 import { User } from '../users/entities/user.entity';
@@ -15,10 +14,11 @@ import { VanStock } from '../products/entities/van-stock.entity';
 import { MobileController } from './mobile.controller';
 import { MobileService } from './mobile.service';
 import { MobileContextGuard } from './mobile-context.guard';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       Rep,
       User,
       Region,

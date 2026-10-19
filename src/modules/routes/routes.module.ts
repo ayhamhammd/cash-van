@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { RoutePlan } from './entities/route-plan.entity';
 import { RouteStop } from './entities/route-stop.entity';
@@ -14,10 +13,11 @@ import { RouteAdherenceService } from './route-adherence.service';
 import { RoutesController } from './routes.controller';
 import { JourneyPlanController } from './journey-plan.controller';
 import { MyRouteController } from './my-route.controller';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       RoutePlan,
       RouteStop,
       JourneyPlanEntry,

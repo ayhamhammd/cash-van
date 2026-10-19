@@ -9,6 +9,33 @@ export default () => ({
     database: process.env.DB_NAME ?? 'cashvan',
     ssl: process.env.DB_SSL === 'true',
     logging: process.env.DB_LOGGING === 'true',
+    // The unprivileged role the RUNNING APP connects as, so row-level security
+    // actually applies to it. Migrations keep using DB_USERNAME, which owns the
+    // tables. Leave unset to run without tenant enforcement (single-tenant
+    // installs) — the app warns loudly on boot when that is the case.
+    appUsername: process.env.DB_APP_USERNAME ?? '',
+    appPassword: process.env.DB_APP_PASSWORD ?? '',
+  },
+  // Shared secret the CRM control plane presents when creating a company here.
+  // Unset = provisioning is switched off, not merely unguarded.
+  internalProvisionSecret: process.env.INTERNAL_PROVISION_SECRET ?? '',
+  // Bind untenanted requests (login, webhooks) to the default tenant. Correct
+  // for a SINGLE-COMPANY install, where every row belongs to it anyway, and
+  // what keeps on-premise deployments logging in exactly as before. Turn OFF
+  // on a shared deployment: there the company cannot be guessed, and dashboard
+  // users authenticate through the CRM instead.
+  tenantFallbackEnabled: process.env.TENANT_FALLBACK_ENABLED !== 'false',
+  // Licensing. Unset CRM url = licensing OFF entirely, which is what a
+  // single-company or on-premise install runs — every route passes and nothing
+  // phones home.
+  licensing: {
+    crmBaseUrl: (process.env.CRM_BASE_URL ?? '').replace(/\/+$/, ''),
+    // How stale a cached entitlement may be before re-checking. The lever on
+    // how quickly a suspension bites.
+    cacheTtlMs: parseInt(process.env.LICENSE_CACHE_TTL_MS ?? '60000', 10),
+    // How long a cached entitlement keeps being served when the CRM is DOWN.
+    // Generous on purpose: a control-plane outage must not stop vans selling.
+    staleGraceMs: parseInt(process.env.LICENSE_STALE_GRACE_MS ?? '86400000', 10),
   },
   jwt: {
     secret: process.env.JWT_SECRET ?? 'change-me',

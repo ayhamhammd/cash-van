@@ -22,10 +22,13 @@ import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('credit-notes')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'credit-notes', version: '1' })
+@RequiresFeature('invoicing')
 export class CreditNotesController {
   constructor(
     private readonly creditNotes: CreditNotesService,

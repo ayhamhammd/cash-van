@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ItemCart } from './entities/item-cart.entity';
 import { ExpiryItem } from './entities/expiry-item.entity';
@@ -15,10 +14,11 @@ import { TobaccoTaxProfilesService } from './tobacco-tax-profiles.service';
 import { ItemsController } from './items.controller';
 import { TobaccoTaxProfilesController } from './tobacco-tax-profiles.controller';
 import { WarehousesModule } from '../warehouses/warehouses.module';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       ItemCart,
       ExpiryItem,
       ItemBalanceView,
@@ -29,6 +29,6 @@ import { WarehousesModule } from '../warehouses/warehouses.module';
   ],
   controllers: [ItemsController, TobaccoTaxProfilesController],
   providers: [ItemCartService, ExpiryItemsService, ItemBalanceService, TobaccoTaxProfilesService],
-  exports: [ItemCartService, TobaccoTaxProfilesService, TypeOrmModule],
+  exports: [ItemCartService, TobaccoTaxProfilesService, TenantOrmModule],
 })
 export class ItemsModule {}

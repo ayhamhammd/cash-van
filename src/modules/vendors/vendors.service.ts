@@ -1,3 +1,4 @@
+import { TenantCounters } from '../../common/tenancy/tenant-counters.service';
 import {
   ConflictException,
   Injectable,
@@ -18,6 +19,7 @@ import {
 export class VendorsService {
   constructor(
     @InjectRepository(Vendor) private readonly vendorsRepo: Repository<Vendor>,
+    private readonly counters: TenantCounters,
   ) {}
 
   async create(dto: CreateVendorDto): Promise<Vendor> {
@@ -32,12 +34,10 @@ export class VendorsService {
     );
   }
 
-  /** Next serial vendor number: VEN-000001. */
+  /** Next serial vendor number: VEN-000001. Per tenant, not database-wide. */
   private async nextVendorNumber(): Promise<string> {
-    const rows: Array<{ n: string }> = await this.vendorsRepo.query(
-      "SELECT nextval('vendor_number_seq') AS n",
-    );
-    return `VEN-${String(rows[0]?.n ?? '0').padStart(6, '0')}`;
+    const n = await this.counters.next('vendor');
+    return `VEN-${String(n).padStart(6, '0')}`;
   }
 
   async update(id: string, dto: UpdateVendorDto): Promise<Vendor> {

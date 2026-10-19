@@ -31,10 +31,13 @@ import { RejectInvoiceDto, OverrideInvoiceDto } from './dto/approval-action.dto'
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('invoices')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ path: 'invoices', version: '1' })
+@RequiresFeature('invoicing')
 export class InvoicesController {
   constructor(private readonly invoices: InvoicesService) {}
 

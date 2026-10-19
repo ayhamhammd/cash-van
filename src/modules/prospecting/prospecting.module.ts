@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Customer } from '../customers/entities/customer.entity';
 import { QuoteTemplate } from './entities/quote-template.entity';
@@ -11,6 +10,7 @@ import { ProspectsController } from './prospects.controller';
 import { ProspectsService } from './prospects.service';
 import { PlacesService } from './places.service';
 import { WhatsappService } from './whatsapp.service';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 /**
  * Prospecting (lead finder): quote templates + the public quote page (P1),
@@ -19,7 +19,7 @@ import { WhatsappService } from './whatsapp.service';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([QuoteTemplate, Prospect, ProspectSearch, Customer]),
+    TenantOrmModule.forFeature([QuoteTemplate, Prospect, ProspectSearch, Customer]),
   ],
   controllers: [QuoteTemplatesController, ProspectsController],
   providers: [

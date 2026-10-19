@@ -20,10 +20,13 @@ import { CreditNotesService } from './credit-notes.service';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 
+import { RequiresFeature } from '../../common/licensing/requires-feature.decorator';
+
 @ApiTags('jofotara')
 @ApiBearerAuth()
 @UseGuards(RolesGuard)
 @Controller({ version: '1' })
+@RequiresFeature('jofotara')
 export class JoFotaraController {
   constructor(
     private readonly submission: JoFotaraSubmissionService,

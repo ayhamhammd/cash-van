@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Invoice } from './entities/invoice.entity';
 import { InvoiceLine } from './entities/invoice-line.entity';
@@ -11,10 +10,11 @@ import { ItemCart } from '../items/entities/item-cart.entity';
 import { InvoicesService } from './invoices.service';
 import { InvoiceNumberService } from './invoice-number.service';
 import { InvoicesController } from './invoices.controller';
+import { TenantOrmModule } from '../../common/tenancy/tenant-orm.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([
+    TenantOrmModule.forFeature([
       Invoice,
       InvoiceLine,
       InvoiceApproval,

@@ -14,6 +14,32 @@ export const envValidationSchema = Joi.object({
   DB_SSL: Joi.boolean().default(false),
   DB_LOGGING: Joi.boolean().default(false),
 
+  // Unprivileged role the running app uses so row-level security applies to it
+  // (a superuser ignores RLS entirely). Optional: unset means no tenant
+  // enforcement, which the app warns about on every boot. Setting one without
+  // the other is always a mistake, so they are required together.
+  DB_APP_USERNAME: Joi.string().allow('').default(''),
+  DB_APP_PASSWORD: Joi.string()
+    .allow('')
+    .default('')
+    .when('DB_APP_USERNAME', {
+      is: Joi.string().min(1),
+      then: Joi.string().min(1).required(),
+    }),
+
+  // Presented by the CRM when it provisions a company. Long, because it is the
+  // only thing standing between the internet and "create a new company".
+  INTERNAL_PROVISION_SECRET: Joi.string().allow('').min(0).default(''),
+
+  // See TenantScopeInterceptor: single-company installs keep the fallback ON so
+  // login works without a CRM; shared deployments turn it OFF.
+  TENANT_FALLBACK_ENABLED: Joi.boolean().default(true),
+
+  // Licensing: where the CRM lives. Blank switches licensing off entirely.
+  CRM_BASE_URL: Joi.string().uri().allow('').default(''),
+  LICENSE_CACHE_TTL_MS: Joi.number().min(1000).default(60000),
+  LICENSE_STALE_GRACE_MS: Joi.number().min(0).default(86400000),
+
   JWT_SECRET: Joi.string().min(16).required(),
   JWT_EXPIRES_IN: Joi.string().default('12h'),
 

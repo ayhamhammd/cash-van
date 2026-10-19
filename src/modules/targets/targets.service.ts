@@ -4,6 +4,7 @@ import { DataSource, Repository } from 'typeorm';
 
 import { SalesTarget, TargetMetric } from './entities/sales-target.entity';
 import { UpsertTargetDto } from './dto/upsert-target.dto';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 export interface TargetRow {
   repId: string;
@@ -63,7 +64,7 @@ const SELECT_COLS = `
 @Injectable()
 export class TargetsService {
   constructor(
-    @InjectDataSource() private readonly ds: DataSource,
+    private readonly ds: TenantDataSource,
     @InjectRepository(SalesTarget) private readonly repo: Repository<SalesTarget>,
   ) {}
 

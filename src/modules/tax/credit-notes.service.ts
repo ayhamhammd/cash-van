@@ -1,10 +1,12 @@
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
+import { TenantCounters } from '../../common/tenancy/tenant-counters.service';
 import {
   BadRequestException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { randomUUID } from 'crypto';
 
@@ -29,7 +31,8 @@ export class CreditNotesService {
     @InjectRepository(CreditNoteLine) private readonly cnLines: Repository<CreditNoteLine>,
     @InjectRepository(Invoice) private readonly invoices: Repository<Invoice>,
     @InjectRepository(InvoiceLine) private readonly invoiceLines: Repository<InvoiceLine>,
-    private readonly ds: DataSource,
+    private readonly ds: TenantDataSource,
+    private readonly counters: TenantCounters,
     private readonly bus: EventEmitter2,
   ) {}
 
@@ -162,10 +165,9 @@ export class CreditNotesService {
     return this.findOne(saved.id);
   }
 
+  /** Per tenant, not database-wide — see TenantCounters. */
   private async nextNumber(): Promise<string> {
-    const rows = (await this.ds.query(
-      `SELECT nextval('credit_note_number_seq') AS seq`,
-    )) as Array<{ seq: string }>;
-    return `CN-${new Date().getFullYear()}-${String(Number(rows[0].seq)).padStart(6, '0')}`;
+    const seq = await this.counters.next('credit_note');
+    return `CN-${new Date().getFullYear()}-${String(seq).padStart(6, '0')}`;
   }
 }

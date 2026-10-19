@@ -6,6 +6,7 @@ import { ErpHttpClient } from '../erp-sync/erp-http.client';
 import { ErpIdMap } from '../erp-sync/entities/erp-id-map.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { Rep } from '../reps/entities/rep.entity';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 export type AgingBasis = 'due' | 'invoice';
 
@@ -54,7 +55,7 @@ export class ArService {
     @InjectRepository(ErpIdMap) private readonly idmap: Repository<ErpIdMap>,
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
     @InjectRepository(Rep) private readonly reps: Repository<Rep>,
-    @InjectDataSource() private readonly ds: DataSource,
+    private readonly ds: TenantDataSource,
   ) {}
 
   /** Resolve a local customerNumber → the ERP customer id (via the id-map). */

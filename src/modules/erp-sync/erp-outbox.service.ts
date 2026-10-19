@@ -1,3 +1,4 @@
+import { TenantScope } from '../../common/tenancy/tenant-scope.service';
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -56,7 +57,11 @@ export class TerminalPayloadError extends Error {}
 @Injectable()
 export class ErpOutboxService {
   private readonly logger = new Logger(ErpOutboxService.name);
-  private draining = false;
+  /**
+   * Companies with a drain in flight. A single boolean would let one
+   * company's slow push block every other company's queue.
+   */
+  private readonly draining = new Set<string>();
 
   constructor(
     private readonly erp: ErpHttpClient,
@@ -74,6 +79,9 @@ export class ErpOutboxService {
     @InjectRepository(ItemUnit) private readonly itemUnits: Repository<ItemUnit>,
     @InjectRepository(StockRequest) private readonly stockRequests: Repository<StockRequest>,
     @InjectRepository(Rep) private readonly reps: Repository<Rep>,
+    // Last on purpose: the buildSale specs construct this service positionally,
+    // so inserting a parameter mid-list silently shifts every repository after it.
+    private readonly tenants: TenantScope,
   ) {}
 
   /** Queue a van document for push to the ERP (best-effort; never throws to the caller). */
@@ -120,7 +128,20 @@ export class ErpOutboxService {
    */
   @Interval(DRAIN_INTERVAL_MS)
   async drain(): Promise<void> {
-    if (this.draining) return;
+    // Once per company: the outbox rows, the ERP credentials and the retry
+    // state are all per-tenant, and an unscoped tick reads an empty queue.
+    await this.tenants.forEachTenant(
+      (tenantId) => this.drainForTenant(tenantId),
+      (tenantId, e) =>
+        this.logger.warn(
+          `outbox drain failed for tenant ${tenantId}: ${e instanceof Error ? e.message : e}`,
+        ),
+    );
+  }
+
+  /** One company's outbox. Runs inside that tenant's scope. */
+  private async drainForTenant(tenantId: string): Promise<void> {
+    if (this.draining.has(tenantId)) return;
     // Keep the error. getErpConfig() THROWS when the stored API key can't be
     // decrypted — which is what happens if JWT_SECRET or the KMS key changes
     // between deploys. Swallowing it into `null` made that indistinguishable
@@ -152,7 +173,7 @@ export class ErpOutboxService {
       }
       return;
     }
-    this.draining = true;
+    this.draining.add(tenantId);
     try {
       const due = await this.outbox.find({
         where: { status: 'pending', nextAttemptAt: LessThanOrEqual(new Date()) },
@@ -161,7 +182,7 @@ export class ErpOutboxService {
       });
       for (const row of due) await this.pushOne(row);
     } finally {
-      this.draining = false;
+      this.draining.delete(tenantId);
     }
   }
 

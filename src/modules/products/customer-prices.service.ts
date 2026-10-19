@@ -4,6 +4,7 @@ import { DataSource, Repository } from 'typeorm';
 
 import { ItemCart } from '../items/entities/item-cart.entity';
 import { CustomerPrice } from './entities/customer-price.entity';
+import { TenantDataSource } from '../../common/tenancy/tenant-data-source.service';
 
 /** One customer's contract/list price for a product (unit). */
 export interface CustomerPriceRow {
@@ -31,7 +32,7 @@ export interface UpsertCustomerPriceInput {
 @Injectable()
 export class CustomerPricesService {
   constructor(
-    @InjectDataSource() private readonly ds: DataSource,
+    private readonly ds: TenantDataSource,
     @InjectRepository(CustomerPrice) private readonly prices: Repository<CustomerPrice>,
     @InjectRepository(ItemCart) private readonly items: Repository<ItemCart>,
   ) {}
