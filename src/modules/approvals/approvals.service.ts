@@ -7,10 +7,12 @@ import {
   NotFoundException,
   Inject,
   forwardRef,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { ErpSyncService } from '../erp-sync/erp-sync.service';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 
@@ -71,6 +73,12 @@ export class ApprovalsService {
     private readonly repScope: RepScopeService,
     private readonly notifications: NotificationsService,
     private readonly events: EventEmitter2,
+    // Optional on purpose: the ERP integration may be off, and an approval
+    // screen that cannot open without it would be worse than one showing the
+    // local mirror and saying so.
+    @Optional()
+    @Inject(forwardRef(() => ErpSyncService))
+    private readonly erpSync?: ErpSyncService,
   ) {}
 
   /**
@@ -567,9 +575,45 @@ export class ApprovalsService {
     const customer = await this.customerRows.findOne({ where: { customerNumber } });
     if (!customer) throw new NotFoundException(`Customer ${customerNumber} not found`);
 
+    const round = (n: number) => Math.round(n * 1000) / 1000;
+
+    // THE FIGURES MUST BE THE ERP'S, NOT THIS SIDE'S.
+    //
+    // `customers.total_debt` is a mirror of the ERP closing balance, written
+    // only when somebody opens that customer's ERP statement. Deciding from it
+    // produced both failures: a supervisor asked to approve a sale that was
+    // never over the limit, and — worse — a sale waved through as ordinary that
+    // the ERP then refused with CREDIT_LIMIT_EXCEEDED, leaving it stuck in the
+    // outbox with the goods already gone.
+    //
+    // The ERP's own endpoint runs the SAME check the push will run, so a
+    // supervisor now decides on the number that will actually be enforced.
+    const live = await this.erpSync
+      ?.getErpCreditState(customerNumber, creditAmount)
+      .catch(() => null);
+
+    if (live) {
+      return {
+        customerName: customer.nameAr || customer.customerName,
+        creditLimit: round(live.creditLimit),
+        balance: round(live.balance),
+        creditAmount: round(creditAmount),
+        available: round(Math.max(0, live.available)),
+        overBy: round(live.overBy),
+        creditHold: live.creditHold,
+        // A hold cannot be overridden — the ERP refuses the sale whatever this
+        // approval says — so the screen must be able to tell the supervisor
+        // that approving will not help.
+        overridable: !live.creditHold,
+        source: 'erp' as const,
+      };
+    }
+
+    // ERP off, unreachable, or too old to have the endpoint. Fall back to the
+    // mirror, but SAY SO: a stale figure presented as live is how a supervisor
+    // is talked into a decision they would not otherwise make.
     const creditLimit = Number(customer.creditLimit) || 0;
     const balance = Number(customer.totalDebt) || 0;
-    const round = (n: number) => Math.round(n * 1000) / 1000;
     return {
       customerName: customer.nameAr || customer.customerName,
       creditLimit: round(creditLimit),
@@ -578,6 +622,8 @@ export class ApprovalsService {
       available: round(Math.max(0, creditLimit - balance)),
       overBy: round(Math.max(0, balance + creditAmount - creditLimit)),
       creditHold: customer.creditHold === true,
+      overridable: customer.creditHold !== true,
+      source: 'local-mirror' as const,
     };
   }
 

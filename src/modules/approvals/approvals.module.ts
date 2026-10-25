@@ -12,6 +12,7 @@ import { ApprovalsController } from './approvals.controller';
 import { VouchersModule } from '../vouchers/vouchers.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { UsersModule } from '../users/users.module';
+import { ErpSyncModule } from '../erp-sync/erp-sync.module';
 
 @Module({
   imports: [
@@ -25,6 +26,10 @@ import { UsersModule } from '../users/users.module';
     // is evaluated VouchersModule is still undefined and Nest fails to boot.
     forwardRef(() => VouchersModule),
     NotificationsModule,
+    // The over-limit approval screen asks the ERP for the credit figures it
+    // actually enforces, rather than reading this side's stale mirror.
+    // forwardRef: erp-sync reaches back into customers, which reaches here.
+    forwardRef(() => ErpSyncModule),
   ],
   controllers: [ApprovalsController],
   providers: [ApprovalsService],

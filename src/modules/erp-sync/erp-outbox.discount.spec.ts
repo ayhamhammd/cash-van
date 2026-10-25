@@ -13,15 +13,19 @@ import { ErpOutboxService } from './erp-outbox.service';
  *
  * Constructor arg order: erp, settings, cashAccounts, outbox, idmap(4),
  * headers(5), lines(6), tobaccoProfiles(7), collections, customers,
- * salesmanSettlements, payments(11).
+ * salesmanSettlements, payments(11), …, approvals(17), users(18).
  */
 function makeSvc(mocks: { headers?: any; lines?: any; payments?: any; customers?: any }) {
-  const args: any[] = new Array(12).fill(null);
+  const args: any[] = new Array(19).fill(null);
   args[5] = mocks.headers;
   args[6] = mocks.lines;
   args[7] = { findOne: jest.fn().mockResolvedValue({ erpId: 'erp-profile-1' }) };
   args[9] = mocks.customers ?? { findOne: jest.fn().mockResolvedValue(null) };
   args[11] = mocks.payments;
+  // No credit-limit approval for these sales: buildSale asks on every sale, and
+  // the answer for an ordinary one is "there wasn't one".
+  args[17] = { findOne: jest.fn().mockResolvedValue(null) };
+  args[18] = { findOne: jest.fn().mockResolvedValue(null) };
   return new (ErpOutboxService as any)(...args) as ErpOutboxService;
 }
 

@@ -15,6 +15,8 @@ import { Collection } from '../collections/entities/collection.entity';
 import { Cheque } from '../collections/entities/cheque.entity';
 import { chequeGaps, describeMissing, type ChequeGap } from '../collections/cheque-gaps';
 import { Customer } from '../customers/entities/customer.entity';
+import { ApprovalRequest } from '../approvals/entities/approval-request.entity';
+import { User } from '../users/entities/user.entity';
 import { erpCustomerBody } from './erp-customer-payload';
 import { requeueOutboxLatestWithin } from './outbox-enqueue';
 import { SalesmanSettlement } from '../reports/entities/salesman-settlement.entity';
@@ -153,6 +155,11 @@ export class ErpOutboxService {
     @InjectRepository(Rep) private readonly reps: Repository<Rep>,
     @InjectRepository(Cheque) private readonly cheques: Repository<Cheque>,
     @InjectRepository(ItemCart) private readonly itemCarts: Repository<ItemCart>,
+    // An over-limit sale carries the approval that authorised it; see
+    // creditOverrideFor. Users is read only to turn the reviewer's id into a
+    // name the ERP's audit trail can be read by.
+    @InjectRepository(ApprovalRequest) private readonly approvals: Repository<ApprovalRequest>,
+    @InjectRepository(User) private readonly users: Repository<User>,
   ) {}
 
   /**
@@ -1476,7 +1483,58 @@ export class ErpOutboxService {
         invoiceDate: header.inDate,
         ...(header.notes ? { notes: header.notes } : {}),
         ...payment,
+        ...(await this.creditOverrideFor(voucherNumber)),
         items,
+      },
+    };
+  }
+
+  /**
+   * The approval that lets this sale past the customer's credit limit, if there
+   * was one.
+   *
+   * WHY THE PUSH HAS TO CARRY IT: the ERP re-runs its own credit check on every
+   * on-account sale and refuses with CREDIT_LIMIT_EXCEEDED. It has no way to
+   * know a supervisor already said yes, so an approved sale pushed without this
+   * sat in the outbox for ever — goods gone from the van, nothing in the
+   * accounts. The two systems each enforced the limit correctly and the sale
+   * fell down the gap between them.
+   *
+   * Only an APPROVED request counts, and only one of this type: a discount or a
+   * price-override approval authorises something else entirely and must not
+   * double as permission to exceed a credit limit.
+   *
+   * Returns `{}` when there was none, so the field is simply absent from the
+   * body — an ordinary sale is still checked the ordinary way.
+   */
+  private async creditOverrideFor(
+    voucherNumber: string,
+  ): Promise<Record<string, unknown>> {
+    const approval = await this.approvals
+      .findOne({
+        where: {
+          type: 'CREDIT_OVER_LIMIT',
+          status: 'approved',
+          resultVoucher: voucherNumber,
+        },
+        order: { decidedAt: 'DESC' },
+      })
+      .catch(() => null);
+    if (!approval) return {};
+
+    const reviewer = approval.reviewerUser
+      ? await this.users.findOne({ where: { id: approval.reviewerUser } }).catch(() => null)
+      : null;
+
+    return {
+      creditOverride: {
+        // The approval id is also the ERP's replay key: the outbox retries, and
+        // one decision must not be recorded as several exceptions.
+        approvalRef: approval.id,
+        // A name, not a uuid: this is read by whoever audits credit decisions in
+        // the ERP, where a VanFlow user id means nothing.
+        approvedBy: reviewer?.name ?? approval.reviewerUser ?? 'unknown',
+        reason: approval.decisionNote ?? null,
       },
     };
   }

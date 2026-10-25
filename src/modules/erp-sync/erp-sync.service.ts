@@ -67,6 +67,31 @@ export interface ErpBalance {
   creditLimit: number;
 }
 
+/**
+ * ERP `GET customers/{id|by-code/code}/credit` — the credit position AS THE ERP
+ * ENFORCES IT, in major units.
+ *
+ * Deliberately NOT the same as ErpBalance. `balance` here is the open
+ * receivable the credit check actually uses; the balance endpoint returns the
+ * statement balance, which legitimately differs. Asking the wrong one is how a
+ * supervisor ends up approving against a number the ERP will not recognise.
+ */
+export interface ErpCreditState {
+  customerId: string;
+  customerCode: string;
+  customerName: string;
+  balance: number;
+  creditLimit: number;
+  available: number;
+  creditHold: boolean;
+  /** False when no limit is configured — NOT the same as a limit of zero. */
+  enforced: boolean;
+  addAmount: number;
+  allowed: boolean;
+  reason: 'OK' | 'CREDIT_HOLD' | 'LIMIT_EXCEEDED' | 'NOT_ENFORCED';
+  overBy: number;
+}
+
 /** One posting line of an ERP customer statement (major units). */
 export interface ErpStatementLine {
   date: string | null;
@@ -880,6 +905,49 @@ export class ErpSyncService {
       ? `customers/${encodeURIComponent(erpId)}/balance`
       : `customers/by-code/${encodeURIComponent(code)}/balance`;
     return this.erp.getOne<ErpBalance>(path);
+  }
+
+  /**
+   * A customer's credit position as the ERP enforces it, for a prospective sale.
+   *
+   * WHY THIS AND NOT `customers.total_debt`: that column is a mirror, written
+   * only when somebody opens this customer's ERP statement. Deciding whether a
+   * sale needs a supervisor from a figure that may be days old produces both
+   * failures — an approval nobody needed, and a sale waved through as ordinary
+   * that the ERP then refuses, leaving it stuck in the outbox.
+   *
+   * Returns null when the ERP is off, unreachable or does not know the customer.
+   * The caller must then fall back to the local mirror and SAY SO, rather than
+   * present a stale number as though it were live.
+   */
+  async getErpCreditState(
+    code: string,
+    addAmount?: number,
+  ): Promise<ErpCreditState | null> {
+    if (!(await this.erpConfigReady())) return null;
+    if (!code) return null;
+    // Resolve the ERP's own id HERE rather than making every caller do it. By
+    // id where we have one, for the same reason as the balance above: a code
+    // this side derived (`ERP-<uuid-prefix>`) is not a code the ERP ever held,
+    // and asking for it answers 404.
+    const map = await this.idmap
+      .findOne({ where: { entity: 'customer', localId: code } })
+      .catch(() => null);
+    const erpId = map?.erpId ?? null;
+    const base = erpId
+      ? `customers/${encodeURIComponent(erpId)}/credit`
+      : `customers/by-code/${encodeURIComponent(code)}/credit`;
+    const suffix = addAmount && addAmount > 0 ? `?addAmount=${encodeURIComponent(String(addAmount))}` : '';
+    try {
+      return await this.erp.getOne<ErpCreditState>(`${base}${suffix}`);
+    } catch (e) {
+      // Not fatal: the approval screen degrades to the local mirror rather than
+      // refusing to open. An older ERP has no such route and answers 404.
+      this.logger.warn(
+        `ERP credit state unavailable for ${erpId ?? code}: ${(e as Error).message}`,
+      );
+      return null;
+    }
   }
 
   /**

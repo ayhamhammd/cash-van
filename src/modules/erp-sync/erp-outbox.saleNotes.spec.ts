@@ -4,7 +4,7 @@ import { ErpOutboxService } from './erp-outbox.service';
 import { SyncVoucherDto } from '../sync/dto/sync.dto';
 
 function buildSale(notes: string | null | undefined) {
-  const args: any[] = new Array(12).fill(null);
+  const args: any[] = new Array(19).fill(null);
   args[5] = {
     findOne: jest.fn().mockResolvedValue({
       voucherNumber: 'S-1',
@@ -18,6 +18,10 @@ function buildSale(notes: string | null | undefined) {
   args[11] = {
     find: jest.fn().mockResolvedValue([{ voucherNumber: 'S-1', amount: '10.000', paymentType: 'CASH' }]),
   };
+  // approvals(17) / users(18): buildSale asks every sale whether a credit-limit
+  // approval authorised it. These are ordinary sales, so: none.
+  args[17] = { findOne: jest.fn().mockResolvedValue(null) };
+  args[18] = { findOne: jest.fn().mockResolvedValue(null) };
   const svc = new (ErpOutboxService as any)(...args) as any;
   svc.customerRef = jest.fn().mockResolvedValue({ customerCode: 'CUST-1' });
   svc.vanStoreOf = jest.fn().mockReturnValue('VAN-1');

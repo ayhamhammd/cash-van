@@ -77,9 +77,17 @@ describe('CREDIT_OVER_LIMIT — approving', () => {
 
 describe('CREDIT_OVER_LIMIT — filing', () => {
   type Ctx = (r: unknown, n: string | null, p: Record<string, unknown>) => Promise<Record<string, unknown>>;
-  function context(customer: Record<string, unknown> | null) {
+  function context(
+    customer: Record<string, unknown> | null,
+    erpCredit?: Record<string, unknown> | null | Error,
+  ) {
     const svc = bare();
     define(svc, 'customerRows', { findOne: () => Promise.resolve(customer) });
+    // undefined → no ERP integration at all (erpSync is @Optional).
+    define(svc, 'erpSync', erpCredit === undefined ? undefined : {
+      getErpCreditState: () =>
+        erpCredit instanceof Error ? Promise.reject(erpCredit) : Promise.resolve(erpCredit),
+    });
     return (svc as unknown as { creditContext: Ctx }).creditContext.bind(svc);
   }
   const rep = { role: 'salesman', permissions: ['vouchers.credit.request'] };
@@ -90,7 +98,46 @@ describe('CREDIT_OVER_LIMIT — filing', () => {
     expect(ctx).toEqual({
       customerName: 'محل', creditLimit: 100, balance: 80, creditAmount: 50,
       available: 20, overBy: 30, creditHold: false,
+      // Named so the screen can say WHERE the numbers came from. A mirror
+      // presented as live is how a supervisor is talked into a decision they
+      // would not otherwise make.
+      overridable: true, source: 'local-mirror',
     });
+  });
+
+  it('prefers the ERP figures, because the ERP is what will enforce them', async () => {
+    // The local mirror says 80 owed of a 100 limit. The ERP — which actually
+    // decides whether the push is accepted — says 95. Approving against 80
+    // would hand the supervisor a number the ERP will not recognise.
+    const ctx = await context(shop, {
+      balance: 95, creditLimit: 100, available: 5, creditHold: false,
+      enforced: true, overBy: 45, allowed: false, reason: 'LIMIT_EXCEEDED',
+    })(rep, 'C-9', sale);
+    expect(ctx).toMatchObject({
+      balance: 95, creditLimit: 100, available: 5, overBy: 45, source: 'erp',
+    });
+  });
+
+  it('marks a customer on credit hold as NOT overridable', async () => {
+    // A limit is a judgement about how much; a hold is a decision to stop
+    // dealing on credit at all. The ERP refuses the sale whatever this approval
+    // says, so the screen must be able to tell the supervisor that approving
+    // will not help.
+    const ctx = await context(shop, {
+      balance: 10, creditLimit: 100, available: 90, creditHold: true,
+      enforced: true, overBy: 0, allowed: false, reason: 'CREDIT_HOLD',
+    })(rep, 'C-9', sale);
+    expect(ctx).toMatchObject({ creditHold: true, overridable: false, source: 'erp' });
+  });
+
+  it('falls back to the mirror, and says so, when the ERP cannot answer', async () => {
+    const ctx = await context(shop, null)(rep, 'C-9', sale);
+    expect(ctx).toMatchObject({ balance: 80, source: 'local-mirror' });
+  });
+
+  it('falls back rather than failing the screen when the ERP call throws', async () => {
+    const ctx = await context(shop, new Error('ECONNREFUSED'))(rep, 'C-9', sale);
+    expect(ctx).toMatchObject({ balance: 80, source: 'local-mirror' });
   });
 
   it('refuses a salesman who was not given the permission', async () => {

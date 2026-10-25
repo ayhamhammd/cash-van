@@ -6,6 +6,8 @@ import { TobaccoTaxProfile } from '../items/entities/tobacco-tax-profile.entity'
 import { Warehouse } from '../warehouses/entities/warehouse.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
+import { ApprovalRequest } from '../approvals/entities/approval-request.entity';
+import { User } from '../users/entities/user.entity';
 import { Unit } from '../units/entities/unit.entity';
 import { ItemUnit } from '../units/entities/item-unit.entity';
 import { ProductCategory } from '../products/entities/product-category.entity';
@@ -42,6 +44,8 @@ import { StockRequest } from '../stock-requests/entities/stock-request.entity';
       Warehouse,
       Rep,
       Customer,
+      ApprovalRequest,
+      User,
       Unit,
       ItemUnit,
       CustomerPrice,
