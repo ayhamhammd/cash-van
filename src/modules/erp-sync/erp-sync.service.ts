@@ -33,6 +33,7 @@ import { VoucherTransaction } from '../vouchers/entities/voucher-transaction.ent
 import { SettingsService } from '../settings/settings.service';
 import { VouchersService } from '../vouchers/vouchers.service';
 import { ErpHttpClient } from './erp-http.client';
+import { unpostedDebtByCustomer, withUnposted } from './unposted-debt';
 import { OUTBOX_KIND_BY_TRANS } from './outbox-enqueue';
 import { erpCustomerBody, erpWarnings } from './erp-customer-payload';
 import { ErpOutboxService } from './erp-outbox.service';
@@ -1159,12 +1160,17 @@ export class ErpSyncService {
     if (!this.windowEndsNow(to)) return;
     if (!Number.isFinite(erp.closingBalance)) return;
     try {
+      // The ERP's closing balance, plus whatever cash-van has moved that the ERP
+      // has not posted yet — see unposted-debt.ts. Writing the bare figure here
+      // undid a receipt the rep had just taken, the moment anyone looked at the
+      // statement, and the handset then refused his next credit sale.
+      const unposted = await unpostedDebtByCustomer(this.dataSource, [customerId]);
       await this.customers.update(
         { id: customerId },
         // total_credit is never written by anything and stays 0, so the handset's
         // `totalDebt - totalCredit` is exactly this figure. Writing the net closing
         // balance into total_debt therefore lands whole rather than half.
-        { totalDebt: erp.closingBalance.toFixed(2) },
+        { totalDebt: withUnposted(erp.closingBalance, unposted.get(customerId)) },
       );
     } catch (e) {
       this.logger.warn(
@@ -2398,6 +2404,9 @@ export class ErpSyncService {
     let page = 1;
     let total = Number.POSITIVE_INFINITY;
     let updated = 0;
+    // Read once for the whole book: what cash-van has moved that the ERP has not
+    // posted yet goes back on top of the ERP's figure — see unposted-debt.ts.
+    const unposted = await unpostedDebtByCustomer(this.dataSource);
     while ((page - 1) * pageSize < total) {
       const { data, total: t } = await this.erp.list<ErpAgingRow>('ar/aging', { page, pageSize });
       total = t;
@@ -2413,7 +2422,7 @@ export class ErpSyncService {
           where: { customerNumber: localNumber },
         });
         if (!cust) continue;
-        cust.totalDebt = Number(row.totalOpen ?? 0).toFixed(2);
+        cust.totalDebt = withUnposted(Number(row.totalOpen ?? 0), unposted.get(cust.id));
         await this.customers.save(cust);
         updated += 1;
       }

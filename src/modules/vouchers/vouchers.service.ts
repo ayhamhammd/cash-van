@@ -468,11 +468,16 @@ export class VouchersService implements OnModuleInit {
     //    until the next ERP balance pull happened to correct it.
     //
     // Allowed to throw now: a credit sale whose debt cannot be recorded should
-    // not exist. GREATEST(0, …) is kept — debt below zero is a credit note
-    // question, and this is not the place to invent an answer.
+    // not exist.
+    //
+    // No floor at zero. A customer who paid more than they owed is IN CREDIT —
+    // a negative debt, which a receipt already writes (applyCollectionToDebt does
+    // not clamp either) and the handset reads as money to spend. Clamping here
+    // deleted it: 100 in credit, a 30 credit sale, and the balance read 0 instead
+    // of -70; a return against a customer in credit erased the credit outright.
     await em.query(
       `UPDATE customers
-          SET total_debt = GREATEST(0, COALESCE(total_debt, 0) + $2::numeric)
+          SET total_debt = COALESCE(total_debt, 0) + $2::numeric
         WHERE customer_number = $1`,
       [dto.customerNumber, signed.toFixed(2)],
     );

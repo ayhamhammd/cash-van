@@ -39,10 +39,21 @@ describe('ErpSyncService statement balance mirror', () => {
     ) => Promise<void>;
   }
 
-  /** A service with just enough of itself to run the mirror, plus a spy repo. */
-  function service() {
+  /**
+   * A service with just enough of itself to run the mirror, plus a spy repo.
+   * `unposted` is what the DB says cash-van has moved that the ERP has not
+   * posted yet, per customer id (see unposted-debt.ts); none by default.
+   */
+  function service(unposted: Record<string, number> = {}) {
     const updates: Array<Record<string, unknown>> = [];
     const svc = Object.create(ErpSyncService.prototype) as unknown as Mirror;
+    Object.defineProperty(svc, 'dataSource', {
+      value: {
+        query: () =>
+          Promise.resolve(Object.entries(unposted).map(([customer_id, amount]) => ({ customer_id, amount }))),
+      },
+      configurable: true,
+    });
     Object.defineProperty(svc, 'customers', {
       value: {
         update: (_w: unknown, v: Record<string, unknown>) => {
@@ -63,6 +74,22 @@ describe('ErpSyncService statement balance mirror', () => {
     const { svc, updates } = service();
     await svc.mirrorStatementBalance('c1', statement(120.75), {});
     expect(updates).toEqual([{ totalDebt: '120.75' }]);
+  });
+
+  it('puts back a receipt the ERP has not posted yet, instead of undoing it', async () => {
+    // The reported case: the rep collected all 500; the statement read happens
+    // before the ERP has posted the receipt, so the ERP still says 500. Writing
+    // that over the column brought the debt back and the handset refused his
+    // next credit sale.
+    const { svc, updates } = service({ c1: -500 });
+    await svc.mirrorStatementBalance('c1', statement(500), {});
+    expect(updates).toEqual([{ totalDebt: '0.00' }]);
+  });
+
+  it('puts back an unposted credit sale too — the ERP must not hand out its headroom', async () => {
+    const { svc, updates } = service({ c1: 75 });
+    await svc.mirrorStatementBalance('c1', statement(100), {});
+    expect(updates).toEqual([{ totalDebt: '175.00' }]);
   });
 
   it('writes two decimals, which is all the column holds', () => {
