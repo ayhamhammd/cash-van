@@ -32,6 +32,7 @@ import { SetTobaccoTaxDto } from './dto/set-tobacco-tax.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { ErpReadOnlyGuard } from '../../common/guards/erp-readonly.guard';
+import { UpdateProgramFeaturesDto } from './dto/update-program-features.dto';
 
 @ApiTags('settings')
 @ApiBearerAuth()
@@ -108,6 +109,18 @@ export class SettingsController {
   @ApiOkResponse({ description: 'Updated app settings' })
   updateAccounting(@Body() dto: UpdateAccountingDto) {
     return this.settings.updateAccounting(dto);
+  }
+
+  @Patch('features')
+  @ApiOperation({
+    summary: 'Set the program features',
+    description:
+      'Damaged returns, returnable containers and how salesman targets are measured. ' +
+      'FlowVan-only switches, so they stay editable while the ERP integration is on. Admin only.',
+  })
+  @ApiOkResponse({ description: 'Updated app settings' })
+  updateProgramFeatures(@Body() dto: UpdateProgramFeaturesDto) {
+    return this.settings.updateProgramFeatures(dto);
   }
 
   @Patch('tobacco-tax')

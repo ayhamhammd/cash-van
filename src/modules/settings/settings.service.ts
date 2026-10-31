@@ -24,6 +24,15 @@ import {
 import { decryptSecret, encryptSecret, maskSecret } from '../../common/crypto/secret.util';
 import { readStoredSecret } from '../../common/crypto/read-stored-secret';
 import { UserContextService } from '../../common/context/user-context.service';
+import { UpdateProgramFeaturesDto } from './dto/update-program-features.dto';
+
+const PROGRAM_FEATURE_KEYS = [
+  'damagedReturnsEnabled',
+  'damagedWarehouseCode',
+  'containersEnabled',
+  'targetsIncludeTax',
+  'targetsSalesIncludeCash',
+] as const;
 
 export interface AppSettingsView {
   companyNumber: string;
@@ -449,6 +458,16 @@ export class SettingsService {
    * ERP-managed data). Deliberately NOT ERP-read-only: FlowVan applies tobacco
    * tax locally (offline sales) even when the ERP owns the profiles. Admin only.
    */
+  async updateProgramFeatures(dto: UpdateProgramFeaturesDto): Promise<AppSettingsView> {
+    const row = await this.requireRow();
+    for (const key of PROGRAM_FEATURE_KEYS) {
+      if (dto[key] !== undefined) Object.assign(row, { [key]: dto[key] });
+    }
+    row.updatedBy = this.userCtx.getUserId();
+    await this.repo.save(row);
+    return this.toView(row);
+  }
+
   async setTobaccoTaxEnabled(enabled: boolean): Promise<{ tobaccoTaxEnabled: boolean }> {
     const row = await this.requireRow();
     row.tobaccoTaxEnabled = enabled;
