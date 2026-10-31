@@ -402,12 +402,9 @@ export class StockRequestsService {
     if (row.requesterUser !== user.sub) {
       throw new ForbiddenException('Only the requester can confirm receipt');
     }
+    if (row.status === 'received') throw this.alreadyLoaded(row);
     if (row.status !== 'approved') {
-      throw new ConflictException(
-        row.status === 'received'
-          ? 'This request was already received'
-          : `Cannot receive a request that is ${row.status}`,
-      );
+      throw new ConflictException(`Cannot receive a request that is ${row.status}`);
     }
     if (!row.sourceStoreNumber) {
       throw new ConflictException('Approved request has no source warehouse');
@@ -454,25 +451,95 @@ export class StockRequestsService {
       }),
     );
 
-    const created = await this.vouchers.create({
+    const voucherNumber = await this.transferOnce(row, {
       transKind: 'TRANSFER',
       userCode: rep?.code ?? user.sub,
       isPosted: true,
       transactions,
     } as CreateVoucherDto);
 
-    row.status = 'received';
-    row.receivedAt = new Date();
-    row.transferVoucherNumber = created.voucherNumber;
-    await this.repo.save(row);
-
     this.events.emit('stock-request.received', {
       id: row.id,
       requestNumber: row.requestNumber,
       repId: row.repId,
-      voucherNumber: created.voucherNumber,
+      voucherNumber,
     });
     return this.findOneOrThrow(row.id);
+  }
+
+  async fulfilWithTransfer(
+    id: string,
+    dto: CreateVoucherDto,
+    user: AuthenticatedUser,
+  ): Promise<StockRequest> {
+    await this.assertCan(user, 'canApproveStockRequest', CANNOT_DECIDE);
+    const row = await this.findOneOrThrow(id);
+    if (row.repId) await this.repScope.assertCanSeeRep(user, row.repId);
+
+    const voucherNumber = await this.transferOnce(row, {
+      ...dto,
+      transKind: 'TRANSFER',
+      isPosted: true,
+    } as CreateVoucherDto);
+
+    await this.notifyLoaded(row, voucherNumber);
+    return this.findOneOrThrow(row.id);
+  }
+
+  private async transferOnce(row: StockRequest, voucher: CreateVoucherDto): Promise<string> {
+    await this.claim(row);
+    let voucherNumber: string;
+    try {
+      voucherNumber = (await this.vouchers.create(voucher)).voucherNumber;
+    } catch (e) {
+      await this.repo.query(
+        `UPDATE stock_requests SET status = 'approved', received_at = NULL
+          WHERE id = $1 AND status = 'received' AND transfer_voucher_number IS NULL`,
+        [row.id],
+      );
+      throw e;
+    }
+    await this.repo.update({ id: row.id }, { transferVoucherNumber: voucherNumber });
+    return voucherNumber;
+  }
+
+  private async claim(row: StockRequest): Promise<void> {
+    const [claimedRows]: [unknown[], number] = await this.repo.query(
+      `UPDATE stock_requests SET status = 'received', received_at = now()
+        WHERE id = $1 AND status = 'approved' AND deleted_at IS NULL
+        RETURNING id`,
+      [row.id],
+    );
+    if (claimedRows.length > 0) return;
+    const now = await this.repo.findOne({ where: { id: row.id }, withDeleted: true });
+    if (now?.status === 'received') throw this.alreadyLoaded(now);
+    throw new ConflictException(
+      `Stock request ${row.requestNumber} is ${now?.status ?? 'deleted'}, so it cannot be loaded. Only an approved request can.`,
+    );
+  }
+
+  private alreadyLoaded(row: StockRequest): ConflictException {
+    return new ConflictException(
+      `Stock request ${row.requestNumber} was already loaded onto the van` +
+        (row.transferVoucherNumber ? ` by voucher ${row.transferVoucherNumber}` : '') +
+        '. Nothing was transferred again — open that voucher to see what moved.',
+    );
+  }
+
+  private async notifyLoaded(row: StockRequest, voucherNumber: string): Promise<void> {
+    await this.notifications.notifyUser(row.requesterUser, {
+      kind: 'stock-request.decided',
+      titleAr: `تم تحميل طلب البضاعة ${row.requestNumber} — سند ${voucherNumber}`,
+      titleEn: `Stock request ${row.requestNumber} loaded — voucher ${voucherNumber}`,
+      refType: 'stock-request',
+      refId: row.id,
+    });
+    this.events.emit('stock-request.received', {
+      id: row.id,
+      requestNumber: row.requestNumber,
+      repId: row.repId,
+      voucherNumber,
+    });
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -533,31 +600,9 @@ export class StockRequestsService {
     await this.assertCan(user, 'canApproveStockRequest', CANNOT_DECIDE);
     const row = await this.findOneOrThrow(id);
     if (row.repId) await this.repScope.assertCanSeeRep(user, row.repId);
-    if (row.status !== 'approved') {
-      throw new ConflictException(
-        `Only an approved request can be fulfilled by a transfer; ${row.requestNumber} is ${row.status}.`,
-      );
-    }
-    row.status = 'received';
-    row.receivedAt = new Date();
-    row.transferVoucherNumber = voucherNumber;
-    await this.repo.save(row);
-
-    // The rep is waiting on this: their van's stock just changed and the button
-    // they were going to press has gone away.
-    await this.notifications.notifyUser(row.requesterUser, {
-      kind: 'stock-request.decided',
-      titleAr: `تم تحميل طلب البضاعة ${row.requestNumber} — سند ${voucherNumber}`,
-      titleEn: `Stock request ${row.requestNumber} loaded — voucher ${voucherNumber}`,
-      refType: 'stock-request',
-      refId: row.id,
-    });
-    this.events.emit('stock-request.received', {
-      id: row.id,
-      requestNumber: row.requestNumber,
-      repId: row.repId,
-      voucherNumber,
-    });
+    await this.claim(row);
+    await this.repo.update({ id: row.id }, { transferVoucherNumber: voucherNumber });
+    await this.notifyLoaded(row, voucherNumber);
     return this.findOneOrThrow(row.id);
   }
 

@@ -33,6 +33,7 @@ import {
 import { RequireAnyPermission } from '../../common/decorators/permissions.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { RepScopeService } from '../users/rep-scope.service';
+import { CreateVoucherDto } from '../vouchers/dto/create-voucher.dto';
 
 @ApiTags('stock-requests')
 @ApiBearerAuth()
@@ -154,6 +155,24 @@ export class StockRequestsController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.service.attachTransfer(id, dto.voucherNumber, user);
+  }
+
+  @Post(':id/fulfil')
+  @RequireAnyPermission('canApproveStockRequest')
+  @ApiOperation({
+    summary: 'Load an approved request onto the van with one transfer',
+    description:
+      'Claims the request and posts the TRANSFER voucher in one step, so the office and the ' +
+      "salesman's own receipt can never both move the goods. 409 when the request was already loaded.",
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ description: 'Received request, with transferVoucherNumber set' })
+  fulfil(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateVoucherDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.fulfilWithTransfer(id, dto, user);
   }
 
   @Delete(':id')
