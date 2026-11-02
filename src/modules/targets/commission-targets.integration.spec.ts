@@ -102,7 +102,7 @@ run('commission targets (real DB)', () => {
       synchronize: false,
     });
     await ds.initialize();
-    targets = new TargetsService(ds, ds.getRepository('SalesTarget') as never);
+    targets = new TargetsService(ds, ds.getRepository('SalesTarget') as never, { erpSalesBySalesman: async () => 'off' } as never); // ERP off: cash-van's own figures
 
     await q(`INSERT INTO transaction_kinds (trans_kind, trans_name) VALUES ('SALE','Sale') ON CONFLICT DO NOTHING`);
     await purge();

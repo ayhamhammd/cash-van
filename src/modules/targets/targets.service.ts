@@ -4,8 +4,19 @@ import { DataSource, Repository } from 'typeorm';
 
 import { SalesTarget, TargetMetric } from './entities/sales-target.entity';
 import { UpsertTargetDto } from './dto/upsert-target.dto';
+import { ErpSyncService } from '../erp-sync/erp-sync.service';
 
 export interface TargetRow {
+  /**
+   * Where the SALES figures come from. 'erp' while the ERP is connected: they
+   * are the salesman's row on the ERP's Sales Reports → By salesman, so the
+   * target agrees with the ERP. 'vanflow' when the ERP is off — cash-van's own
+   * vouchers, as before — or connected but not answering (`erpUnavailable`).
+   * Collections and quantities are always cash-van's own.
+   */
+  salesSource: 'erp' | 'vanflow';
+  /** The ERP is connected but did not answer, so these are cash-van's own figures. */
+  erpUnavailable: boolean;
   repId: string;
   repCode: string | null;
   repName: string;
@@ -184,7 +195,9 @@ const SELECT_COLS = `
              THEN 1 ELSE COALESCE(tr.ratio, tall.ratio, 1) END)::bigint
                                     AS "collectedFils",
   COALESCE((SELECT s.targets_sales_include_cash FROM app_settings s ORDER BY s.id LIMIT 1), true)
-                                    AS "salesIncludeCash"
+                                    AS "salesIncludeCash",
+  COALESCE((SELECT s.targets_include_tax FROM app_settings s ORDER BY s.id LIMIT 1), true)
+                                    AS "includeTax"
 `;
 
 @Injectable()
@@ -192,7 +205,57 @@ export class TargetsService {
   constructor(
     @InjectDataSource() private readonly ds: DataSource,
     @InjectRepository(SalesTarget) private readonly repo: Repository<SalesTarget>,
+    private readonly erpSync: ErpSyncService,
   ) {}
+
+  /**
+   * Put the ERP's sales figures on the raw rows, while the ERP is connected.
+   *
+   * cash-van counted its own vouchers and disagreed with the ERP's Sales
+   * Reports for every salesman, because the two decide whose sale an invoice
+   * is differently: the ERP counts invoices the office raises for a salesman
+   * and follows the office when it moves one, and gives nobody an invoice that
+   * names no salesman. The ERP is the book, so while it is connected the sales
+   * a target measures are the ERP's — matched on the salesman code, which is
+   * reps.code.
+   *
+   * Cash and credit come from the invoice's payment type. With tax or without
+   * follows targets_include_tax, as before. A salesman the ERP has no sales for
+   * this month gets zero, not cash-van's figure: mixing the two books per row
+   * is the disagreement this removes.
+   */
+  private async withErpSales(
+    rows: Array<Record<string, string | null>>,
+    year: number,
+    month: number,
+  ): Promise<{ rows: Array<Record<string, string | null>>; source: 'erp' | 'vanflow'; unavailable: boolean }> {
+    const [start, end] = periodBounds(year, month);
+    const lastDay = new Date(new Date(`${end}T00:00:00Z`).getTime() - 86_400_000).toISOString().slice(0, 10);
+    const erp = await this.erpSync.erpSalesBySalesman(start, lastDay);
+    if (erp === 'off') return { rows, source: 'vanflow', unavailable: false };
+    if (erp === 'unavailable') return { rows, source: 'vanflow', unavailable: true };
+
+    const fils = (jod: number) => String(Math.round(jod * 1000));
+    return {
+      source: 'erp',
+      unavailable: false,
+      rows: rows.map((r) => {
+        const sales = r.repCode ? erp.get(r.repCode) : undefined;
+        const rawTax = r.includeTax as unknown;
+        const includeTax = rawTax !== false && rawTax !== 'false';
+        const pick = (p?: { total: number; netExTax: number }) => (p ? (includeTax ? p.total : p.netExTax) : 0);
+        const cash = pick(sales?.cash);
+        const credit = pick(sales?.credit);
+        return {
+          ...r,
+          cashSalesFils: fils(cash),
+          creditSalesFils: fils(credit),
+          actualAmount: fils(cash + credit),
+          actualErpAmount: fils(cash + credit),
+        };
+      }),
+    };
+  }
 
   /** All active salesmen with their target for the month + actual sales + progress. */
   async list(
@@ -219,7 +282,8 @@ export class TargetsService {
       [start, end, year, month, visibleRepIds],
     );
 
-    return rows.map(mapRow);
+    const sales = await this.withErpSales(rows, year, month);
+    return sales.rows.map((r) => ({ ...mapRow(r), salesSource: sales.source, erpUnavailable: sales.unavailable }));
   }
 
   /**
@@ -244,7 +308,8 @@ export class TargetsService {
     );
 
     if (rows.length === 0) throw new NotFoundException('Salesman not found.');
-    return mapRow(rows[0]);
+    const sales = await this.withErpSales(rows, year, month);
+    return { ...mapRow(sales.rows[0]), salesSource: sales.source, erpUnavailable: sales.unavailable };
   }
 
   /**
@@ -313,7 +378,7 @@ function periodBounds(year: number, month: number): [string, string] {
 }
 
 /** Shape a raw SQL row into a TargetRow, computing progress on the target metric. */
-function mapRow(r: Record<string, string | null>): TargetRow {
+function mapRow(r: Record<string, string | null>): Omit<TargetRow, 'salesSource' | 'erpUnavailable'> {
   const metric = (r.metric as TargetMetric | null) ?? null;
   const targetValue = r.targetValue != null ? Number(r.targetValue) : null;
   const actualAmount = Number(r.actualAmount ?? 0);

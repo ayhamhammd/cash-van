@@ -115,7 +115,7 @@ run('salesman sales (real DB)', () => {
     await ds.initialize();
 
     reports = new ReportsService(ds, null as never, null as never, null as never);
-    targets = new TargetsService(ds, null as never);
+    targets = new TargetsService(ds, null as never, { erpSalesBySalesman: async () => 'off' } as never); // ERP off: cash-van's own figures
 
     // 'SALE' is seeded by the app, not by a migration.
     await q(`INSERT INTO transaction_kinds (trans_kind, trans_name) VALUES ('SALE', 'Sale') ON CONFLICT DO NOTHING`);

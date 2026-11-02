@@ -130,6 +130,22 @@ export interface ErpStatement {
  * a running balance, major units, debit-positive. Same line shape as a customer
  * statement, so one parser reads both.
  */
+/** One salesman's sales from GET /reports/sales-by-salesman. Major units. */
+export interface ErpSalesPart {
+  invoiceCount: number;
+  netExTax: number;
+  tax: number;
+  total: number;
+}
+export interface ErpSalesmanSales {
+  salesmanId: string;
+  code: string;
+  name: string;
+  cash: ErpSalesPart;
+  credit: ErpSalesPart;
+  total: ErpSalesPart;
+}
+
 export interface ErpAccountStatement {
   accountId: string;
   accountCode: string;
@@ -1025,6 +1041,32 @@ export class ErpSyncService {
     return this.erp.getOne<ErpAccountStatement>(
       `accounts/by-code/${encodeURIComponent(code)}/statement${suffix}`,
     );
+  }
+
+  /**
+   * Every salesman's sales in a window, as the ERP's Sales Reports counts them,
+   * keyed by salesman code (== reps.code). `to` is INCLUSIVE.
+   *
+   * What sales targets measure while the ERP is connected — see
+   * TargetsService. 'off' when the ERP is not connected (targets then count
+   * cash-van's own vouchers, as before); 'unavailable' when it is connected but
+   * did not answer, so the caller can say the figures are not the ERP's.
+   */
+  async erpSalesBySalesman(
+    from: string,
+    to: string,
+  ): Promise<Map<string, ErpSalesmanSales> | 'off' | 'unavailable'> {
+    if (!(await this.erpConfigReady())) return 'off';
+    try {
+      const res = await this.erp.getOne<{ salesmen: ErpSalesmanSales[] }>(
+        `reports/sales-by-salesman?from=${from}&to=${to}`,
+      );
+      if (!res || !Array.isArray(res.salesmen)) return 'unavailable';
+      return new Map(res.salesmen.filter((s) => s.code).map((s) => [s.code, s]));
+    } catch (e) {
+      this.logger.warn(`ERP sales by salesman ${from}..${to} failed: ${(e as Error).message}`);
+      return 'unavailable';
+    }
   }
 
   // ── Id-resolving wrappers (what controllers call) ───────────────────────────

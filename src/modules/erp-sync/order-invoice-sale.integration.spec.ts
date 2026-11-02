@@ -126,7 +126,7 @@ run('an invoiced order becomes the salesman sale (real DB)', () => {
     });
     await ds.initialize();
     svc = makeService();
-    targets = new TargetsService(ds, ds.getRepository('SalesTarget') as never);
+    targets = new TargetsService(ds, ds.getRepository('SalesTarget') as never, { erpSalesBySalesman: async () => 'off' } as never); // ERP off: cash-van's own figures
     await q(`INSERT INTO transaction_kinds (trans_kind, trans_name) VALUES ('SALE','Sale') ON CONFLICT DO NOTHING`);
     await q(`INSERT INTO transaction_kinds (trans_kind, trans_name) VALUES ('ORDER','Order') ON CONFLICT DO NOTHING`);
     await q(`INSERT INTO transaction_kinds (trans_kind, trans_name) VALUES ('RETURN','Return') ON CONFLICT DO NOTHING`);
