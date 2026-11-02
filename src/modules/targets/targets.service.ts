@@ -195,9 +195,7 @@ const SELECT_COLS = `
              THEN 1 ELSE COALESCE(tr.ratio, tall.ratio, 1) END)::bigint
                                     AS "collectedFils",
   COALESCE((SELECT s.targets_sales_include_cash FROM app_settings s ORDER BY s.id LIMIT 1), true)
-                                    AS "salesIncludeCash",
-  COALESCE((SELECT s.targets_include_tax FROM app_settings s ORDER BY s.id LIMIT 1), true)
-                                    AS "includeTax"
+                                    AS "salesIncludeCash"
 `;
 
 @Injectable()
@@ -219,10 +217,13 @@ export class TargetsService {
    * a target measures are the ERP's — matched on the salesman code, which is
    * reps.code.
    *
-   * Cash and credit come from the invoice's payment type. With tax or without
-   * follows targets_include_tax, as before. A salesman the ERP has no sales for
-   * this month gets zero, not cash-van's figure: mixing the two books per row
-   * is the disagreement this removes.
+   * Cash and credit come from the invoice's payment type, each as the ERP's
+   * NET BEFORE TAX — after discount, the "الصافي (بدون ضريبة)" column of that
+   * report, chosen by the business as what a salesman's target measures. So
+   * targets_include_tax does not apply to these figures (it still decides
+   * collections, which stay cash-van's own). A salesman the ERP has no sales
+   * for this month gets zero, not cash-van's figure: mixing the two books per
+   * row is the disagreement this removes.
    */
   private async withErpSales(
     rows: Array<Record<string, string | null>>,
@@ -241,11 +242,8 @@ export class TargetsService {
       unavailable: false,
       rows: rows.map((r) => {
         const sales = r.repCode ? erp.get(r.repCode) : undefined;
-        const rawTax = r.includeTax as unknown;
-        const includeTax = rawTax !== false && rawTax !== 'false';
-        const pick = (p?: { total: number; netExTax: number }) => (p ? (includeTax ? p.total : p.netExTax) : 0);
-        const cash = pick(sales?.cash);
-        const credit = pick(sales?.credit);
+        const cash = sales?.cash.netExTax ?? 0;
+        const credit = sales?.credit.netExTax ?? 0;
         return {
           ...r,
           cashSalesFils: fils(cash),

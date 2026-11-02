@@ -8,8 +8,8 @@ import type { ErpSalesmanSales } from '../erp-sync/erp-sync.service';
  * cash-van counted its own vouchers and disagreed with that report for every
  * salesman on the 94 server (201: 20,037.160 here, 22,637.090 in the ERP),
  * because the two decide whose sale an invoice is differently. These pin that
- * the ERP's figures replace cash-van's whole — never mixed per row — that the
- * tax setting still decides with or without tax, and that the ERP being off or
+ * the ERP's figures replace cash-van's whole — never mixed per row — that they
+ * are the ERP's net before tax (the business's choice), and that the ERP being off or
  * silent leaves cash-van's figures in place and says which it is.
  */
 describe('TargetsService — sales read from the ERP', () => {
@@ -21,7 +21,7 @@ describe('TargetsService — sales read from the ERP', () => {
     salesTargetFils: '30000000', collectionTargetFils: null,
     cashPct: '1', creditPct: '2', collectionPct: '0',
     cashSalesFils: '5000000', creditSalesFils: '15037160', collectedFils: '700000',
-    salesIncludeCash: 'true', includeTax: 'true',
+    salesIncludeCash: 'true',
     ...over,
   });
 
@@ -38,8 +38,9 @@ describe('TargetsService — sales read from the ERP', () => {
     return { svc: new TargetsService(ds as never, null as never, erpSync as never), erpSync };
   }
 
-  it("uses the ERP's cash and credit — the reported salesman 201", async () => {
-    const erp = new Map([['201', sales('201', [7000, 6100], [15637.09, 13600])]]);
+  it("uses the ERP's net before tax, cash and credit — the reported salesman 201", async () => {
+    // [with tax, net before tax] per part.
+    const erp = new Map([['201', sales('201', [8000, 7000], [18000, 15637.09])]]);
     const { svc, erpSync } = service([raw('201')], erp);
     const [row] = await svc.list(2026, 10);
 
@@ -55,12 +56,14 @@ describe('TargetsService — sales read from the ERP', () => {
     expect(row.collectedFils).toBe(700_000);
   });
 
-  it('measures without tax when the setting says so', async () => {
+  it('measures net before tax whatever the include-tax setting says', async () => {
     const erp = new Map([['201', sales('201', [116, 100], [58, 50])]]);
-    const { svc } = service([raw('201', { includeTax: 'false' })], erp);
-    const [row] = await svc.list(2026, 10);
-    expect(row.cashSalesFils).toBe(100_000);
-    expect(row.creditSalesFils).toBe(50_000);
+    for (const includeTax of ['true', 'false']) {
+      const { svc } = service([raw('201', { includeTax })], erp);
+      const [row] = await svc.list(2026, 10);
+      expect(row.cashSalesFils).toBe(100_000);
+      expect(row.creditSalesFils).toBe(50_000);
+    }
   });
 
   it("gives a salesman the ERP has no sales for zero, not cash-van's figure", async () => {
