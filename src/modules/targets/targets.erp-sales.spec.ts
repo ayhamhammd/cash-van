@@ -66,6 +66,19 @@ describe('TargetsService — sales read from the ERP', () => {
     }
   });
 
+  it("totals exactly the ERP's figure, never a fil off from rounding the parts", async () => {
+    // Half a fil each in cash and credit: rounded separately they made 2 fils,
+    // but the ERP's total is 1 fil.
+    const erp = new Map([['106', {
+      ...sales('106', [1, 0.0005], [1, 0.0005]),
+      total: { invoiceCount: 2, netExTax: 0.001, tax: 0, total: 0.001 },
+    }]]);
+    const { svc } = service([raw('106')], erp);
+    const [row] = await svc.list(2026, 10);
+    expect(row.totalSalesFils).toBe(1);
+    expect(row.cashSalesFils + row.creditSalesFils).toBe(1);
+  });
+
   it("gives a salesman the ERP has no sales for zero, not cash-van's figure", async () => {
     const { svc } = service([raw('202')], new Map([['201', sales('201', [1, 1], [1, 1])]]));
     const [row] = await svc.list(2026, 10);

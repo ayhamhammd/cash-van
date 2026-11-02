@@ -236,20 +236,25 @@ export class TargetsService {
     if (erp === 'off') return { rows, source: 'vanflow', unavailable: false };
     if (erp === 'unavailable') return { rows, source: 'vanflow', unavailable: true };
 
-    const fils = (jod: number) => String(Math.round(jod * 1000));
+    const fils = (jod: number) => Math.round(jod * 1000);
     return {
       source: 'erp',
       unavailable: false,
       rows: rows.map((r) => {
         const sales = r.repCode ? erp.get(r.repCode) : undefined;
-        const cash = sales?.cash.netExTax ?? 0;
-        const credit = sales?.credit.netExTax ?? 0;
+        // The total is the ERP's own figure rounded once, and credit is what is
+        // left of it after cash. Rounding cash and credit separately and adding
+        // them was a fil off the ERP's report now and then (106: 4,802.611
+        // against 4,802.610).
+        const total = fils(sales?.total.netExTax ?? 0);
+        const cash = fils(sales?.cash.netExTax ?? 0);
+        const credit = total - cash;
         return {
           ...r,
-          cashSalesFils: fils(cash),
-          creditSalesFils: fils(credit),
-          actualAmount: fils(cash + credit),
-          actualErpAmount: fils(cash + credit),
+          cashSalesFils: String(cash),
+          creditSalesFils: String(credit),
+          actualAmount: String(total),
+          actualErpAmount: String(total),
         };
       }),
     };
