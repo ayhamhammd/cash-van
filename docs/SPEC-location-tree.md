@@ -86,7 +86,7 @@ CREATE INDEX idx_locations_path   ON locations (path text_pattern_ops);
 CREATE INDEX idx_locations_rep    ON locations (rep_id) WHERE rep_id IS NOT NULL;
 ```
 
-Rules (enforced in `LocationsService`, tested):
+Rules (enforced in `LocationTreeService`, tested):
 - **Fixed three levels.** A child's kind is derived from its parent:
   no parent → `COUNTRY`; parent `COUNTRY` → `GOVERNORATE`; parent `GOVERNORATE` → `AREA`;
   an `AREA` cannot have children. The table is generic (`parent_id` + `path`) so a fourth

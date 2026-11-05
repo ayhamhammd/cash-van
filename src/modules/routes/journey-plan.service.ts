@@ -25,6 +25,8 @@ export interface JourneyPlanRow {
   nameAr: string | null;
   nameEn: string | null;
   city: string | null;
+  /** "governorate - area" from the location tree; null when the customer has no tree area. */
+  locationLabel: string | null;
   addressAr: string | null;
   phone: string | null;
   lat: number | null;
@@ -291,6 +293,8 @@ export class JourneyPlanService {
     const qb = this.entries
       .createQueryBuilder('e')
       .innerJoin(Customer, 'c', 'c.id = e.customer_id')
+      .leftJoin('locations', 'loc', 'loc.id = c.location_id AND loc.deleted_at IS NULL')
+      .leftJoin('locations', 'gov', "gov.id = loc.parent_id AND gov.kind = 'GOVERNORATE'")
       .select([
         'e.id AS id',
         'e.customer_id AS "customerId"',
@@ -299,6 +303,9 @@ export class JourneyPlanService {
         'c.name_ar AS "nameAr"',
         'c.name_en AS "nameEn"',
         'c.city AS city',
+        `CASE WHEN loc.id IS NULL THEN NULL
+              WHEN gov.id IS NULL THEN loc.name_ar
+              ELSE gov.name_ar || ' - ' || loc.name_ar END AS "locationLabel"`,
         'c.address_ar AS "addressAr"',
         'c.phone AS phone',
         'c.latitude AS lat',
@@ -319,6 +326,7 @@ export class JourneyPlanService {
       nameAr: string | null;
       nameEn: string | null;
       city: string | null;
+      locationLabel: string | null;
       addressAr: string | null;
       phone: string | null;
       lat: string | null;
@@ -339,6 +347,7 @@ export class JourneyPlanService {
       nameAr: r.nameAr,
       nameEn: r.nameEn,
       city: r.city,
+      locationLabel: r.locationLabel,
       addressAr: r.addressAr,
       phone: r.phone,
       lat: r.lat === null ? null : Number(r.lat),

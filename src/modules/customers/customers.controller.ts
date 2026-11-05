@@ -76,7 +76,9 @@ export class CustomersController {
       query.unassigned = false;
     }
     // Supervisors (repId null, but scoped) see only their salesmen's customers.
-    return this.customers.list(query, await this.repScope.visibleRepIds(user));
+    return this.customers.list(query, await this.repScope.visibleRepIds(user), {
+      forSalesman: !!user?.repId,
+    });
   }
 
   /**
@@ -96,9 +98,20 @@ export class CustomersController {
    * the segments picker. Declared ahead of `:id`, or Nest reads "areas" as an id.
    */
   @Get('areas')
-  @ApiOperation({ summary: 'Active customer areas, for the create-customer picker' })
+  @ApiOperation({
+    summary: 'Active customer areas, for the create-customer picker',
+    description: 'In TREE mode: the location tree\'s areas, flattened as "governorate - area".',
+  })
   areaOptions() {
     return this.customers.areaOptions();
+  }
+
+  /** The location tree for the governorate › area picker. Open like the areas picker. */
+  @Get('locations')
+  @ApiOperation({ summary: 'The active location tree, nested, for the create-customer picker' })
+  @ApiOkResponse({ description: '[{ id, kind, nameAr, nameEn, code, color, children: [...] }]' })
+  locationOptions() {
+    return this.customers.locationOptions();
   }
 
   @Get('segments')
@@ -117,8 +130,8 @@ export class CustomersController {
   @ApiOperation({ summary: 'Get customer', description: 'Fetch a single customer by id.' })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
   @ApiOkResponse({ description: 'The customer' })
-  getById(@Param('id', ParseUUIDPipe) id: string) {
-    return this.customers.findOneOrThrow(id);
+  getById(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.customers.getWithPlace(id, { forSalesman: !!user?.repId });
   }
 
   @Get(':id/insights')

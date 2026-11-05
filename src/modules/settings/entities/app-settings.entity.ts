@@ -7,6 +7,8 @@ import {
 
 /** Whether unit prices already include tax (INCLUSIVE) or tax is added on top (EXCLUSIVE). */
 export type TaxCalcMethod = 'INCLUSIVE' | 'EXCLUSIVE';
+export const LOCATION_MODES = ['FLAT', 'TREE'] as const;
+export type LocationMode = (typeof LOCATION_MODES)[number];
 
 @Entity({ name: 'app_settings' })
 export class AppSettings {
@@ -95,6 +97,15 @@ export class AppSettings {
    */
   @Column({ name: 'containers_enabled', type: 'boolean', default: false })
   containersEnabled!: boolean;
+
+  /**
+   * How customers' locations are organised: FLAT = the customer_areas list,
+   * TREE = the locations tree (country › governorate › area). Changed only
+   * through POST /locations/mode, never by a settings PATCH — switching has
+   * side effects the plain PATCH cannot preview.
+   */
+  @Column({ name: 'location_mode', type: 'text', default: 'FLAT' })
+  locationMode!: LocationMode;
 
   @Column({ name: 'erp_sync_enabled', type: 'boolean', default: false })
   erpSyncEnabled!: boolean;

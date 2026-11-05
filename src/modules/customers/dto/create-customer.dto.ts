@@ -62,6 +62,17 @@ export class CreateCustomerDto {
   @IsUUID()
   areaId?: string | null;
 
+  @ApiPropertyOptional({
+    format: 'uuid',
+    nullable: true,
+    description:
+      'The customer\'s area in the location tree (an AREA from GET /customers/locations). ' +
+      'Used in TREE mode; null clears it on update.',
+  })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string | null;
+
   @ApiPropertyOptional({ description: 'Auto-generated (CUST-000001) when omitted.' })
   @IsOptional()
   @IsString()

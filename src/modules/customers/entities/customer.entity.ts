@@ -61,6 +61,15 @@ export class Customer extends BaseEntity {
   @Column({ name: 'area_id', type: 'uuid', nullable: true })
   areaId?: string | null;
 
+  /**
+   * The customer's area in the location tree (an AREA node of `locations`).
+   * Used instead of area_id when app_settings.location_mode is TREE; both are
+   * kept so the office can switch modes without losing either.
+   */
+  @Index('idx_customers_location')
+  @Column({ name: 'location_id', type: 'uuid', nullable: true })
+  locationId?: string | null;
+
   @Index('idx_customers_category')
   @Column({ type: 'text', nullable: true })
   category?: CustomerCategory | null;

@@ -29,6 +29,9 @@ run('customer areas (real DB)', () => {
     const svc = Object.create(CustomersService.prototype) as Record<string, unknown>;
     svc.customers = ds.getRepository('Customer');
     svc.areas = areas;
+    // No tree in this test: no customer has a location, and the mode is FLAT.
+    svc.locations = { labels: async () => new Map() };
+    svc.settings = { locationMode: async () => 'FLAT' };
     return (svc as unknown as CustomersService).list({ limit: 50, offset: 0, q: P, ...query } as never);
   }
 

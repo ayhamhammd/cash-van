@@ -33,6 +33,8 @@ import { JobsService } from '../../common/jobs/jobs.service';
 import { StorageService } from '../../common/storage/storage.service';
 import { randomUUID } from 'crypto';
 import { AreasService } from '../areas/areas.service';
+import { LocationTreeService } from '../locations/locations.service';
+import { SettingsService } from '../settings/settings.service';
 import { applyTokenSearch } from '../../common/search/token-search.util';
 
 export interface CustomerInsights {
@@ -82,6 +84,8 @@ export class CustomersService {
     @Inject(forwardRef(() => ApprovalsService))
     private readonly approvals: ApprovalsService,
     private readonly areas: AreasService,
+    private readonly locations: LocationTreeService,
+    private readonly settings: SettingsService,
     @InjectRepository(PendingCustomerPhoto)
     private readonly pendingPhotos: Repository<PendingCustomerPhoto>,
     @InjectRepository(Customer)
@@ -204,7 +208,7 @@ export class CustomersService {
     // good, and the office can fill these two in itself. Before both paths, so
     // an approval request carries only what was allowed.
     if (!actor?.canSetCustomerSegment) dto = { ...dto, segmentId: undefined };
-    if (!actor?.canSetCustomerArea) dto = { ...dto, areaId: undefined };
+    if (!actor?.canSetCustomerArea) dto = { ...dto, areaId: undefined, locationId: undefined };
 
     if (actor?.canCreateCustomerDirect) {
       const customer = await this.create(dto);
@@ -279,7 +283,12 @@ export class CustomersService {
   }
 
   async create(dto: CreateCustomerDto): Promise<Customer> {
+    dto = await this.withTreeArea(dto);
     if (dto.areaId) await this.areas.assertAssignable(dto.areaId);
+    if (dto.locationId) {
+      await this.locations.assertAssignableArea(dto.locationId);
+      dto = { ...dto, cityCode: dto.cityCode || (await this.locations.governorateCodeOf(dto.locationId)) || undefined };
+    }
     const customerNumber =
       dto.customerNumber?.trim() || (await this.nextCustomerNumber());
     const exists = await this.customers.exist({ where: { customerNumber } });
@@ -321,13 +330,43 @@ export class CustomersService {
       creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
       repId: saved.repId ?? null,
     });
-    if (saved.areaId) this.events.emit('erp.customer.area', { customerIds: [saved.id] });
+    if ((saved.areaId || saved.locationId) && (await this.placeIsSet(saved))) {
+      this.events.emit('erp.customer.area', { customerIds: [saved.id] });
+    }
     return saved;
   }
 
-  /** Areas a customer can be filed under, as the app's picker needs them. */
-  areaOptions() {
+  /**
+   * Areas a customer can be filed under, as the app's picker needs them. In
+   * TREE mode these are the tree's areas, flattened as "governorate - area":
+   * an app build that knows only the flat picker then files shops into the
+   * tree (create() takes the id back as a location).
+   */
+  async areaOptions() {
+    if ((await this.settings.locationMode()) === 'TREE') return this.locations.areaLeafOptions();
     return this.areas.options();
+  }
+
+  /** The active location tree, nested, for the governorate › area picker. */
+  locationOptions() {
+    return this.locations.options();
+  }
+
+  /**
+   * An old app build in TREE mode sends the area it picked from the
+   * flattened list (see areaOptions) as `areaId`. It is a tree area, so file
+   * it as one. A real flat area id is left alone.
+   */
+  private async withTreeArea<T extends { areaId?: string | null; locationId?: string | null }>(dto: T): Promise<T> {
+    if (!dto.areaId || dto.locationId) return dto;
+    if ((await this.settings.locationMode()) !== 'TREE') return dto;
+    if (!(await this.locations.isArea(dto.areaId))) return dto;
+    return { ...dto, locationId: dto.areaId, areaId: undefined };
+  }
+
+  /** Does this customer have a place in the mode the company uses? (What the ERP address follows.) */
+  private async placeIsSet(c: Customer): Promise<boolean> {
+    return (await this.settings.locationMode()) === 'TREE' ? !!c.locationId : !!c.areaId;
   }
 
   /**
@@ -405,9 +444,17 @@ export class CustomersService {
         permission: CUSTOMER_ASSIGN_SALESMAN_KEY,
       });
     }
+    dto = await this.withTreeArea(dto);
     const areaBefore = customer.areaId ?? null;
+    const locationBefore = customer.locationId ?? null;
     if (dto.areaId && dto.areaId !== customer.areaId) {
       await this.areas.assertAssignable(dto.areaId);
+    }
+    if (dto.locationId && dto.locationId !== customer.locationId) {
+      await this.locations.assertAssignableArea(dto.locationId);
+      if (!customer.cityCode && !dto.cityCode) {
+        dto = { ...dto, cityCode: (await this.locations.governorateCodeOf(dto.locationId)) ?? undefined };
+      }
     }
     Object.assign(customer, dto);
     if (dto.phone !== undefined) {
@@ -428,8 +475,13 @@ export class CustomersService {
       creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
       repId: saved.repId ?? null,
     });
-    if ((saved.areaId ?? null) !== areaBefore) {
-      this.events.emit('erp.customer.area', { customerIds: [saved.id] });
+    // The ERP address follows whichever place the company uses; only that one
+    // moving re-sends it.
+    const areaMoved = (saved.areaId ?? null) !== areaBefore;
+    const locationMoved = (saved.locationId ?? null) !== locationBefore;
+    if (areaMoved || locationMoved) {
+      const tree = (await this.settings.locationMode()) === 'TREE';
+      if (tree ? locationMoved : areaMoved) this.events.emit('erp.customer.area', { customerIds: [saved.id] });
     }
     return saved;
   }
@@ -488,6 +540,7 @@ export class CustomersService {
   async list(
     query: ListCustomersQuery,
     visibleRepIds: string[] | null = null,
+    opts: { forSalesman?: boolean } = {},
   ): Promise<{ items: Customer[]; total: number }> {
     const qb = this.customers
       .createQueryBuilder('c')
@@ -529,6 +582,18 @@ export class CustomersService {
     if (query.regionId) qb.andWhere('c.region_id = :regionId', { regionId: query.regionId });
     if (query.noArea) qb.andWhere('c.area_id IS NULL');
     else if (query.areaId) qb.andWhere('c.area_id = :areaId', { areaId: query.areaId });
+    // A location filters its whole subtree: a governorate means all its areas.
+    if (query.noLocation) qb.andWhere('c.location_id IS NULL');
+    else if (query.locationId) {
+      qb.andWhere(
+        `c.location_id IN (
+           SELECT l.id FROM locations l
+            WHERE l.deleted_at IS NULL
+              AND l.path LIKE (SELECT p.path FROM locations p WHERE p.id = :locationId) || '%'
+         )`,
+        { locationId: query.locationId },
+      );
+    }
     if (query.isActive !== undefined) qb.andWhere('c.is_active = :a', { a: query.isActive });
 
     applyTokenSearch(qb, query.q, [
@@ -555,8 +620,39 @@ export class CustomersService {
     }
 
     const [items, total] = await qb.getManyAndCount();
-    await this.attachAreaNames(items);
+    await this.attachPlace(items, opts);
     return { items, total };
+  }
+
+  /** One customer with its place attached, as GET /customers/:id returns it. */
+  async getWithPlace(id: string, opts: { forSalesman?: boolean } = {}): Promise<Customer> {
+    const customer = await this.findOneOrThrow(id);
+    await this.attachPlace([customer], opts);
+    return customer;
+  }
+
+  /**
+   * Where each customer is: the flat area's name, and the tree area with its
+   * governorate. For a salesman in TREE mode the flat fields carry the tree
+   * area too (areaId = the area's location id, areaName = "governorate -
+   * area"), so an app build that knows only areaId/areaName filters by the
+   * tree's areas. The dashboard always gets both sets as they are stored.
+   */
+  private async attachPlace(items: Customer[], opts: { forSalesman?: boolean }): Promise<void> {
+    await this.attachAreaNames(items);
+    const labels = await this.locations.labels(items.map((c) => c.locationId ?? '').filter(Boolean));
+    const legacy = !!opts.forSalesman && (await this.settings.locationMode()) === 'TREE';
+    for (const c of items) {
+      const l = c.locationId ? labels.get(c.locationId) : undefined;
+      Object.assign(c, {
+        locationName: l?.locationName ?? null,
+        governorateId: l?.governorateId ?? null,
+        governorateName: l?.governorateName ?? null,
+        governorateCode: l?.governorateCode ?? null,
+        locationLabel: l?.locationLabel ?? null,
+      });
+      if (legacy) Object.assign(c, { areaId: l?.locationId ?? null, areaName: l?.locationLabel ?? null });
+    }
   }
 
   /**

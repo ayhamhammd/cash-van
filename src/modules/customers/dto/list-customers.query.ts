@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
+import { queryBoolean } from '../../../common/dto/query-boolean';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
 
 export class ListCustomersQuery {
@@ -30,7 +31,7 @@ export class ListCustomersQuery {
 
   @ApiPropertyOptional({ description: 'Only customers not linked to any salesman' })
   @IsOptional()
-  @Type(() => Boolean)
+  @Transform(queryBoolean)
   @IsBoolean()
   unassigned?: boolean;
 
@@ -41,7 +42,7 @@ export class ListCustomersQuery {
       "segment screen's add-customer picker offers.",
   })
   @IsOptional()
-  @Type(() => Boolean)
+  @Transform(queryBoolean)
   @IsBoolean()
   unsegmented?: boolean;
 
@@ -50,15 +51,29 @@ export class ListCustomersQuery {
   @IsUUID()
   areaId?: string;
 
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Only customers under this place of the location tree — a governorate means all its areas.',
+  })
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
+
+  @ApiPropertyOptional({ description: 'Only customers with no place in the location tree.' })
+  @IsOptional()
+  @Transform(queryBoolean)
+  @IsBoolean()
+  noLocation?: boolean;
+
   @ApiPropertyOptional({ description: 'Only customers in no area.' })
   @IsOptional()
-  @Type(() => Boolean)
+  @Transform(queryBoolean)
   @IsBoolean()
   noArea?: boolean;
 
   @ApiPropertyOptional()
   @IsOptional()
-  @Type(() => Boolean)
+  @Transform(queryBoolean)
   @IsBoolean()
   isActive?: boolean;
 

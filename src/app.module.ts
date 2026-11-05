@@ -61,6 +61,7 @@ import { CashAccountsModule } from './modules/cash-accounts/cash-accounts.module
 import { InvoiceTemplatesModule } from './modules/invoice-templates/invoice-templates.module';
 import { SegmentsModule } from './modules/segments/segments.module';
 import { AreasModule } from './modules/areas/areas.module';
+import { LocationTreeModule } from './modules/locations/locations.module';
 
 @Module({
   imports: [
@@ -132,6 +133,7 @@ import { AreasModule } from './modules/areas/areas.module';
     InvoiceTemplatesModule,
     SegmentsModule,
     AreasModule,
+    LocationTreeModule,
   ],
   controllers: [HealthController],
   providers: [

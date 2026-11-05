@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Repository } from 'typeorm';
 
-import { AppSettings, TaxCalcMethod } from './entities/app-settings.entity';
+import { AppSettings, LocationMode, TaxCalcMethod } from './entities/app-settings.entity';
 import { UpdateAppSettingsDto } from './dto/update-settings.dto';
 import { UpdateAccountingDto } from './dto/update-accounting.dto';
 import { UpdateJoFotaraDto } from './dto/update-jofotara.dto';
@@ -55,6 +55,8 @@ export interface AppSettingsView {
   damagedWarehouseCode: string | null;
   /** Returnable containers — the office switch the dashboard reads. */
   containersEnabled: boolean;
+  /** FLAT customer areas or the TREE of locations. Switched via POST /locations/mode. */
+  locationMode: LocationMode;
   targetsIncludeTax: boolean;
   targetsSalesIncludeCash: boolean;
   accounting: {
@@ -215,6 +217,20 @@ export class SettingsService {
     return row?.containersEnabled === true;
   }
 
+  /** Written only by LocationTreeService.switchMode, which decides whether the switch is allowed. */
+  async setLocationMode(mode: LocationMode): Promise<void> {
+    await this.repo.update({ id: 1 }, { locationMode: mode, updatedBy: this.userCtx.getUserId() });
+  }
+
+  /** FLAT customer areas, or the TREE of locations. A missing row reads as FLAT. */
+  async locationMode(): Promise<LocationMode> {
+    const row = await this.repo.findOne({
+      where: { id: 1 },
+      select: { id: true, locationMode: true },
+    });
+    return row?.locationMode === 'TREE' ? 'TREE' : 'FLAT';
+  }
+
   /**
    * Does the ERP file invoices with JoFotara by itself?
    *
@@ -373,6 +389,7 @@ export class SettingsService {
     locale: string;
     damagedReturnsEnabled: boolean;
     containersEnabled: boolean;
+    locationMode: LocationMode;
     jofotaraAutoSubmit: boolean | null;
   }> {
     const row = await this.requireRow();
@@ -392,6 +409,8 @@ export class SettingsService {
       // Half the container gate. Cached on the handset so the actions stay
       // hidden offline too; the rep's own permission is the other half.
       containersEnabled: row.containersEnabled,
+      // Which picker and filter the app shows: one row of areas, or governorate › area.
+      locationMode: row.locationMode,
       // Whether a sale will get a JoFotara QR at all; null = not known, so the app waits.
       jofotaraAutoSubmit: row.jofotaraAutoSubmit ?? null,
     };
@@ -502,6 +521,7 @@ export class SettingsService {
       damagedReturnsEnabled: row.damagedReturnsEnabled,
       damagedWarehouseCode: row.damagedWarehouseCode ?? null,
       containersEnabled: row.containersEnabled,
+      locationMode: row.locationMode,
       targetsIncludeTax: row.targetsIncludeTax,
       targetsSalesIncludeCash: row.targetsSalesIncludeCash,
       accounting: {

@@ -886,10 +886,22 @@ export class ErpOutboxService {
   ): Promise<{ path: string; body: Record<string, unknown>; method: 'PATCH' } | null> {
     const map = await this.idmap.findOne({ where: { entity: 'customer', localId: ref } });
     if (!map?.erpId) return null;
+    // The place the company uses: the flat area's name, or in TREE mode
+    // "governorate - area" from the location tree. Read at drain time, so a
+    // mode switch re-sends whichever is current.
     const rows: Array<{ area: string | null }> = await this.outbox.query(
-      `SELECT a.name_ar AS area
+      `SELECT CASE
+                WHEN s.location_mode = 'TREE'
+                  THEN CASE WHEN l.id IS NULL THEN NULL
+                            WHEN g.id IS NULL THEN l.name_ar
+                            ELSE g.name_ar || ' - ' || l.name_ar END
+                ELSE a.name_ar
+              END AS area
          FROM customers c
+         LEFT JOIN app_settings s ON s.id = 1
          LEFT JOIN customer_areas a ON a.id = c.area_id AND a.deleted_at IS NULL
+         LEFT JOIN locations l ON l.id = c.location_id AND l.deleted_at IS NULL
+         LEFT JOIN locations g ON g.id = l.parent_id AND g.kind = 'GOVERNORATE' AND g.deleted_at IS NULL
         WHERE c.customer_number = $1
         LIMIT 1`,
       [ref],

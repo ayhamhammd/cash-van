@@ -20,10 +20,11 @@ import { CustomersController } from './customers.controller';
 import { JobsService } from '../../common/jobs/jobs.service';
 import { UsersModule } from '../users/users.module';
 import { AreasModule } from '../areas/areas.module';
+import { LocationTreeModule } from '../locations/locations.module';
 import { ErpSyncModule } from '../erp-sync/erp-sync.module';
 
 @Module({
-  imports: [UsersModule, AreasModule, forwardRef(() => ApprovalsModule), forwardRef(() => ErpSyncModule),
+  imports: [UsersModule, AreasModule, LocationTreeModule, forwardRef(() => ApprovalsModule), forwardRef(() => ErpSyncModule),
     TypeOrmModule.forFeature([
       PendingCustomerPhoto,
       Customer,
