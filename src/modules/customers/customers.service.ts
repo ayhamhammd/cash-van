@@ -668,7 +668,9 @@ export class CustomersService {
   }
 
   async insights(id: string): Promise<CustomerInsights> {
-    const customer = await this.findOneOrThrow(id);
+    // The office's customer page reads the customer from here, so it carries
+    // its place like a list row does.
+    const customer = await this.getWithPlace(id);
     const [aiProfile, recentVisits] = await Promise.all([
       this.aiProfiles.findOne({ where: { customerId: id } }),
       this.visits.find({
