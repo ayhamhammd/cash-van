@@ -293,6 +293,17 @@ export class CustomersController {
     return this.customers.reassign(id, dto.newRepId);
   }
 
+  @Post(':id/use-area-salesman')
+  @Roles('admin', 'manager')
+  @RequirePermissionKeys(CUSTOMER_ASSIGN_SALESMAN_KEY)
+  @ApiOperation({
+    summary: "Drop the customer's own salesman; its area's salesman takes it (TREE mode)",
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
+  useAreaSalesman(@Param('id', ParseUUIDPipe) id: string) {
+    return this.customers.useAreaSalesman(id);
+  }
+
   @Get(':id/visits')
   @ApiOperation({
     summary: 'List customer visits',

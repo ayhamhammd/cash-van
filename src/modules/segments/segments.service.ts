@@ -422,7 +422,8 @@ export class SegmentsService {
       .createQueryBuilder()
       .update(Customer)
       // A raw UPDATE bypasses save(), so bump updated_at explicitly.
-      .set({ repId, updatedAt: () => 'now()' })
+      // Chosen here, so the customer keeps him even if its area's salesman changes.
+      .set({ repId, repSource: 'DIRECT', updatedAt: () => 'now()' })
       .where(
         'id IN (SELECT customer_id FROM segment_customers WHERE segment_id = :id)',
         { id },

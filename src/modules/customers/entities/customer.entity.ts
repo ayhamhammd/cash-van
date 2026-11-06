@@ -7,6 +7,8 @@ export type CustomerCategory = 'retail' | 'wholesale' | 'horeca' | 'pharmacy' | 
 /** How a customer record came into existence. */
 export type CustomerSource = 'MANUAL' | 'PROSPECTING' | 'IMPORT' | 'ERP';
 
+export type RepSource = 'DIRECT' | 'AREA';
+
 @Entity({ name: 'customers' })
 export class Customer extends BaseEntity {
   @Index('uq_customers_customer_number', { unique: true })
@@ -66,6 +68,14 @@ export class Customer extends BaseEntity {
    * Used instead of area_id when app_settings.location_mode is TREE; both are
    * kept so the office can switch modes without losing either.
    */
+  /**
+   * Why rep_id holds what it holds: DIRECT (someone chose him for this
+   * customer — an area change never overrides it), AREA (resolved from the
+   * customer's area in the tree, and follows it), or null (no salesman).
+   */
+  @Column({ name: 'rep_source', type: 'text', nullable: true })
+  repSource?: RepSource | null;
+
   @Index('idx_customers_location')
   @Column({ name: 'location_id', type: 'uuid', nullable: true })
   locationId?: string | null;

@@ -43,6 +43,10 @@ export class Location extends BaseEntity {
   @Column({ name: 'sort_order', type: 'integer', default: 0 })
   sortOrder!: number;
 
+  /** The salesman covering this node; empty means "inherit from above". */
+  @Column({ name: 'rep_id', type: 'uuid', nullable: true })
+  repId?: string | null;
+
   @Column({ name: 'is_active', type: 'boolean', default: true })
   isActive!: boolean;
 }

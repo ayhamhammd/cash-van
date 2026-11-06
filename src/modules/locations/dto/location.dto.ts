@@ -196,3 +196,22 @@ export class SwitchLocationModeDto {
   @IsBoolean()
   dryRun?: boolean;
 }
+
+export class SetLocationRepDto {
+  @ApiPropertyOptional({
+    format: 'uuid',
+    nullable: true,
+    description: 'The salesman covering this place; null takes it away (its customers fall to the next one up).',
+  })
+  @IsOptional()
+  @IsUUID()
+  repId?: string | null;
+}
+
+export class DryRunQuery {
+  @ApiPropertyOptional({ description: 'Report what would change, and change nothing.' })
+  @IsOptional()
+  @Transform(queryBoolean)
+  @IsBoolean()
+  dryRun?: boolean;
+}

@@ -106,7 +106,7 @@ describe('CustomersService.assignSalesmenFromXlsx (match customer by NAME)', () 
     expect(r.unmatchedCustomers).toEqual(['Ghost']);
     expect(r.unmatchedSalesmen).toEqual(['999']);
     // Only the one real change is written, and vans are signalled exactly once.
-    expect(updates).toEqual([{ crit: { id: 'c1' }, patch: { repId: 'rep-1' } }]);
+    expect(updates).toEqual([{ crit: { id: 'c1' }, patch: { repId: 'rep-1', repSource: 'DIRECT' } }]);
     expect(events.emit).toHaveBeenCalledTimes(1);
     expect(events.emit).toHaveBeenCalledWith('customer.changed', expect.any(Object));
   });
@@ -122,7 +122,7 @@ describe('CustomersService.assignSalesmenFromXlsx (match customer by NAME)', () 
 
     expect(r.total).toBe(1);
     expect(r.assigned).toBe(1);
-    expect(updates).toEqual([{ crit: { id: 'c1' }, patch: { repId: 'rep-1' } }]);
+    expect(updates).toEqual([{ crit: { id: 'c1' }, patch: { repId: 'rep-1', repSource: 'DIRECT' } }]);
   });
 
   it('never assigns an ambiguous name even when the salesman is valid', async () => {
@@ -154,7 +154,7 @@ describe('CustomersService.assignSalesmenFromXlsx (match customer by NAME)', () 
 
     expect(r.assigned).toBe(1);
     expect(r.unmatchedSalesmen).toEqual([]);
-    expect(updates).toEqual([{ crit: { id: 'c1' }, patch: { repId: 'rep-8' } }]);
+    expect(updates).toEqual([{ crit: { id: 'c1' }, patch: { repId: 'rep-8', repSource: 'DIRECT' } }]);
   });
 
   it('folds Arabic spelling variants (alef + ة/ه) when matching the name', async () => {

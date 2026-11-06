@@ -9,7 +9,7 @@
  * adds (and removes) areas prefixed ZZLOC.
  */
 import { plainToInstance } from 'class-transformer';
-import { DataSource } from 'typeorm';
+import { DataSource, QueryRunner } from 'typeorm';
 
 import { CustomersService } from '../customers/customers.service';
 import { ListCustomersQuery } from '../customers/dto/list-customers.query';
@@ -32,6 +32,7 @@ run('location tree (real DB)', () => {
   const customerIds: string[] = [];
   let amman = '';
   let irbid = '';
+  let lock: QueryRunner;
   const q = (sql: string, params: unknown[] = []) => ds.query(sql, params);
 
   const settings = {
@@ -75,6 +76,10 @@ run('location tree (real DB)', () => {
       synchronize: false,
     });
     await ds.initialize();
+    // The tree has ONE root, shared by every suite that builds one: take turns.
+    lock = ds.createQueryRunner();
+    await lock.connect();
+    await lock.query(`SELECT pg_advisory_lock(hashtext('location-tree-tests'))`);
     await purge();
     treeExisted = Number((await q(`SELECT COUNT(*) AS n FROM locations WHERE deleted_at IS NULL`))[0].n) > 0;
     modeBefore = (await q(`SELECT location_mode FROM app_settings WHERE id = 1`))[0]?.location_mode ?? 'FLAT';
@@ -112,6 +117,8 @@ run('location tree (real DB)', () => {
       await q(`DELETE FROM locations WHERE kind = 'COUNTRY'`);
     }
     await q(`UPDATE app_settings SET location_mode = $1 WHERE id = 1`, [modeBefore]);
+    await lock.query(`SELECT pg_advisory_unlock(hashtext('location-tree-tests'))`);
+    await lock.release();
     await ds.destroy();
   });
 

@@ -297,6 +297,9 @@ export class CustomersService {
     }
     const entity = this.customers.create({
       ...dto,
+      // Somebody chose this salesman (the office, or the salesman who found the
+      // shop): an area's salesman never overrides him.
+      repSource: dto.repId ? 'DIRECT' : null,
       customerNumber,
       nameAr: dto.nameAr ?? dto.customerName,
       phoneHash: hashPhone(dto.phone),
@@ -304,7 +307,12 @@ export class CustomersService {
       // IS a prospecting create, and one that does not cannot claim to be.
       source: dto.sourceProspectId ? 'PROSPECTING' : 'MANUAL',
     });
-    const saved = await this.customers.save(entity);
+    let saved = await this.customers.save(entity);
+    // No salesman named but placed in an area: the area's salesman takes it.
+    if (!saved.repId && saved.locationId) {
+      const r = await this.locations.applyReps({ customerIds: [saved.id] });
+      if (r.moved) saved = await this.findOneOrThrow(saved.id);
+    }
     await this.fileInSegment(saved.id, dto.segmentId);
     if (dto.sourceProspectId) {
       // An event rather than a direct call: prospecting already depends on
@@ -456,11 +464,22 @@ export class CustomersService {
         dto = { ...dto, cityCode: (await this.locations.governorateCodeOf(dto.locationId)) ?? undefined };
       }
     }
+    const repChosen = dto.repId !== undefined && (dto.repId ?? null) !== (customer.repId ?? null);
     Object.assign(customer, dto);
+    // Choosing a salesman makes him this customer's own; clearing him hands
+    // the customer back to its area (resolved below).
+    if (repChosen) customer.repSource = dto.repId ? 'DIRECT' : null;
     if (dto.phone !== undefined) {
       customer.phoneHash = hashPhone(dto.phone);
     }
-    const saved = await this.customers.save(customer);
+    let saved = await this.customers.save(customer);
+    // A customer that follows its area: a new area, or a cleared salesman,
+    // means its area's salesman now.
+    if (saved.locationId && saved.repSource !== 'DIRECT' &&
+        ((saved.locationId ?? null) !== locationBefore || (repChosen && !saved.repId))) {
+      const r = await this.locations.applyReps({ customerIds: [saved.id] });
+      if (r.moved) saved = await this.findOneOrThrow(saved.id);
+    }
     this.events.emit('customer.changed', {
       repId: saved.repId ?? null,
       reason: 'customer.updated',
@@ -693,6 +712,7 @@ export class CustomersService {
     const customer = await this.findOneOrThrow(id);
     const previousRepId = customer.repId ?? null;
     customer.repId = newRepId;
+    customer.repSource = 'DIRECT';
     const saved = await this.customers.save(customer);
     // BOTH vans are told: the new owner to pick the customer up, the previous
     // one to let go. Signalling only the new owner leaves the old van still
@@ -701,6 +721,33 @@ export class CustomersService {
       repId: newRepId,
       previousRepId,
       reason: 'customer.reassigned',
+    });
+    return saved;
+  }
+
+  /**
+   * Drop a customer's own salesman and let its area decide (TREE mode).
+   * When no place above the customer has a salesman it is left with none —
+   * the response says so through `repId: null`.
+   */
+  async useAreaSalesman(id: string): Promise<Customer> {
+    const customer = await this.findOneOrThrow(id);
+    if ((await this.settings.locationMode()) !== 'TREE') {
+      throw new BadRequestException(
+        'Salesmen by area work with the location tree. Switch to it in Program Features first.',
+      );
+    }
+    if (!customer.locationId) {
+      throw new BadRequestException('Place the customer in an area first; its salesman comes from there.');
+    }
+    const previousRepId = customer.repId ?? null;
+    await this.customers.update({ id }, { repSource: 'AREA', repId: null });
+    await this.locations.applyReps({ customerIds: [id] });
+    const saved = await this.findOneOrThrow(id);
+    this.events.emit('customer.changed', {
+      repId: saved.repId ?? null,
+      previousRepId,
+      reason: 'customer.rep.area',
     });
     return saved;
   }
@@ -908,7 +955,7 @@ export class CustomersService {
     if (toAssign.length > 0) {
       await this.customers.manager.transaction(async (em) => {
         const repo = em.getRepository(Customer);
-        for (const a of toAssign) await repo.update({ id: a.id }, { repId: a.repId });
+        for (const a of toAssign) await repo.update({ id: a.id }, { repId: a.repId, repSource: 'DIRECT' });
       });
     }
 

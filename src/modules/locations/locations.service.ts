@@ -37,7 +37,43 @@ export interface LocationRow {
   customerCount: number;
   /** Customers anywhere under this node, itself included. */
   subtreeCustomerCount: number;
+  /** The salesman set on this node itself. */
+  repId: string | null;
+  repName: string | null;
+  /** The salesman it gets from above when it has none of its own. */
+  inheritedRepId: string | null;
+  inheritedRepName: string | null;
 }
+
+/** A node as it is stored — without the counts and names list() works out. */
+type NodeView = Omit<LocationRow, 'customerCount' | 'subtreeCustomerCount' | 'repName' | 'inheritedRepId' | 'inheritedRepName'>;
+
+/** One customer whose salesman a resolution changed. */
+export interface RepMove {
+  customerId: string;
+  fromRepId: string | null;
+  toRepId: string | null;
+}
+
+/** What assigning (or a dry run of assigning) a salesman does to customers. */
+export interface RepChangeReport {
+  dryRun: boolean;
+  /** False in FLAT mode: the assignment is stored, but moves nobody until the switch to TREE. */
+  applied: boolean;
+  moved: number;
+  /** Customers in scope assigned directly — they keep their salesman. */
+  keptDirect: number;
+  byRep: Array<{
+    fromRepId: string | null;
+    fromRepName: string | null;
+    toRepId: string | null;
+    toRepName: string | null;
+    count: number;
+  }>;
+}
+
+/** A customer rep_id that is "chosen", never overridden by an area: DIRECT, or a pre-column owner. */
+const NOT_DIRECT = `(c.rep_source = 'AREA' OR c.rep_id IS NULL)`;
 
 export interface LocationOption {
   id: string;
@@ -100,14 +136,46 @@ export class LocationTreeService {
         subtree.set(ancestorId, (subtree.get(ancestorId) ?? 0) + count);
       }
     }
+    const repNames = await this.repNames(nodes.map((n) => n.repId ?? '').filter(Boolean));
+    const byId = new Map(nodes.map((n) => [n.id, n]));
     const items = nodes
       .filter((n) => includeInactive || n.isActive)
-      .map((n) => ({
-        ...this.toRow(n),
-        customerCount: own.get(n.id) ?? 0,
-        subtreeCustomerCount: subtree.get(n.id) ?? 0,
-      }));
+      .map((n) => {
+        // The nearest node above with a salesman of its own.
+        const above = idsOnPath(n.path)
+          .slice(0, -1)
+          .reverse()
+          .map((id) => byId.get(id))
+          .find((a) => a?.repId);
+        return {
+          ...this.toRow(n),
+          customerCount: own.get(n.id) ?? 0,
+          subtreeCustomerCount: subtree.get(n.id) ?? 0,
+          repId: n.repId ?? null,
+          repName: n.repId ? (repNames.get(n.repId) ?? null) : null,
+          inheritedRepId: above?.repId ?? null,
+          inheritedRepName: above?.repId ? (repNames.get(above.repId) ?? null) : null,
+        };
+      });
     return { items, total: items.length };
+  }
+
+  /** The places a salesman covers himself, with their customer counts — for his page. */
+  async coveredBy(repId: string): Promise<Array<{ id: string; kind: LocationKind; label: string; customers: number }>> {
+    const { items } = await this.list(true);
+    const flat = items.map((i) => ({ ...i }));
+    const byId = new Map(flat.map((i) => [i.id, i]));
+    return flat
+      .filter((n) => n.repId === repId)
+      .map((n) => {
+        const names: string[] = [];
+        let cur: (typeof flat)[number] | undefined = n;
+        while (cur) {
+          if (cur.kind !== 'COUNTRY') names.unshift(cur.nameAr);
+          cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+        }
+        return { id: n.id, kind: n.kind, label: names.join(' - ') || n.nameAr, customers: n.subtreeCustomerCount };
+      });
   }
 
   async getOne(id: string): Promise<Location> {
@@ -117,7 +185,7 @@ export class LocationTreeService {
   }
 
   /** One node with the nodes above it, root first — for the detail panel's breadcrumb. */
-  async getWithAncestors(id: string): Promise<Omit<LocationRow, 'customerCount' | 'subtreeCustomerCount'> & {
+  async getWithAncestors(id: string): Promise<NodeView & {
     ancestors: Array<{ id: string; kind: LocationKind; nameAr: string; nameEn: string | null }>;
   }> {
     const node = await this.getOne(id);
@@ -341,11 +409,15 @@ export class LocationTreeService {
     if (dto.sortOrder !== undefined) node.sortOrder = dto.sortOrder;
     if (dto.isActive !== undefined) node.isActive = dto.isActive;
 
+    const moved = dto.parentId !== undefined && placeChanged && node.parentId === dto.parentId;
     const saved = await this.locations.save(node);
     this.changed('location.updated');
     // A rename or a move changes the label every customer below carries — and
     // the address the ERP holds for them.
     if (placeChanged) await this.placeChanged(await this.customerIdsUnder(saved));
+    // Moved under another governorate: its customers without a salesman of
+    // their own follow the new governorate's.
+    if (moved) await this.applyReps({ nodePath: saved.path });
     return saved;
   }
 
@@ -502,6 +574,7 @@ export class LocationTreeService {
     );
     this.changed('location.imported');
     await this.placeChanged(placed);
+    await this.applyReps({ customerIds: placed });
     return {
       created,
       reused,
@@ -571,6 +644,7 @@ export class LocationTreeService {
     );
     this.changed('location.members');
     await this.placeChanged(customerIds);
+    await this.applyReps({ customerIds });
     return { moved: customerIds.length };
   }
 
@@ -599,6 +673,8 @@ export class LocationTreeService {
     areas: number;
     customersPlaced: number;
     customersWithoutPlace: number;
+    /** Going to TREE: customers whose salesman follows their area and changes. */
+    reps: RepChangeReport;
   }> {
     const from = await this.settings.locationMode();
     const [counts] = (await this.locations.query(
@@ -618,6 +694,10 @@ export class LocationTreeService {
       areas,
       customersPlaced: placedInTarget,
       customersWithoutPlace: (Number(counts.total) || 0) - placedInTarget,
+      reps:
+        mode === 'TREE' && from !== mode
+          ? await this.report(await this.resolve({ all: true }, true), true, true, { all: true })
+          : emptyReport(dryRun),
     };
     if (mode === 'TREE' && areas === 0) {
       throw new ConflictException({
@@ -630,6 +710,9 @@ export class LocationTreeService {
     await this.settings.setLocationMode(mode);
     // Every phone's labels, filter and picker change at once.
     this.changed('location.mode');
+    // Area salesmen take effect: customers without a salesman of their own
+    // follow their area's.
+    if (mode === 'TREE') report.reps = await this.applyReps({ all: true });
     // The ERP holds the place as the customer's address; it now reads the other set.
     const rows: Array<{ id: string }> = await this.customers.query(
       `SELECT id FROM customers WHERE deleted_at IS NULL AND (location_id IS NOT NULL OR area_id IS NOT NULL)`,
@@ -638,9 +721,167 @@ export class LocationTreeService {
     return report;
   }
 
+  // ── Salesmen by area ────────────────────────────────────────────────────
+
+  /**
+   * Give a place a salesman, or take it away (`repId: null`). Every customer
+   * below it without a salesman of their own (BE spec §5.1) follows: to this
+   * salesman, or — when cleared — to the next one up, or to none.
+   *
+   * `dryRun` does the whole thing inside a transaction and rolls it back, so
+   * the preview is exactly what the real run will do. In FLAT mode the
+   * assignment is stored and moves nobody until the company switches to TREE.
+   */
+  async setRep(id: string, repId: string | null, dryRun = false): Promise<RepChangeReport> {
+    const node = await this.getOne(id);
+    if (repId) {
+      const rows: Array<{ id: string }> = await this.locations.query(
+        `SELECT id FROM reps WHERE id = $1 AND deleted_at IS NULL`,
+        [repId],
+      );
+      if (!rows.length) throw new BadRequestException('That salesman no longer exists. Refresh and choose again.');
+    }
+    const tree = (await this.settings.locationMode()) === 'TREE';
+    const scope = { nodePath: node.path };
+
+    if (dryRun) {
+      const qr = this.dataSource.createQueryRunner();
+      await qr.connect();
+      await qr.startTransaction();
+      try {
+        await qr.manager.update(Location, { id }, { repId });
+        const moves = tree ? await this.resolve(scope, true, qr.manager) : [];
+        return await this.report(moves, true, tree, scope, qr.manager);
+      } finally {
+        await qr.rollbackTransaction();
+        await qr.release();
+      }
+    }
+
+    await this.locations.update({ id }, { repId });
+    this.changed('location.rep');
+    if (!tree) return this.report([], false, false, scope);
+    return this.applyReps(scope);
+  }
+
+  /**
+   * Re-resolve customers' salesmen from their areas, write the changes, and
+   * tell the phones that lost or gained a shop. Only in TREE mode. Serialised
+   * with an advisory lock so two office users cannot interleave.
+   */
+  async applyReps(scope: RepScope): Promise<RepChangeReport> {
+    if ((await this.settings.locationMode()) !== 'TREE') return emptyReport(false);
+    const moves = await this.dataSource.transaction(async (m) => {
+      await m.query(`SELECT pg_advisory_xact_lock(hashtext('location-reps'))`);
+      return this.resolve(scope, false, m);
+    });
+    this.notifyMoves(moves);
+    return this.report(moves, false, true, scope);
+  }
+
+  /**
+   * The salesman each customer in scope should have from its area — the
+   * nearest node up its path that has one — compared with what it has.
+   * Customers with a salesman of their own are left out. With `dryRun` only
+   * reads; otherwise writes the changes in ONE statement and returns them.
+   */
+  private async resolve(scope: RepScope, dryRun: boolean, m?: EntityManager): Promise<RepMove[]> {
+    const runner = m ?? this.dataSource.manager;
+    const { where, params } = scopeWhere(scope);
+    const target = `
+      WITH target AS (
+        SELECT c.id, c.rep_id AS old_rep,
+               (SELECT a.rep_id FROM locations a
+                 WHERE a.deleted_at IS NULL AND a.rep_id IS NOT NULL
+                   AND l.path LIKE a.path || '%'
+                 ORDER BY a.depth DESC LIMIT 1) AS new_rep
+          FROM customers c
+          JOIN locations l ON l.id = c.location_id AND l.deleted_at IS NULL
+         WHERE c.deleted_at IS NULL AND ${NOT_DIRECT} AND ${where}
+      )`;
+    const rows: Array<{ id: string; old_rep: string | null; new_rep: string | null }> = dryRun
+      ? await runner.query(`${target} SELECT id, old_rep, new_rep FROM target WHERE old_rep IS DISTINCT FROM new_rep`, params)
+      : await runner.query(
+          `${target},
+           upd AS (
+             UPDATE customers c
+                SET rep_id = t.new_rep,
+                    rep_source = CASE WHEN t.new_rep IS NULL THEN NULL ELSE 'AREA' END,
+                    updated_at = now(), version = c.version + 1
+               FROM target t
+              WHERE c.id = t.id
+                AND (c.rep_id IS DISTINCT FROM t.new_rep
+                     OR c.rep_source IS DISTINCT FROM (CASE WHEN t.new_rep IS NULL THEN NULL ELSE 'AREA' END))
+             RETURNING c.id, t.old_rep, t.new_rep
+           )
+           SELECT id, old_rep, new_rep FROM upd WHERE old_rep IS DISTINCT FROM new_rep`,
+          params,
+        );
+    return rows.map((r) => ({ customerId: r.id, fromRepId: r.old_rep, toRepId: r.new_rep }));
+  }
+
+  /** One sync signal per salesman who lost or gained shops — not one per customer. */
+  private notifyMoves(moves: RepMove[]): void {
+    const reps = new Set<string>();
+    for (const mv of moves) {
+      if (mv.fromRepId) reps.add(mv.fromRepId);
+      if (mv.toRepId) reps.add(mv.toRepId);
+    }
+    for (const repId of reps) this.events.emit('customer.changed', { repId, reason: 'location.rep' });
+  }
+
+  private async report(
+    moves: RepMove[],
+    dryRun: boolean,
+    applied: boolean,
+    scope: RepScope,
+    m?: EntityManager,
+  ): Promise<RepChangeReport> {
+    const runner = m ?? this.dataSource.manager;
+    const { where, params } = scopeWhere(scope);
+    const [kept] = (await runner.query(
+      `SELECT COUNT(*) AS n FROM customers c
+         JOIN locations l ON l.id = c.location_id AND l.deleted_at IS NULL
+        WHERE c.deleted_at IS NULL AND NOT ${NOT_DIRECT} AND ${where}`,
+      params,
+    )) as Array<{ n: string }>;
+    const groups = new Map<string, { fromRepId: string | null; toRepId: string | null; count: number }>();
+    for (const mv of moves) {
+      const key = `${mv.fromRepId ?? ''}>${mv.toRepId ?? ''}`;
+      const g = groups.get(key) ?? { fromRepId: mv.fromRepId, toRepId: mv.toRepId, count: 0 };
+      g.count += 1;
+      groups.set(key, g);
+    }
+    const names = await this.repNames(moves.flatMap((mv) => [mv.fromRepId ?? '', mv.toRepId ?? '']).filter(Boolean));
+    return {
+      dryRun,
+      applied,
+      moved: moves.length,
+      keptDirect: Number(kept?.n) || 0,
+      byRep: [...groups.values()]
+        .sort((a, b) => b.count - a.count)
+        .map((g) => ({
+          ...g,
+          fromRepName: g.fromRepId ? (names.get(g.fromRepId) ?? null) : null,
+          toRepName: g.toRepId ? (names.get(g.toRepId) ?? null) : null,
+        })),
+    };
+  }
+
+  /** "أحمد (201)" by rep id. */
+  private async repNames(ids: string[]): Promise<Map<string, string>> {
+    const unique = [...new Set(ids)];
+    if (!unique.length) return new Map();
+    const rows: Array<{ id: string; name_ar: string; code: string | null }> = await this.locations.query(
+      `SELECT id, name_ar, code FROM reps WHERE id = ANY($1::uuid[])`,
+      [unique],
+    );
+    return new Map(rows.map((r) => [r.id, r.code ? `${r.name_ar} (${r.code})` : r.name_ar]));
+  }
+
   // ── Internals ───────────────────────────────────────────────────────────
 
-  private toRow(n: Location): Omit<LocationRow, 'customerCount' | 'subtreeCustomerCount'> {
+  private toRow(n: Location): NodeView {
     return {
       id: n.id,
       parentId: n.parentId ?? null,
@@ -652,6 +893,7 @@ export class LocationTreeService {
       color: n.color ?? null,
       sortOrder: n.sortOrder,
       isActive: n.isActive,
+      repId: n.repId ?? null,
     };
   }
 
@@ -737,6 +979,19 @@ export class LocationTreeService {
     if ((await this.settings.locationMode()) !== 'TREE') return;
     this.events.emit('erp.customer.area', { customerIds });
   }
+}
+
+/** Which customers a resolution looks at. */
+export type RepScope = { all: true } | { nodePath: string } | { customerIds: string[] };
+
+function scopeWhere(scope: RepScope): { where: string; params: unknown[] } {
+  if ('nodePath' in scope) return { where: 'l.path LIKE $1', params: [`${scope.nodePath}%`] };
+  if ('customerIds' in scope) return { where: 'c.id = ANY($1::uuid[])', params: [scope.customerIds] };
+  return { where: 'TRUE', params: [] };
+}
+
+function emptyReport(dryRun: boolean): RepChangeReport {
+  return { dryRun, applied: false, moved: 0, keptDirect: 0, byRep: [] };
 }
 
 /** The ids on a materialised path, root first: '/a/b/c/' → [a, b, c]. */

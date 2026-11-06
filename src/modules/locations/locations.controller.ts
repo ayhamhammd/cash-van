@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { RequirePermissionKeys } from '../../common/decorators/permissions.decorator';
@@ -6,11 +6,13 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import {
   CreateLocationDto,
+  DryRunQuery,
   ImportFlatAreasDto,
   ListLocationMembersQuery,
   ListLocationsQuery,
   LocationMembersDto,
   ReorderLocationsDto,
+  SetLocationRepDto,
   SwitchLocationModeDto,
   UpdateLocationDto,
 } from './dto/location.dto';
@@ -66,6 +68,13 @@ export class LocationTreeController {
     return this.locations.reorder(dto.parentId ?? null, dto.ids);
   }
 
+  @Get('covered-by/:repId')
+  @RequirePermissionKeys('areas.view')
+  @ApiOperation({ summary: 'The places a salesman covers, with their customer counts' })
+  coveredBy(@Param('repId', ParseUUIDPipe) repId: string) {
+    return this.locations.coveredBy(repId);
+  }
+
   @Get(':id')
   @RequirePermissionKeys('areas.view')
   @ApiOperation({ summary: 'One node, with the nodes above it' })
@@ -93,6 +102,23 @@ export class LocationTreeController {
   async remove(@Param('id', ParseUUIDPipe) id: string) {
     await this.locations.remove(id);
     return { success: true };
+  }
+
+  /**
+   * Who covers this place. Moving customers between salesmen is its own
+   * permission (customers.assignSalesman) on top of editing places.
+   */
+  @Put(':id/rep')
+  @RequirePermissionKeys('areas.edit', 'customers.assignSalesman')
+  @ApiOperation({
+    summary: 'Give a place a salesman (or take him away); its customers without one of their own follow',
+  })
+  setRep(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetLocationRepDto,
+    @Query() q: DryRunQuery,
+  ) {
+    return this.locations.setRep(id, dto.repId ?? null, q.dryRun ?? false);
   }
 
   @Get(':id/members')
