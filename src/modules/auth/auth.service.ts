@@ -11,6 +11,7 @@ import { DevicesService } from '../devices/devices.service';
 import { LoginDto } from './dto/login.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 import { User } from '../users/entities/user.entity';
+import { canDeliver, type RepKind } from '../reps/entities/rep.entity';
 import { LoginApprovalsService, WebDevice } from '../login-approvals/login-approvals.service';
 
 export interface LoginResponse {
@@ -29,6 +30,8 @@ export interface LoginResponse {
     role: string;
     /** Field-rep id linked to this user, or null if not a rep. */
     repId: string | null;
+    /** What the linked rep does (SALES | DELIVERY | BOTH); SALES when not a rep. */
+    repKind: RepKind;
     permissions: Record<string, boolean>;
     /** Granular dashboard permission keys. */
     permKeys: string[];
@@ -129,7 +132,8 @@ export class AuthService {
     }
     const repId = rep?.id ?? null;
 
-    const permissions = this.extractPermissions(user);
+    const repKind: RepKind = rep?.kind ?? 'SALES';
+    const permissions = this.extractPermissions(user, repKind);
     const permKeys = user.permissions ?? [];
     const payload: JwtPayload = {
       sub: user.id,
@@ -187,6 +191,7 @@ export class AuthService {
         userType: user.userType,
         role: user.role ?? 'viewer',
         repId,
+        repKind,
         permissions,
         permKeys,
         mustChangePassword: user.mustChangePassword ?? false,
@@ -204,6 +209,10 @@ export class AuthService {
   ): Promise<Record<string, unknown>> {
     const user = await this.usersService.findOneOrThrow(current.sub).catch(() => null);
     if (!user) return current;
+    // The rep's role is read fresh too: an admin switching a rep to DELIVERY
+    // must reach the phone on its next refresh, not on its next sign-in.
+    const rep = await this.repsService.findByUserId(user.id).catch(() => null);
+    const repKind: RepKind = rep?.kind ?? 'SALES';
     return {
       ...current,
       // `id` + `name` so /auth/me returns a COMPLETE profile (the same shape as
@@ -215,13 +224,17 @@ export class AuthService {
       name: user.name,
       role: user.role ?? 'viewer',
       userType: user.userType,
-      permissions: this.extractPermissions(user),
+      repKind,
+      permissions: this.extractPermissions(user, repKind),
       permKeys: user.permissions ?? [],
     };
   }
 
-  private extractPermissions(user: User): Record<string, boolean> {
+  private extractPermissions(user: User, repKind: RepKind = 'SALES'): Record<string, boolean> {
     return {
+      // Decided by the rep's kind, not by a user flag (docs/SPEC-delivery-rep.md
+      // §6.3): DELIVERY and BOTH open the delivery home.
+      canDeliver: canDeliver(repKind),
       canMakeVoucher: user.canMakeVoucher,
       canCreateSale: user.canCreateSale,
       canCreateReturn: user.canCreateReturn,

@@ -448,7 +448,7 @@ function chunked<T>(xs: T[], size: number): T[][] {
  * a float landed a hair below. A missing or unparseable amount is zero — an
  * invoice with no total credits nobody rather than poisoning a sum with NaN.
  */
-function toFils(v: number | string | null | undefined): number {
+export function toFils(v: number | string | null | undefined): number {
   const n = Number(v ?? 0);
   return Number.isFinite(n) ? Math.round(n * 1000) : 0;
 }

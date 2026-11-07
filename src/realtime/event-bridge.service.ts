@@ -120,6 +120,39 @@ export class EventBridgeService {
     );
   }
 
+  /**
+   * The delivery mirror changed — a run created, edited, closed or moved to
+   * another rep, or a stop's result sent or answered (docs/SPEC-delivery-rep.md
+   * §5).
+   *
+   * Two audiences. Dashboards watching the rep get `delivery.updated` with the
+   * run (and the stop, when exactly one changed) so an open run page re-reads
+   * it. The rep's phone gets `sync.required {deliveries}`; when the run moved
+   * to another rep the PREVIOUS rep is told as well, so his phone drops it.
+   */
+  @OnEvent('delivery.changed')
+  onDeliveryChanged(p: {
+    runId: string;
+    stopId?: string | null;
+    repId?: string | null;
+    previousRepId?: string | null;
+    reason?: string;
+  }): void {
+    if (!p?.runId) return;
+    const payload: { runId: string; stopId?: string } = { runId: p.runId };
+    if (p.stopId) payload.stopId = p.stopId;
+    this.gateway.broadcastForRep('delivery.updated', payload, p.repId ?? null);
+    if (p.previousRepId && p.previousRepId !== p.repId) {
+      // A scoped supervisor of the previous rep still has the run open. An
+      // unrestricted dashboard hears it twice, which is harmless: it re-reads.
+      this.gateway.broadcastForRep('delivery.updated', payload, p.previousRepId);
+    }
+    const signal = syncSignal('deliveries', p.reason ?? 'delivery.changed');
+    for (const repId of new Set([p.repId, p.previousRepId].filter(Boolean))) {
+      this.gateway.emitToRep(repId as string, SYNC_REQUIRED_EVENT, signal);
+    }
+  }
+
   /** Escape hatch for callers that already know the resource. */
   signalRep(repId: string, resource: SyncResource, reason: string): void {
     this.gateway.emitToRep(repId, SYNC_REQUIRED_EVENT, syncSignal(resource, reason));

@@ -22,6 +22,8 @@ interface ErrorBody {
    * cannot be told apart from a localized sentence.
    */
   code?: string;
+  /** Per-item refusals an upstream system gave (ERP LOAD_REFUSED). */
+  refusals?: unknown[];
   path: string;
   timestamp: string;
 }
@@ -35,13 +37,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
 
-    const { status, message, error, code } = this.mapException(exception);
+    const { status, message, error, code, refusals } = this.mapException(exception);
 
     const body: ErrorBody = {
       statusCode: status,
       message,
       error,
       ...(code ? { code } : {}),
+      ...(refusals ? { refusals } : {}),
       path: request.url,
       timestamp: new Date().toISOString(),
     };
@@ -63,6 +66,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     message: string | string[];
     error: string;
     code?: string;
+    refusals?: unknown[];
   } {
     if (exception instanceof HttpException) {
       const res = exception.getResponse();
@@ -76,6 +80,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
         message: (obj.message as string | string[]) ?? exception.message,
         error: (obj.error as string) ?? exception.name,
         code: typeof obj.code === 'string' ? obj.code : undefined,
+        // Carried through so the dashboard can say WHICH invoices the ERP
+        // refused to load, not just that it refused.
+        refusals: Array.isArray(obj.refusals) ? obj.refusals : undefined,
       };
     }
 

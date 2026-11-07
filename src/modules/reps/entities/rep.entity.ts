@@ -2,6 +2,19 @@ import { Column, Entity, Index, JoinColumn, ManyToOne } from 'typeorm';
 import { BaseEntity } from '../../../common/entities/base.entity';
 import { User } from '../../users/entities/user.entity';
 
+/**
+ * What the rep does in the field (docs/SPEC-delivery-rep.md §1.1). SALES sells
+ * from the van; DELIVERY drives ERP delivery runs; BOTH does either. A delivery
+ * rep still has a store whose code is his code (R7).
+ */
+export const REP_KINDS = ['SALES', 'DELIVERY', 'BOTH'] as const;
+export type RepKind = (typeof REP_KINDS)[number];
+
+/** True when the rep may open the delivery screens and post delivery results. */
+export function canDeliver(kind: string | null | undefined): boolean {
+  return kind === 'DELIVERY' || kind === 'BOTH';
+}
+
 @Entity({ name: 'reps' })
 export class Rep extends BaseEntity {
   // Unique partial index → at most one rep per user (NULLs unconstrained).
@@ -106,4 +119,8 @@ export class Rep extends BaseEntity {
   /** Dashboard user who entered the key. */
   @Column({ name: 'activated_by', type: 'uuid', nullable: true })
   activatedBy?: string | null;
+
+  /** SALES | DELIVERY | BOTH — see REP_KINDS. Existing reps are SALES. */
+  @Column({ type: 'text', default: 'SALES' })
+  kind!: RepKind;
 }

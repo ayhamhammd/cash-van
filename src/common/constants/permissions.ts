@@ -50,3 +50,20 @@ export const PERM_ON_BEHALF = 'vouchers.createOnBehalf';
  * leaves no trace is the same as no rule.
  */
 export const PERM_POLICY_OVERRIDE = 'vouchers.overrideSalesmanPolicy';
+
+/**
+ * Dashboard keys for delivery runs (docs/SPEC-delivery-rep.md §6.7). Office
+ * users only: a REP's delivery access is decided by `reps.kind`, not by keys.
+ *
+ *   view           — see runs, stops, vehicles and an invoice's delivery panel.
+ *   manage         — build, edit, re-order and close runs; pick loadable invoices.
+ *   approveReturn  — approve or reject a delivery return (phase 3).
+ */
+export const PERM_DELIVERIES_VIEW = 'deliveries.view';
+export const PERM_DELIVERIES_MANAGE = 'deliveries.manage';
+export const PERM_DELIVERIES_APPROVE_RETURN = 'deliveries.approveReturn';
+export const DELIVERY_PERMISSION_KEYS = [
+  PERM_DELIVERIES_VIEW,
+  PERM_DELIVERIES_MANAGE,
+  PERM_DELIVERIES_APPROVE_RETURN,
+] as const;

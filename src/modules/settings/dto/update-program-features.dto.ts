@@ -6,6 +6,8 @@ export class UpdateProgramFeaturesDto extends PickType(UpdateAppSettingsDto, [
   'damagedReturnsEnabled',
   'damagedWarehouseCode',
   'containersEnabled',
+  'deliveryIncreaseRequests',
+  'deliveryProofRequired',
   'targetsIncludeTax',
   'targetsSalesIncludeCash',
 ] as const) {}

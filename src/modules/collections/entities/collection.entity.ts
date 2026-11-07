@@ -76,6 +76,15 @@ export class Collection {
   @Column({ type: 'text', nullable: true })
   note?: string | null;
 
+  /**
+   * The ERP invoice this money was taken against — a delivery rep collecting on
+   * the invoice he just delivered. When set, the PAYMENT push names it as
+   * `invoiceNumber`, so the ERP allocates the receipt to that invoice instead of
+   * FIFO across the customer's oldest open ones.
+   */
+  @Column({ name: 'erp_invoice_number', type: 'text', nullable: true })
+  erpInvoiceNumber?: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 

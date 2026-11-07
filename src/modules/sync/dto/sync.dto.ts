@@ -51,10 +51,10 @@ export class ListInboxQueryDto {
   @IsIn(['pending', 'posted', 'failed', 'accepted', 'rejected', 'dead_letter'])
   status?: 'pending' | 'posted' | 'failed' | 'accepted' | 'rejected' | 'dead_letter';
 
-  @ApiPropertyOptional({ enum: ['VOUCHER', 'COLLECTION'] })
+  @ApiPropertyOptional({ enum: ['VOUCHER', 'COLLECTION', 'DELIVERY'] })
   @IsOptional()
-  @IsIn(['VOUCHER', 'COLLECTION'])
-  type?: 'VOUCHER' | 'COLLECTION';
+  @IsIn(['VOUCHER', 'COLLECTION', 'DELIVERY'])
+  type?: 'VOUCHER' | 'COLLECTION' | 'DELIVERY';
 
   @ApiPropertyOptional({ minimum: 0, default: 0 })
   @IsOptional()

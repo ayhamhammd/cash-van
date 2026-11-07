@@ -174,6 +174,18 @@ export class CreateCollectionDto {
   @Length(1, 100)
   clientRef?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'The ERP invoice number this collection pays (a delivery rep collecting on ' +
+      'the invoice he delivered). Sent to the ERP as the receipt\'s invoiceNumber, ' +
+      'so it is allocated to that invoice rather than FIFO.',
+    example: 'INV-2026-000123',
+  })
+  @IsOptional()
+  @IsString()
+  @Length(1, 100)
+  erpInvoiceNumber?: string;
+
   @ApiPropertyOptional({ description: 'YYYY-MM-DD or ISO; defaults to now()' })
   @IsOptional()
   @IsDateString()

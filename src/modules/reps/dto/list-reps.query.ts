@@ -1,6 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
+
+import { REP_KINDS, type RepKind } from '../entities/rep.entity';
 
 export class ListRepsQuery {
   @ApiPropertyOptional({ description: 'Filter by region', format: 'uuid' })
@@ -13,6 +15,14 @@ export class ListRepsQuery {
   @Type(() => Boolean)
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({
+    enum: REP_KINDS,
+    description: 'Only reps of this kind (SALES | DELIVERY | BOTH).',
+  })
+  @IsOptional()
+  @IsIn(REP_KINDS)
+  kind?: RepKind;
 
   @ApiPropertyOptional({ description: 'Substring search over name_ar / name_en / phone' })
   @IsOptional()

@@ -1,7 +1,7 @@
 import { EntityManager } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 
-import { Rep } from './entities/rep.entity';
+import { Rep, type RepKind } from './entities/rep.entity';
 import { Warehouse } from '../warehouses/entities/warehouse.entity';
 import { User } from '../users/entities/user.entity';
 
@@ -24,6 +24,8 @@ export interface ProvisionRepInput {
   commissionPct?: string | null;
   erpAccountId?: string | null;
   erpAccountCode?: string | null;
+  /** SALES | DELIVERY | BOTH; defaults to SALES. */
+  kind?: RepKind;
   /**
    * Start this salesman frozen — they exist and can be seen, but cannot sign in
    * until a key is entered. Set by the caller from the installation's
@@ -96,6 +98,7 @@ export async function provisionRep(
     commissionPct: input.commissionPct ?? '0',
     erpAccountId: input.erpAccountId ?? null,
     erpAccountCode: input.erpAccountCode ?? null,
+    kind: input.kind ?? 'SALES',
     // Defaults to unfrozen: a caller that knows nothing about licensing must
     // never accidentally lock a salesman out.
     isFrozen: input.frozen ?? false,

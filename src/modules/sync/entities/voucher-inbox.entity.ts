@@ -6,7 +6,14 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
-export type InboxType = 'VOUCHER' | 'COLLECTION';
+/**
+ * DELIVERY is a delivery rep's stop result (docs/SPEC-delivery-rep.md §6.1). It
+ * is complete at intake — the mirror and the outbox are written in the same
+ * transaction — so it is stored `posted` and the drain never picks it up; the
+ * row exists for the idempotency key, for `GET /sync/status` and for the
+ * office's Sync inbox.
+ */
+export type InboxType = 'VOUCHER' | 'COLLECTION' | 'DELIVERY';
 
 /**
  * Stored state. `pending`/`failed` are the original vocabulary and are still

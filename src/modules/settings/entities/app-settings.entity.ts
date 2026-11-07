@@ -99,6 +99,21 @@ export class AppSettings {
   containersEnabled!: boolean;
 
   /**
+   * Delivery reps may record an INCREASE request (the customer takes more than
+   * invoiced) for the office to invoice later (docs/SPEC-delivery-rep.md §3.2).
+   * Off by default. Served in company-info.
+   */
+  @Column({ name: 'delivery_increase_requests', type: 'boolean', default: false })
+  deliveryIncreaseRequests!: boolean;
+
+  /**
+   * A delivery needs a photo and a signature (a refusal a photo only). On by
+   * default; the company may relax it. Served in company-info.
+   */
+  @Column({ name: 'delivery_proof_required', type: 'boolean', default: true })
+  deliveryProofRequired!: boolean;
+
+  /**
    * How customers' locations are organised: FLAT = the customer_areas list,
    * TREE = the locations tree (country › governorate › area). Changed only
    * through POST /locations/mode, never by a settings PATCH — switching has

@@ -230,6 +230,50 @@ export class ErpHttpClient {
     return { ok: true, duplicate: false, data: json, status: res.status };
   }
 
+  /**
+   * One call with the ERP's answer handed back whole: status and parsed body,
+   * success or not. Throws only when no answer came (network, timeout, missing
+   * configuration), so a caller can tell "the ERP refused" from "the ERP is not
+   * there" — which a live dashboard write needs to answer 409/422 vs 503.
+   */
+  async send(
+    method: 'GET' | 'POST' | 'PATCH',
+    path: string,
+    opts: {
+      body?: unknown;
+      query?: Record<string, string | number | undefined>;
+      idempotencyKey?: string;
+    } = {},
+  ): Promise<{ ok: boolean; status: number; data: unknown }> {
+    const cfg = await this.settings.getErpConfig();
+    if (!cfg.baseUrl || !cfg.apiKey) {
+      throw new Error('ERP base URL or API key not configured');
+    }
+    const base = cfg.baseUrl.replace(/\/+$/, '');
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(opts.query ?? {})) {
+      if (v !== undefined && v !== null) qs.set(k, String(v));
+    }
+    const url = `${base}/api/v1/${path}${qs.toString() ? `?${qs}` : ''}`;
+    const headers: Record<string, string> = { Authorization: `Bearer ${cfg.apiKey}` };
+    if (method !== 'GET') headers['Content-Type'] = 'application/json';
+    if (opts.idempotencyKey) headers['Idempotency-Key'] = opts.idempotencyKey;
+    this.logger.log(
+      `→ ${method} ${url}${method === 'GET' ? '' : ` body=${brief(opts.body ?? {})}`}`,
+    );
+    const res = await fetch(url, {
+      method,
+      headers,
+      ...(method === 'GET' ? {} : { body: JSON.stringify(opts.body ?? {}) }),
+      signal: AbortSignal.timeout(this.timeout()),
+    });
+    const json: unknown = await res.json().catch(() => null);
+    this.logger.log(
+      `← ${method} ${path} ${res.status}${res.ok ? '' : ` res=${brief(json)}`}`,
+    );
+    return { ok: res.ok, status: res.status, data: json };
+  }
+
   /** PATCH an ERP resource (e.g. organization settings). Returns the parsed `data`. */
   async patch<T>(path: string, body: unknown): Promise<T | null> {
     const cfg = await this.settings.getErpConfig();

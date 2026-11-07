@@ -71,6 +71,7 @@ export class RepsService {
     if (query.isActive !== undefined) {
       qb.andWhere('rep.is_active = :isActive', { isActive: query.isActive });
     }
+    if (query.kind) qb.andWhere('rep.kind = :kind', { kind: query.kind });
     applyTokenSearch(qb, query.q, ['rep.name_ar', 'rep.name_en', 'rep.phone']);
 
     const [items, total] = await qb.getManyAndCount();
@@ -311,6 +312,7 @@ export class RepsService {
         commissionPct: dto.commissionPct?.toString(),
         erpAccountId: dto.erpAccountId,
         erpAccountCode: dto.erpAccountCode,
+        kind: dto.kind,
       }),
     );
 

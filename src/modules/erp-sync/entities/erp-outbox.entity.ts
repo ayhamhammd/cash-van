@@ -32,7 +32,12 @@ export type ErpOutboxKind =
   // rather than STOCK_ADJUSTMENT because the ERP has to record WHO is holding
   // the containers, and a stock adjustment carries no customer — which is the
   // whole reason the ERP needs a ledger of its own for these.
-  | 'CONTAINER_MOVEMENT';
+  | 'CONTAINER_MOVEMENT'
+  // A delivery rep's result for one stop of an ERP delivery run
+  // (docs/SPEC-delivery-rep.md §6.5). `ref` is the phone's clientRef, which is
+  // also the ERP externalId. Built and answered by the deliveries module through
+  // ErpOutboxService.registerHandler, so erp-sync does not depend on it.
+  | 'DELIVERY_RESULT';
 export type ErpOutboxStatus = 'pending' | 'posted' | 'failed' | 'dead_letter';
 
 /** Outbound queue: van transactions to push to the ERP (idempotent by `ref`). */

@@ -320,6 +320,7 @@ export class CollectionsService {
           transferRef: dto.method === 'transfer' ? dto.transferRef!.trim() : null,
           clientRef: dto.clientRef ?? null,
           note: dto.note ?? null,
+          erpInvoiceNumber: dto.erpInvoiceNumber?.trim() || null,
         }),
       );
 

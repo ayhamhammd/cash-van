@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
   IsDateString,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -12,6 +13,8 @@ import {
   Min,
   ValidateIf,
 } from 'class-validator';
+
+import { REP_KINDS, type RepKind } from '../entities/rep.entity';
 
 export class CreateRepDto {
   @ApiPropertyOptional({
@@ -114,4 +117,14 @@ export class CreateRepDto {
   @IsString()
   @MaxLength(255)
   erpAccountCode?: string | null;
+
+  @ApiPropertyOptional({
+    enum: REP_KINDS,
+    default: 'SALES',
+    description:
+      'What the rep does: SALES sells from the van, DELIVERY drives ERP delivery runs, BOTH does either.',
+  })
+  @IsOptional()
+  @IsIn(REP_KINDS)
+  kind?: RepKind;
 }

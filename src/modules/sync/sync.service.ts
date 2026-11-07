@@ -381,6 +381,13 @@ export class SyncService {
    * lands on the row.
    */
   async promoteRow(row: VoucherInbox): Promise<void> {
+    if (row.type === 'DELIVERY') {
+      // Complete at intake (the mirror and the outbox were written with the
+      // row); nothing to promote. Only reachable through a manual retry or a
+      // payload edit — settle it back to posted rather than loop the drain.
+      await this.markPosted(row.id, row.resultRef ?? null);
+      return;
+    }
     if (row.type === 'VOUCHER') {
       await this.promoteVoucher(row, await this.storeForRow(row));
     } else {

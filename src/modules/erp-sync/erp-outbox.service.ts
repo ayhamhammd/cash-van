@@ -110,6 +110,36 @@ const ERP_PAYMENT_METHOD: Record<string, string> = {
  */
 export class TerminalPayloadError extends Error {}
 
+/** One ERP call a queued document maps to. */
+export interface OutboxCall {
+  path: string;
+  body: Record<string, unknown>;
+  idem?: string;
+  method?: 'PATCH';
+}
+
+/**
+ * How a kind owned by ANOTHER module is pushed.
+ *
+ * Exists so a feature module (deliveries) can queue documents through this
+ * drain — same retries, backoff, dead letters and Retry button — without
+ * erp-sync importing it, which would be a circular module dependency. The
+ * module registers its handler on init.
+ */
+export interface OutboxKindHandler {
+  /**
+   * The call(s) for this row. null = a prerequisite has not synced yet (retried,
+   * no attempt spent); throw TerminalPayloadError when it can never be built.
+   */
+  build(row: ErpOutbox): Promise<OutboxCall[] | null>;
+  /** True when the ERP's refusal can never succeed on a retry — dead-letter at once. */
+  isTerminal?(status: number, body: unknown): boolean;
+  /** After the ERP accepted the row. Errors here are logged, never un-post it. */
+  onPosted?(row: ErpOutbox, reply: unknown): Promise<void>;
+  /** After a terminal refusal (isTerminal) dead-lettered the row. */
+  onTerminal?(row: ErpOutbox, status: number, body: unknown): Promise<void>;
+}
+
 /**
  * A tax-inclusive price rebuilt from the tax-free one cash-van stored for an
  * exempt customer (stored = quoted ÷ (1 + rate), to 3 decimals). JOD major.
@@ -136,6 +166,8 @@ export class ErpOutboxService {
    * newest twenty — see reconcileJofotaraQr.
    */
   private qrOffset = 0;
+  /** Kinds pushed on behalf of other modules — see OutboxKindHandler. */
+  private readonly handlers = new Map<ErpOutboxKind, OutboxKindHandler>();
 
   constructor(
     private readonly erp: ErpHttpClient,
@@ -190,6 +222,11 @@ export class ErpOutboxService {
     } catch (e) {
       this.logger.warn(`requeue ${kind} ${ref} failed: ${e instanceof Error ? e.message : e}`);
     }
+  }
+
+  /** Let another module own how one outbox kind is built and answered. */
+  registerHandler(kind: ErpOutboxKind, handler: OutboxKindHandler): void {
+    this.handlers.set(kind, handler);
   }
 
   /** The queued push for one document, if it has ever been queued. */
@@ -362,6 +399,16 @@ export class ErpOutboxService {
   @OnEvent('erp.voucher.posted')
   async pushPostedVoucher(payload: { voucherNumber?: string }): Promise<void> {
     const ref = payload?.voucherNumber;
+    if (!ref) return;
+    await this.pushRefNow(ref);
+  }
+
+  /**
+   * Push one document's due rows now rather than on the next drain tick — a
+   * latency hint only, exactly as pushPostedVoucher describes. Any module that
+   * enqueued a row inside its own transaction may call it after the commit.
+   */
+  async pushRefNow(ref: string): Promise<void> {
     if (!ref || this.pushingNow.has(ref)) return;
     // Claimed BEFORE the first await, or the guard is no guard: two events for
     // one voucher would both read `has(ref) === false`, both wait on the config
@@ -396,7 +443,7 @@ export class ErpOutboxService {
     } catch (e) {
       // An event listener that throws takes nothing with it but this optimisation.
       this.logger.warn(
-        `immediate ERP push for voucher ${ref} failed, leaving it to the drain: ${
+        `immediate ERP push for ${ref} failed, leaving it to the drain: ${
           e instanceof Error ? e.message : String(e)
         }`,
       );
@@ -649,6 +696,18 @@ export class ErpOutboxService {
         if (!res.ok) {
           // Rate limited: back off past the window and retry, no attempt spent.
           if (res.status === 429) return this.softRetry(row, res.error ?? 'RATE_LIMITED');
+          const handler = this.handlers?.get(row.kind);
+          if (handler?.isTerminal?.(res.status, res.data)) {
+            await this.failTerminal(row, res.error ?? `HTTP ${res.status}`);
+            await handler.onTerminal?.(row, res.status, res.data).catch((e: unknown) =>
+              this.logger.warn(
+                `outbox ${row.kind} ${row.ref} terminal hook failed: ${
+                  e instanceof Error ? e.message : String(e)
+                }`,
+              ),
+            );
+            return;
+          }
           // A 5xx or a 408 is the ERP unwell, not the document wrong.
           return this.fail(row, res.error ?? 'ERP rejected the document', {
             transient: res.status >= 500 || res.status === 408,
@@ -693,6 +752,16 @@ export class ErpOutboxService {
           await this.idmap.save(map);
         }
       }
+      const posted = this.handlers?.get(row.kind);
+      if (posted?.onPosted) {
+        await posted.onPosted(row, lastData).catch((e: unknown) =>
+          this.logger.warn(
+            `outbox ${row.kind} ${row.ref} posted hook failed: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          ),
+        );
+      }
       if (row.kind === 'SALE_INVOICE') {
         // The reply often already carries the QR. Taking it here is what makes
         // the rep's 8-second wait winnable: the alternative is reconcileJofotaraQr
@@ -723,12 +792,9 @@ export class ErpOutboxService {
    */
   private async buildCalls(
     row: ErpOutbox,
-  ): Promise<Array<{
-    path: string;
-    body: Record<string, unknown>;
-    idem?: string;
-    method?: 'PATCH';
-  }> | null> {
+  ): Promise<OutboxCall[] | null> {
+    const handler = this.handlers?.get(row.kind);
+    if (handler) return handler.build(row);
     if (row.kind === 'CUSTOMER_AREA') {
       const call = await this.buildCustomerArea(row.ref);
       return call ? [call] : null;
@@ -1028,6 +1094,9 @@ export class ErpOutboxService {
         amount: col.amount / 1000, // fils → JOD major (ERP expects decimal)
         paymentMethod: isCheque ? 'CHECK' : 'CASH',
         notes: col.note ?? undefined,
+        // Taken against a named ERP invoice (a delivery rep collecting on the
+        // invoice he delivered): allocate there, not FIFO.
+        ...(col.erpInvoiceNumber ? { invoiceNumber: col.erpInvoiceNumber } : {}),
         ...(rep?.code ? { warehouseCode: rep.code, salesmanCode: rep.code } : {}),
         ...(isCheque ? await this.chequeFields(col, customer.customerName) : {}),
       },

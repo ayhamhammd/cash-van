@@ -132,6 +132,26 @@ export class UpdateAppSettingsDto {
   containersEnabled?: boolean;
 
   @ApiPropertyOptional({
+    example: false,
+    description:
+      'Program feature: a delivery rep may record an increase request (the ' +
+      'customer takes more than invoiced) for the office to invoice later.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  deliveryIncreaseRequests?: boolean;
+
+  @ApiPropertyOptional({
+    example: true,
+    description:
+      'Program feature: a delivery needs a photo and the customer\'s signature ' +
+      '(a refused delivery a photo only). OFF ⇒ proofs are optional.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  deliveryProofRequired?: boolean;
+
+  @ApiPropertyOptional({
     example: true,
     description: 'Program feature: salesman target figures and progress include tax (OFF ⇒ before tax).',
   })

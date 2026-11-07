@@ -35,8 +35,12 @@ export const SYNC_REQUIRED_EVENT = 'sync.required';
  * this existed an ERP price change reached the backend and stopped there. The
  * rep kept quoting the old price until they happened to leave and re-enter the
  * home screen.
+ *
+ * `deliveries` is a delivery rep's runs: a run assigned, re-ordered, moved to
+ * another rep or closed, or a stop's result coming back from the ERP. The app
+ * re-pulls `GET /deliveries/mine`.
  */
-export type SyncResource = 'offers' | 'customers' | 'stock' | 'items';
+export type SyncResource = 'offers' | 'customers' | 'stock' | 'items' | 'deliveries';
 
 export interface SyncSignal {
   resource: SyncResource;

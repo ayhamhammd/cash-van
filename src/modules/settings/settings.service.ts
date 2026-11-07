@@ -30,6 +30,8 @@ const PROGRAM_FEATURE_KEYS = [
   'damagedReturnsEnabled',
   'damagedWarehouseCode',
   'containersEnabled',
+  'deliveryIncreaseRequests',
+  'deliveryProofRequired',
   'targetsIncludeTax',
   'targetsSalesIncludeCash',
 ] as const;
@@ -55,6 +57,10 @@ export interface AppSettingsView {
   damagedWarehouseCode: string | null;
   /** Returnable containers — the office switch the dashboard reads. */
   containersEnabled: boolean;
+  /** Delivery reps may record increase requests (SPEC-delivery-rep §3.2). */
+  deliveryIncreaseRequests: boolean;
+  /** A delivery needs photo + signature proof. */
+  deliveryProofRequired: boolean;
   /** FLAT customer areas or the TREE of locations. Switched via POST /locations/mode. */
   locationMode: LocationMode;
   targetsIncludeTax: boolean;
@@ -391,8 +397,12 @@ export class SettingsService {
     containersEnabled: boolean;
     locationMode: LocationMode;
     jofotaraAutoSubmit: boolean | null;
+    hasDeliveryReps: boolean;
+    deliveryIncreaseRequests: boolean;
+    deliveryProofRequired: boolean;
   }> {
     const row = await this.requireRow();
+    const hasDeliveryReps = await this.hasDeliveryReps();
     return {
       companyNameAr: row.companyNameAr,
       companyNameEn: row.companyNameEn ?? null,
@@ -413,7 +423,23 @@ export class SettingsService {
       locationMode: row.locationMode,
       // Whether a sale will get a JoFotara QR at all; null = not known, so the app waits.
       jofotaraAutoSubmit: row.jofotaraAutoSubmit ?? null,
+      // Delivery reps (docs/SPEC-delivery-rep.md §4.1). The dashboard shows the
+      // Deliveries menu only when a rep can deliver; the app reads the two switches.
+      hasDeliveryReps,
+      deliveryIncreaseRequests: row.deliveryIncreaseRequests,
+      deliveryProofRequired: row.deliveryProofRequired,
     };
+  }
+
+  /** True when any active, undeleted rep is DELIVERY or BOTH. */
+  async hasDeliveryReps(): Promise<boolean> {
+    const rows: Array<{ has: boolean }> = await this.repo.manager.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM reps
+          WHERE kind IN ('DELIVERY','BOTH') AND is_active AND deleted_at IS NULL
+       ) AS has`,
+    );
+    return rows[0]?.has === true;
   }
 
   /**
@@ -521,6 +547,8 @@ export class SettingsService {
       damagedReturnsEnabled: row.damagedReturnsEnabled,
       damagedWarehouseCode: row.damagedWarehouseCode ?? null,
       containersEnabled: row.containersEnabled,
+      deliveryIncreaseRequests: row.deliveryIncreaseRequests,
+      deliveryProofRequired: row.deliveryProofRequired,
       locationMode: row.locationMode,
       targetsIncludeTax: row.targetsIncludeTax,
       targetsSalesIncludeCash: row.targetsSalesIncludeCash,
