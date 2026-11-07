@@ -16,6 +16,7 @@ import {
 } from '@nestjs/swagger';
 
 import { JourneyPlanService } from './journey-plan.service';
+import { SettingsService } from '../settings/settings.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 /**
@@ -27,7 +28,10 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 @ApiBearerAuth()
 @Controller({ path: 'my-route', version: '1' })
 export class MyRouteController {
-  constructor(private readonly journeyPlan: JourneyPlanService) {}
+  constructor(
+    private readonly journeyPlan: JourneyPlanService,
+    private readonly settings: SettingsService,
+  ) {}
 
   @Get('today')
   @ApiOperation({
@@ -38,9 +42,13 @@ export class MyRouteController {
       'of any length and needs no change on the handset.',
   })
   @ApiOkResponse({ description: "Ordered outlets for today" })
-  today(@CurrentUser('repId') repId: string | null) {
+  async today(@CurrentUser('repId') repId: string | null) {
     const id = this.journeyPlan.assertSelfRep(repId);
-    return this.journeyPlan.dayForDate(id, todayStr());
+    const rows = await this.journeyPlan.dayForDate(id, todayStr());
+    // The phone shows a stop's tree place whenever it has one; in FLAT mode it
+    // must read as the city, as before — the same rule as the customer list.
+    if ((await this.settings.locationMode()) === 'TREE') return rows;
+    return rows.map((r) => ({ ...r, locationLabel: null }));
   }
 
   @Get('cycle')
