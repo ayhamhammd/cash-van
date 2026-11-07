@@ -1883,11 +1883,28 @@ export class ErpSyncService {
   }
 
   /** Resolve one entity name (incl. `movements:<store>`) to its runner. */
+  /**
+   * Pulls that live in other modules (the delivery-run mirror) but keep a row
+   * in the same cursor table. Registering them lets the dashboard's per-row
+   * "run" button start them like any other entity, instead of a 404. They are
+   * NOT part of the sweep: each schedules itself.
+   */
+  private readonly extraRunners = new Map<
+    string,
+    { entity: string; tier: SyncTier; run: () => Promise<EntityRunOutcome> }
+  >();
+
+  registerRunner(entity: string, tier: SyncTier, run: () => Promise<EntityRunOutcome>): void {
+    this.extraRunners.set(entity, { entity, tier, run });
+  }
+
   private runnerFor(
     entity: string,
   ): { entity: string; tier: SyncTier; run: () => Promise<EntityRunOutcome> } | null {
     const known = this.catalogEntities().find((e) => e.entity === entity);
     if (known) return known;
+    const extra = this.extraRunners.get(entity);
+    if (extra) return extra;
     if (entity.startsWith('movements:')) {
       const store = entity.slice('movements:'.length);
       if (!store) return null;
@@ -1901,6 +1918,7 @@ export class ErpSyncService {
     const stores = await this.erpStoreCodes().catch(() => [] as string[]);
     return [
       ...this.catalogEntities().map((e) => ({ entity: e.entity, tier: e.tier })),
+      ...[...this.extraRunners.values()].map((e) => ({ entity: e.entity, tier: e.tier })),
       ...stores.map((s) => ({ entity: `movements:${s}`, tier: 'fast' as SyncTier })),
     ];
   }
