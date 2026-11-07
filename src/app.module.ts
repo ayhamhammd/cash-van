@@ -62,6 +62,7 @@ import { InvoiceTemplatesModule } from './modules/invoice-templates/invoice-temp
 import { SegmentsModule } from './modules/segments/segments.module';
 import { AreasModule } from './modules/areas/areas.module';
 import { LocationTreeModule } from './modules/locations/locations.module';
+import { DeliveriesModule } from './modules/deliveries/deliveries.module';
 
 @Module({
   imports: [
@@ -134,6 +135,7 @@ import { LocationTreeModule } from './modules/locations/locations.module';
     SegmentsModule,
     AreasModule,
     LocationTreeModule,
+    DeliveriesModule,
   ],
   controllers: [HealthController],
   providers: [
