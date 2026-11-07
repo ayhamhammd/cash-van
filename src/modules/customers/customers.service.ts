@@ -214,6 +214,11 @@ export class CustomersService {
       const customer = await this.create(dto);
       await this.claimPhoto(photo, customer.id, user.sub);
       await this.claimExtraPhotos(dto.extraPhotoIds, customer.id, user.sub);
+      // The phone caches this row as it is answered, so it carries its place
+      // ("governorate - area") the same as the list would. Best-effort: the
+      // customer exists by now, and an error here would make the phone retry
+      // and file the shop twice.
+      await this.attachPlace([customer], { forSalesman: !!user.repId }).catch(() => undefined);
       return customer;
     }
 
@@ -656,11 +661,16 @@ export class CustomersService {
    * area too (areaId = the area's location id, areaName = "governorate -
    * area"), so an app build that knows only areaId/areaName filters by the
    * tree's areas. The dashboard always gets both sets as they are stored.
+   *
+   * In FLAT mode a salesman gets no tree fields at all: the app shows a shop's
+   * tree place whenever it has one, and a company that switched back to flat
+   * areas must see its phones switch back with it.
    */
   private async attachPlace(items: Customer[], opts: { forSalesman?: boolean }): Promise<void> {
     await this.attachAreaNames(items);
-    const labels = await this.locations.labels(items.map((c) => c.locationId ?? '').filter(Boolean));
-    const legacy = !!opts.forSalesman && (await this.settings.locationMode()) === 'TREE';
+    const tree = !opts.forSalesman || (await this.settings.locationMode()) === 'TREE';
+    const legacy = !!opts.forSalesman && tree;
+    const labels = await this.locations.labels(tree ? items.map((c) => c.locationId ?? '').filter(Boolean) : []);
     for (const c of items) {
       const l = c.locationId ? labels.get(c.locationId) : undefined;
       Object.assign(c, {
