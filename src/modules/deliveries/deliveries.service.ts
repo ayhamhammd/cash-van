@@ -17,10 +17,13 @@ import { DeliveryMirrorService } from './delivery-mirror.service';
 import { DeliveryRun } from './entities/delivery-run.entity';
 import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
+import { DeliveryProof } from './entities/delivery-proof.entity';
 import type { ErpDeliveryRun, ErpLoadWarning } from './erp-delivery.types';
 import {
+  goodsBack,
   runSummaryView,
   stopView,
+  type ProofAudience,
   type CustomerRef,
   type RepRef,
   type RunDetailView,
@@ -81,6 +84,8 @@ export class DeliveriesService {
     private readonly settings: SettingsService,
     private readonly erp: DeliveryErpClient,
     private readonly mirror: DeliveryMirrorService,
+    // APPENDED: the specs build this service positionally.
+    @InjectRepository(DeliveryProof) private readonly proofs: Repository<DeliveryProof>,
   ) {}
 
   // ── the delivery rep ────────────────────────────────────────────────────
@@ -116,7 +121,8 @@ export class DeliveriesService {
   async runDetail(id: string): Promise<RunDetailView> {
     const run = await this.runs.findOne({ where: { id } });
     if (!run) throw new NotFoundException(`Delivery run ${id} not found`);
-    return (await this.details([run]))[0];
+    const [detail] = await this.details([run]);
+    return { ...detail, goodsBack: goodsBack(detail.stops) };
   }
 
   /** The stop that carries this invoice — the open run's first, else the latest. */
@@ -308,9 +314,9 @@ export class DeliveriesService {
     );
     const closedIds = [...new Set(recent.map((r) => r.run_id))];
     const closed = closedIds.length ? await this.runs.find({ where: { id: In(closedIds) } }) : [];
-    const openDetails = await this.details(open);
+    const openDetails = await this.details(open, { audience: 'phone' });
     const closedDetails = closed.length
-      ? await this.details(closed, { onlyStopIds: recent.map((r) => r.id) })
+      ? await this.details(closed, { onlyStopIds: recent.map((r) => r.id), audience: 'phone' })
       : [];
     const runs = [...openDetails, ...closedDetails].sort((a, b) =>
       String(b.runDate ?? '').localeCompare(String(a.runDate ?? '')),
@@ -350,7 +356,7 @@ export class DeliveriesService {
     if (!rows.length) return { items: [], total: 0 };
     const stops = await this.stops.find({ where: { id: In(rows.map((r) => r.id)) } });
     const runs = await this.runs.find({ where: { id: In([...new Set(stops.map((s) => s.runId))]) } });
-    const views = await this.stopViews(stops);
+    const views = await this.stopViews(stops, { audience: 'phone' });
     const runById = new Map(runs.map((r) => [r.id, r]));
     const byId = new Map(stops.map((s, i) => [s.id, { stop: s, view: views[i] }]));
     return {
@@ -369,7 +375,7 @@ export class DeliveriesService {
     const stop = await this.stops.findOne({ where: { id } });
     const run = stop ? await this.runs.findOne({ where: { id: stop.runId } }) : null;
     if (!stop || !run || run.repId !== rep.id) throw new NotFoundException(`Stop ${id} not found`);
-    return (await this.stopViews([stop]))[0];
+    return (await this.stopViews([stop], { audience: 'phone' }))[0];
   }
 
   // ── building the answers ────────────────────────────────────────────────
@@ -377,7 +383,7 @@ export class DeliveriesService {
   /** RunDetail for each run, in the order given. */
   async details(
     runs: DeliveryRun[],
-    opts: { lines?: boolean; onlyStopIds?: string[] } = {},
+    opts: { lines?: boolean; onlyStopIds?: string[]; audience?: ProofAudience } = {},
   ): Promise<RunDetailView[]> {
     if (!runs.length) return [];
     const runIds = runs.map((r) => r.id);
@@ -389,7 +395,10 @@ export class DeliveriesService {
       const only = new Set(opts.onlyStopIds);
       stops = stops.filter((s) => only.has(s.id));
     }
-    const views = await this.stopViews(stops, { lines: opts.lines !== false });
+    const views = await this.stopViews(stops, {
+      lines: opts.lines !== false,
+      audience: opts.audience ?? 'dashboard',
+    });
     const repIds = [...new Set(runs.map((r) => r.repId).filter((x): x is string => !!x))];
     const reps = repIds.length ? await this.reps.find({ where: { id: In(repIds) }, withDeleted: true }) : [];
     const repById = new Map<string, RepRef>(
@@ -402,10 +411,18 @@ export class DeliveriesService {
     });
   }
 
-  private async stopViews(stops: DeliveryStop[], opts: { lines?: boolean } = {}): Promise<StopView[]> {
+  private async stopViews(
+    stops: DeliveryStop[],
+    opts: { lines?: boolean; audience?: ProofAudience } = {},
+  ): Promise<StopView[]> {
     if (!stops.length) return [];
     const ids = stops.map((s) => s.id);
-    const lines = opts.lines === false ? [] : await this.lines.find({ where: { stopId: In(ids) } });
+    // A summary still needs the lines: whether a SENDING stop differs is read
+    // from them. It only leaves them out of the answer.
+    const lines = await this.lines.find({ where: { stopId: In(ids) } });
+    const proofs = opts.lines === false ? [] : await this.proofs.find({ where: { stopId: In(ids) } });
+    const proofsBy = new Map<string, DeliveryProof[]>();
+    for (const p of proofs) proofsBy.set(p.stopId, [...(proofsBy.get(p.stopId) ?? []), p]);
     const linesBy = new Map<string, DeliveryStopLine[]>();
     for (const l of lines) linesBy.set(l.stopId, [...(linesBy.get(l.stopId) ?? []), l]);
     const customers = await this.customerRefs(stops.map((s) => s.customerId ?? null));
@@ -416,6 +433,8 @@ export class DeliveriesService {
         linesBy.get(s.id) ?? [],
         s.customerId ? (customers.get(s.customerId) ?? null) : null,
         s.invoiceNumber ? (collected.get(s.invoiceNumber) ?? 0) : 0,
+        proofsBy.get(s.id) ?? [],
+        opts.audience ?? 'dashboard',
       ),
     );
   }

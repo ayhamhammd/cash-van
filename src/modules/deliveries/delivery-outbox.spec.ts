@@ -37,7 +37,14 @@ describe('outbox — DELIVERY_RESULT', () => {
     outbox.outbox = { save: async (r: ErpOutbox) => r, findOne: async () => null };
     outbox.erp = { post: jest.fn().mockResolvedValue(reply) };
     outbox.requeuedSinceRead = async () => false;
-    const intake = new DeliveryIntakeService(ds as never, {} as never, mirror as never, outbox as never);
+    const intake = new DeliveryIntakeService(
+      ds as never,
+      {} as never,
+      mirror as never,
+      outbox as never,
+      {} as never,
+      {} as never,
+    );
     intake.onModuleInit();
     const row = { id: 'o-1', kind: 'DELIVERY_RESULT', ref: 'd-1', status: 'pending', attempts: 0 } as ErpOutbox;
     const push = () => (outbox as unknown as { pushOne(r: ErpOutbox): Promise<void> }).pushOne(row);
@@ -115,5 +122,127 @@ describe('PAYMENT — a collection against an ERP invoice', () => {
   it('sends no invoiceNumber when the collection names none (FIFO as before)', async () => {
     const out = await build({ erpInvoiceNumber: null });
     expect(out.body).not.toHaveProperty('invoiceNumber');
+  });
+});
+
+describe('outbox — proofs before the result', () => {
+  function setup(opts: { waiting: number; proofReply?: unknown }) {
+    const payload = {
+      clientRef: 'd-1',
+      stopId: 'stop-1',
+      erpItemId: 'item-9',
+      runErpId: 'run-1',
+      outcome: 'PARTIAL',
+      deliveredAt: '2026-11-08T07:42:00.000Z',
+      lines: [{ invoiceItemId: 'ii-1', deliveredQty: 7, reasonCode: 'DAMAGED', note: null }],
+      proofRefs: ['p-1', 's-1'],
+    };
+    const proofRow = {
+      id: 'proof-1',
+      clientRef: 'p-1',
+      stopId: 'stop-1',
+      kind: 'PHOTO',
+      mime: 'image/jpeg',
+      storageKey: 'deliveries/stop-1/p-1.jpg',
+    };
+    const updates: Array<Record<string, unknown>> = [];
+    const woken: unknown[][] = [];
+    const ds = {
+      query: async (sql: string, params: unknown[]) => {
+        if (sql.includes('SELECT payload FROM voucher_inbox')) return [{ payload }];
+        if (sql.includes('FROM delivery_proofs')) return [{ n: opts.waiting }];
+        if (sql.includes('UPDATE erp_outbox')) {
+          woken.push(params);
+          return [[{ ref: 'd-1' }], 1];
+        }
+        throw new Error(`unexpected SQL ${sql}`);
+      },
+      getRepository: (entity: { name: string }) => ({
+        findOne: async () => (entity.name === 'DeliveryProof' ? proofRow : { id: 'stop-1', erpId: 'item-9' }),
+        update: async (_w: unknown, patch: Record<string, unknown>) => void updates.push(patch),
+      }),
+    };
+    const pushed: string[] = [];
+    const outbox = Object.create(ErpOutboxService.prototype) as Record<string, unknown>;
+    outbox.handlers = new Map();
+    outbox.pushingNow = new Set();
+    outbox.logger = { log: () => undefined, warn: () => undefined };
+    outbox.outbox = { save: async (r: ErpOutbox) => r, findOne: async () => null };
+    outbox.erp = {
+      post: jest.fn().mockResolvedValue({ ok: true, status: 200, data: { data: { id: 'run-1', items: [] } } }),
+      postMultipart: jest
+        .fn()
+        .mockResolvedValue({ ok: true, status: 201, data: opts.proofReply ?? { success: true, data: { id: 'att-77' } } }),
+    };
+    outbox.requeuedSinceRead = async () => false;
+    outbox.pushRefNow = async (ref: string) => void pushed.push(ref);
+    const mirror = { applyRun: jest.fn(), settleRef: jest.fn(), pullRun: jest.fn() };
+    const storage = { read: jest.fn().mockResolvedValue(Buffer.from([0xff, 0xd8, 0xff, 0x00])) };
+    const intake = new DeliveryIntakeService(
+      ds as never,
+      {} as never,
+      mirror as never,
+      outbox as never,
+      {} as never,
+      storage as never,
+    );
+    intake.onModuleInit();
+    const push = (row: ErpOutbox) =>
+      (outbox as unknown as { pushOne(r: ErpOutbox): Promise<void> }).pushOne(row);
+    const erp = outbox.erp as { post: jest.Mock; postMultipart: jest.Mock };
+    return { push, erp, updates, woken, pushed };
+  }
+  const resultRow = () =>
+    ({ id: 'o-r', kind: 'DELIVERY_RESULT', ref: 'd-1', status: 'pending', attempts: 0 }) as ErpOutbox;
+  const proofRow = () =>
+    ({ id: 'o-p', kind: 'DELIVERY_PROOF', ref: 'p-1', status: 'pending', attempts: 0 }) as ErpOutbox;
+
+  it('holds the result while a proof has no ERP attachment yet — nothing is sent', async () => {
+    const t = setup({ waiting: 1 });
+    const row = resultRow();
+    await t.push(row);
+    expect(t.erp.post).not.toHaveBeenCalled();
+    expect(row.status).toBe('pending');
+  });
+
+  it('sends the result with its lines once every proof is on the ERP', async () => {
+    const t = setup({ waiting: 0 });
+    const row = resultRow();
+    await t.push(row);
+    expect(t.erp.post).toHaveBeenCalledWith(
+      'delivery-runs/items/item-9/result',
+      {
+        externalId: 'd-1',
+        outcome: 'PARTIAL',
+        deliveredAt: '2026-11-08T07:42:00.000Z',
+        lines: [{ invoiceItemId: 'ii-1', deliveredQty: 7, reasonCode: 'DAMAGED' }],
+      },
+      'd-1',
+    );
+    expect(row.status).toBe('posted');
+  });
+
+  it('uploads a proof multipart with its clientRef as Idempotency-Key, stores the id, wakes the result', async () => {
+    const t = setup({ waiting: 0 });
+    const row = proofRow();
+    await t.push(row);
+    expect(t.erp.postMultipart).toHaveBeenCalledWith(
+      'attachments',
+      {
+        fields: { entityType: 'DELIVERY_RUN_ITEM', entityId: 'item-9', role: 'PHOTO' },
+        file: { buffer: expect.any(Buffer), filename: 'p-1.jpg', contentType: 'image/jpeg' },
+      },
+      'p-1',
+    );
+    expect(row.status).toBe('posted');
+    expect(t.updates).toEqual([{ erpAttachmentId: 'att-77' }]);
+    expect(t.woken).toEqual([['p-1']]);
+    expect(t.pushed).toEqual(['d-1']);
+  });
+
+  it('a proof answered without an id still releases the result', async () => {
+    const t = setup({ waiting: 0, proofReply: { success: true, duplicate: true } });
+    await t.push(proofRow());
+    expect(t.updates).toEqual([{ erpAttachmentId: 'UNKNOWN' }]);
   });
 });

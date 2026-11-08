@@ -17,7 +17,10 @@ import {
   MaxLength,
   Min,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
+
+import { REASON_CODES, type ReasonCode } from '../delivery-reasons';
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -224,7 +227,55 @@ export class DeliveryHistoryQuery {
   pageSize?: number;
 }
 
-/** Phase 1 result: the whole invoice, delivered or refused. */
+/** One line of a result: what was delivered, and why not all of it. */
+export class DeliveryLineResultDto {
+  @ApiProperty({ description: 'The line (Line.erpInvoiceItemId).' })
+  @IsString()
+  @Length(1, 100)
+  erpInvoiceItemId!: string;
+
+  @ApiProperty({ minimum: 0, description: '0 … invoicedQty; decimals for weight units.' })
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  deliveredQty!: number;
+
+  @ApiPropertyOptional({ enum: REASON_CODES, description: 'Required when deliveredQty < invoicedQty.' })
+  @IsOptional()
+  @IsIn(REASON_CODES)
+  reasonCode?: ReasonCode;
+
+  @ApiPropertyOptional({ description: 'Required with reason OTHER.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
+}
+
+/** A proof clientRef names its file on disk: letters, digits, dot, dash, underscore. */
+const PROOF_REF = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+
+/** `POST sync/delivery-proofs` — the form fields next to `file`. */
+export class SyncDeliveryProofDto {
+  @ApiProperty({ description: 'Minted once on the phone for this file; the idempotency key.' })
+  @IsString()
+  @Matches(PROOF_REF, { message: 'clientRef may hold only letters, digits, ".", "-" and "_" (max 100)' })
+  clientRef!: string;
+
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  stopId!: string;
+
+  @ApiProperty({ enum: ['PHOTO', 'SIGNATURE'] })
+  @IsIn(['PHOTO', 'SIGNATURE'])
+  kind!: 'PHOTO' | 'SIGNATURE';
+
+  @ApiPropertyOptional({ example: '2026-11-08T10:41:00+03:00' })
+  @IsOptional()
+  @IsDateString()
+  capturedAt?: string;
+}
+
+/** A stop's result: the whole invoice, or line by line (phase 2). */
 export class SyncDeliveryDto {
   @ApiProperty({
     description:
@@ -239,9 +290,31 @@ export class SyncDeliveryDto {
   @IsUUID()
   stopId!: string;
 
-  @ApiProperty({ enum: ['DELIVERED', 'RETURNED'] })
-  @IsIn(['DELIVERED', 'RETURNED'])
-  outcome!: 'DELIVERED' | 'RETURNED';
+  @ApiProperty({
+    enum: ['DELIVERED', 'PARTIAL', 'RETURNED'],
+    description: 'Must agree with the lines: all in full → DELIVERED, all 0 → RETURNED, else PARTIAL.',
+  })
+  @IsIn(['DELIVERED', 'PARTIAL', 'RETURNED'])
+  outcome!: 'DELIVERED' | 'PARTIAL' | 'RETURNED';
+
+  @ApiPropertyOptional({
+    type: [DeliveryLineResultDto],
+    description: 'Lines left out were delivered in full; RETURNED with no lines delivered nothing.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => DeliveryLineResultDto)
+  lines?: DeliveryLineResultDto[];
+
+  @ApiPropertyOptional({ type: [String], description: 'clientRefs of proofs already uploaded for this stop.' })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  @Length(1, 100, { each: true })
+  proofRefs?: string[];
 
   @ApiProperty({ example: '2026-11-08T10:42:00+03:00' })
   @IsDateString()

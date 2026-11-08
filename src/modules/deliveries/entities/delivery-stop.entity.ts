@@ -124,6 +124,10 @@ export class DeliveryStop {
   @Column({ name: 'credit_note_total_fils', type: 'bigint', nullable: true })
   creditNoteTotalFils?: string | null;
 
+  /** ERP attachments on the item that are not one of our proofs (counted, not mirrored). */
+  @Column({ name: 'erp_only_attachments', type: 'integer', default: 0 })
+  erpOnlyAttachments!: number;
+
   // ---- the phone's result while it is in flight ------------------------------
 
   @Column({ name: 'local_result_ref', type: 'text', nullable: true })

@@ -1,4 +1,5 @@
 import { ConflictException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import type { EntityManager } from 'typeorm';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -15,10 +16,16 @@ import { DeliveriesService } from './deliveries.service';
 import { DeliveryMirrorService } from './delivery-mirror.service';
 import { DeliveryRun } from './entities/delivery-run.entity';
 import { DeliveryStop } from './entities/delivery-stop.entity';
-import { erpErrorCode, unwrapRun } from './erp-delivery.types';
+import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
+import { DeliveryProof } from './entities/delivery-proof.entity';
+import { attachmentIdOf, erpErrorCode, unwrapRun } from './erp-delivery.types';
+import { checkLines, checkProofs, type RejectReason } from './delivery-result-checks';
+import { NotificationsService } from '../notifications/notifications.service';
+import { StorageService } from '../../common/storage/storage.service';
 import type { SyncDeliveryDto } from './dto/deliveries.dto';
 
 export const DELIVERY_RESULT_KIND = 'DELIVERY_RESULT' as const;
+export const DELIVERY_PROOF_KIND = 'DELIVERY_PROOF' as const;
 
 /** ERP refusals of a result that no retry can change (contract §A "Result"). */
 const TERMINAL_RESULT_CODES = new Set(['STOP_ALREADY_FINAL', 'RUN_CLOSED']);
@@ -30,17 +37,23 @@ export interface DeliveryInboxPayload {
   /** The ERP run item id, captured at intake: the stop may change runs later. */
   erpItemId: string;
   runErpId: string | null;
-  outcome: 'DELIVERED' | 'RETURNED';
+  outcome: 'DELIVERED' | 'PARTIAL' | 'RETURNED';
   deliveredAt: string;
   signedByName?: string | null;
   lat?: number | null;
   lng?: number | null;
   note?: string | null;
+  /** The lines the phone SENT, as the ERP names them; the ERP fills the rest in. */
+  lines?: Array<{ invoiceItemId: string; deliveredQty: number; reasonCode?: string | null; note?: string | null }>;
+  /** Proof clientRefs; the result is held until each has its ERP attachment id. */
+  proofRefs?: string[];
+  /** Lines that came back short, for the office's notification. */
+  differingLines?: number;
 }
 
 export interface DeliveryIntakeVerdict {
   status: 'accepted' | 'rejected';
-  reason?: string;
+  reason?: RejectReason | 'STOP_NOT_FOUND' | 'CLIENT_REF_IN_USE';
 }
 
 /** Is a stop final, as far as a NEW result is concerned? */
@@ -61,6 +74,37 @@ export function buildResultCall(p: DeliveryInboxPayload): OutboxCall {
       ...(p.lat !== undefined && p.lat !== null ? { lat: p.lat } : {}),
       ...(p.lng !== undefined && p.lng !== null ? { lng: p.lng } : {}),
       ...(p.note ? { note: p.note } : {}),
+      ...(p.lines?.length
+        ? {
+            lines: p.lines.map((l) => ({
+              invoiceItemId: l.invoiceItemId,
+              deliveredQty: l.deliveredQty,
+              ...(l.reasonCode ? { reasonCode: l.reasonCode } : {}),
+              ...(l.note ? { note: l.note } : {}),
+            })),
+          }
+        : {}),
+    },
+  };
+}
+
+/** The ERP attachment upload for one proof. Pure, for the spec. */
+export function buildProofCall(
+  proof: Pick<DeliveryProof, 'clientRef' | 'kind' | 'mime' | 'storageKey'>,
+  erpItemId: string,
+  buffer: Buffer,
+): OutboxCall {
+  return {
+    path: 'attachments',
+    idem: proof.clientRef,
+    body: {},
+    multipart: {
+      fields: { entityType: 'DELIVERY_RUN_ITEM', entityId: erpItemId, role: proof.kind },
+      file: {
+        buffer,
+        filename: proof.storageKey.split('/').pop() ?? `${proof.clientRef}`,
+        contentType: proof.mime,
+      },
     },
   };
 }
@@ -95,10 +139,13 @@ export class DeliveryIntakeService implements OnModuleInit {
     private readonly deliveries: DeliveriesService,
     private readonly mirror: DeliveryMirrorService,
     private readonly outbox: ErpOutboxService,
+    private readonly notifications: NotificationsService,
+    private readonly storage: StorageService,
   ) {}
 
   onModuleInit(): void {
     this.outbox.registerHandler(DELIVERY_RESULT_KIND, this.outboxHandler());
+    this.outbox.registerHandler(DELIVERY_PROOF_KIND, this.proofHandler());
   }
 
   /**
@@ -117,14 +164,14 @@ export class DeliveryIntakeService implements OnModuleInit {
       if (seen[0]) {
         return seen[0].type === 'DELIVERY'
           ? { verdict: { status: 'accepted' as const } }
-          : { verdict: { status: 'rejected' as const, reason: 'CLIENT_REF_IN_USE' } };
+          : { verdict: { status: 'rejected' as const, reason: 'CLIENT_REF_IN_USE' as const } };
       }
 
       const locked: Array<{ id: string }> = await em.query(
         `SELECT id FROM delivery_stops WHERE id = $1 FOR UPDATE`,
         [dto.stopId],
       );
-      if (!locked[0]) return { verdict: { status: 'rejected' as const, reason: 'STOP_NOT_FOUND' } };
+      if (!locked[0]) return { verdict: { status: 'rejected' as const, reason: 'STOP_NOT_FOUND' as const } };
       const stop = await em.getRepository(DeliveryStop).findOneByOrFail({ id: dto.stopId });
       const sameResult =
         stop.localResultRef === clientRef || stop.resultExternalRef === clientRef;
@@ -135,6 +182,25 @@ export class DeliveryIntakeService implements OnModuleInit {
         });
       }
       const run = await em.getRepository(DeliveryRun).findOneBy({ id: stop.runId });
+
+      // The lines against the stop, the outcome against the lines.
+      const stopLines = await em.getRepository(DeliveryStopLine).find({ where: { stopId: stop.id } });
+      const lines = checkLines(
+        stopLines.map((l) => ({ erpInvoiceItemId: l.erpInvoiceItemId, invoicedQty: Number(l.invoicedQty) || 0 })),
+        dto.outcome,
+        dto.lines,
+      );
+      if (!lines.ok) return { verdict: { status: 'rejected' as const, reason: lines.reason } };
+
+      // The proofs it names: uploaded for this stop, and enough of them.
+      const proofRefs = [...new Set((dto.proofRefs ?? []).map((r) => r.trim()).filter(Boolean))];
+      const uploaded = proofRefs.length
+        ? await em.getRepository(DeliveryProof).find({
+            where: proofRefs.map((clientRef) => ({ clientRef, stopId: stop.id })),
+          })
+        : [];
+      const proofProblem = checkProofs(await this.proofRequired(em), dto.outcome, proofRefs, uploaded);
+      if (proofProblem) return { verdict: { status: 'rejected' as const, reason: proofProblem } };
 
       const payload: DeliveryInboxPayload = {
         clientRef,
@@ -147,6 +213,14 @@ export class DeliveryIntakeService implements OnModuleInit {
         lat: dto.lat ?? null,
         lng: dto.lng ?? null,
         note: dto.note?.trim() || null,
+        lines: (dto.lines ?? []).map((l) => ({
+          invoiceItemId: l.erpInvoiceItemId,
+          deliveredQty: l.deliveredQty,
+          reasonCode: l.reasonCode ?? null,
+          note: l.note?.trim() || null,
+        })),
+        proofRefs,
+        differingLines: lines.differing,
       };
       const claimed: Array<{ id: string }> = await em.query(
         `INSERT INTO voucher_inbox
@@ -171,10 +245,29 @@ export class DeliveryIntakeService implements OnModuleInit {
           localNote: payload.note ?? null,
         },
       );
+      // Every line gets the phone's figure, so the office sees the difference
+      // (and goods coming back) before the ERP has answered.
+      for (const l of lines.lines) {
+        await em.getRepository(DeliveryStopLine).update(
+          { stopId: stop.id, erpInvoiceItemId: l.erpInvoiceItemId },
+          { localDeliveredQty: String(l.deliveredQty), localReasonCode: l.reasonCode, localNote: l.note },
+        );
+      }
+      // Proofs first, then the result — which waits for them anyway.
+      for (const ref of proofRefs) await enqueueOutboxWithin(em, DELIVERY_PROOF_KIND, ref);
       await enqueueOutboxWithin(em, DELIVERY_RESULT_KIND, clientRef);
       return {
         verdict: { status: 'accepted' as const },
         signal: { runId: stop.runId, stopId: stop.id, repId: run?.repId ?? null },
+        proofRefs,
+        returnRequest: lines.differing
+          ? {
+              stopId: stop.id,
+              invoiceNumber: stop.invoiceNumber ?? '',
+              customer: stop.recipientName ?? stop.customerCode ?? '',
+              lines: lines.differing,
+            }
+          : null,
       };
     });
 
@@ -190,10 +283,94 @@ export class DeliveryIntakeService implements OnModuleInit {
         },
         'delivery.result.received',
       );
-      // Latency only: the row is durable, the drain is the guarantee.
-      void this.outbox.pushRefNow(clientRef).catch(() => undefined);
+      if (outcome.returnRequest) await this.notifyReturnRequest(outcome.returnRequest);
+      // Latency only: the rows are durable, the drain is the guarantee.
+      const refs = outcome.proofRefs ?? [];
+      void (async () => {
+        for (const ref of refs) await this.outbox.pushRefNow(ref);
+        await this.outbox.pushRefNow(clientRef);
+      })().catch(() => undefined);
     }
     return outcome.verdict;
+  }
+
+  /** "Return request: invoice X, customer Y, n lines" to every manager. Best effort. */
+  private async notifyReturnRequest(r: {
+    stopId: string;
+    invoiceNumber: string;
+    customer: string;
+    lines: number;
+  }): Promise<void> {
+    try {
+      await this.notifications.notifyManagers({
+        kind: 'delivery.return_requested',
+        titleAr: 'طلب إرجاع',
+        titleEn: 'Return request',
+        bodyAr: `الفاتورة ${r.invoiceNumber}، الزبون ${r.customer}، ${r.lines} بند`,
+        bodyEn: `Return request: invoice ${r.invoiceNumber}, customer ${r.customer}, ${r.lines} line${r.lines === 1 ? '' : 's'}`,
+        refType: 'delivery_stop',
+        refId: r.stopId,
+      });
+    } catch (e) {
+      // The result is taken; a failed alert must not turn it into a failure.
+      this.logger.warn(`return-request notification failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** app_settings.delivery_proof_required (default on). */
+  private async proofRequired(em: EntityManager): Promise<boolean> {
+    const rows: Array<{ required: boolean }> = await em.query(
+      `SELECT delivery_proof_required AS required FROM app_settings WHERE id = 1`,
+    );
+    return rows[0]?.required !== false;
+  }
+
+  /**
+   * How the outbox pushes DELIVERY_PROOF rows: the stored file, multipart to
+   * the ERP's attachments with the proof's clientRef as Idempotency-Key. Once
+   * the ERP has it, any result waiting on it is woken.
+   */
+  proofHandler(): OutboxKindHandler {
+    return {
+      build: async (row) => {
+        const proof = await this.dataSource.getRepository(DeliveryProof).findOne({
+          where: { clientRef: row.ref },
+        });
+        if (!proof) throw new TerminalPayloadError(`Delivery proof ${row.ref} no longer exists`);
+        const stop = await this.dataSource.getRepository(DeliveryStop).findOne({ where: { id: proof.stopId } });
+        if (!stop) throw new TerminalPayloadError(`The stop of proof ${row.ref} no longer exists`);
+        const buffer = await this.storage.read(proof.storageKey).catch(() => null);
+        if (!buffer) throw new TerminalPayloadError(`The file of proof ${row.ref} is missing`);
+        return [buildProofCall(proof, stop.erpId, buffer)];
+      },
+      onPosted: async (row, reply) => {
+        await this.dataSource.getRepository(DeliveryProof).update(
+          { clientRef: row.ref },
+          // A replay may answer without the id; the result must not wait for ever on it.
+          { erpAttachmentId: attachmentIdOf(reply) ?? 'UNKNOWN' },
+        );
+        await this.wakeResultsWaitingOn(row.ref);
+      },
+    };
+  }
+
+  /** Results naming this proof are due now, not at the end of their backoff. */
+  private async wakeResultsWaitingOn(proofRef: string): Promise<void> {
+    const res: unknown = await this.dataSource.query(
+      `UPDATE erp_outbox o
+          SET next_attempt_at = now()
+         FROM voucher_inbox i
+        WHERE o.kind = 'DELIVERY_RESULT' AND o.status = 'pending'
+          AND i.client_ref = o.ref AND i.type = 'DELIVERY'
+          AND i.payload->'proofRefs' ? $1
+       RETURNING o.ref`,
+      [proofRef],
+    );
+    // TypeORM hands an UPDATE … RETURNING back as [rows, count].
+    const rows = (Array.isArray(res) && Array.isArray(res[0]) ? res[0] : res) as Array<{ ref: string }>;
+    for (const r of Array.isArray(rows) ? rows : []) {
+      void this.outbox.pushRefNow(r.ref).catch(() => undefined);
+    }
   }
 
   /** How the outbox pushes and answers DELIVERY_RESULT rows. */
@@ -206,7 +383,7 @@ export class DeliveryIntakeService implements OnModuleInit {
     };
   }
 
-  private async buildCalls(row: ErpOutbox): Promise<OutboxCall[]> {
+  private async buildCalls(row: ErpOutbox): Promise<OutboxCall[] | null> {
     const rows: Array<{ payload: DeliveryInboxPayload }> = await this.dataSource.query(
       `SELECT payload FROM voucher_inbox WHERE client_ref = $1 AND type = 'DELIVERY'`,
       [row.ref],
@@ -214,6 +391,16 @@ export class DeliveryIntakeService implements OnModuleInit {
     const payload = rows[0]?.payload;
     if (!payload?.erpItemId) {
       throw new TerminalPayloadError(`Delivery result ${row.ref} has no staged payload`);
+    }
+    // Held until every proof it names is on the ERP (null = not yet, no
+    // attempt spent; the proof's own push wakes it).
+    if (payload.proofRefs?.length) {
+      const waiting: Array<{ n: number }> = await this.dataSource.query(
+        `SELECT count(*)::int AS n FROM delivery_proofs
+          WHERE client_ref = ANY($1::text[]) AND erp_attachment_id IS NULL`,
+        [payload.proofRefs],
+      );
+      if ((waiting[0]?.n ?? 0) > 0) return null;
     }
     return [buildResultCall(payload)];
   }

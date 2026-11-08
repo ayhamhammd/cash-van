@@ -15,20 +15,37 @@ import { DELIVERY_CURSOR, DeliveryMirrorService } from './delivery-mirror.servic
 import { DeliveryRun } from './entities/delivery-run.entity';
 import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
+import { DeliveryProof } from './entities/delivery-proof.entity';
+import { DeliveryProofsService } from './delivery-proofs.service';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 /**
- * Delivery & collection representative, phase 1 (docs/SPEC-delivery-rep.md):
- * the mirror of the ERP's delivery runs, the office's run screens, the delivery
- * rep's phone routes and his whole-invoice results.
+ * Delivery & collection representative (docs/SPEC-delivery-rep.md): the mirror
+ * of the ERP's delivery runs, the office's run screens, the delivery rep's phone
+ * routes, his results line by line and his proofs (phases 1–2).
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([DeliveryRun, DeliveryStop, DeliveryStopLine, Rep, ErpSyncCursor]),
+    TypeOrmModule.forFeature([
+      DeliveryRun,
+      DeliveryStop,
+      DeliveryStopLine,
+      DeliveryProof,
+      Rep,
+      ErpSyncCursor,
+    ]),
     ErpSyncModule,
     SettingsModule,
+    NotificationsModule,
   ],
   controllers: [DeliveriesController, DeliveriesAppController, DeliverySyncController],
-  providers: [DeliveryErpClient, DeliveryMirrorService, DeliveriesService, DeliveryIntakeService],
+  providers: [
+    DeliveryErpClient,
+    DeliveryMirrorService,
+    DeliveriesService,
+    DeliveryIntakeService,
+    DeliveryProofsService,
+  ],
   exports: [DeliveriesService, DeliveryMirrorService],
 })
 export class DeliveriesModule implements OnModuleInit {

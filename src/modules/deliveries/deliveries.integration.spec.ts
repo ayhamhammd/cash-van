@@ -28,6 +28,12 @@ import { DeliveryMirrorService } from './delivery-mirror.service';
 import { DeliveryRun } from './entities/delivery-run.entity';
 import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
+import { DeliveryProof } from './entities/delivery-proof.entity';
+import { DeliveryProofsService } from './delivery-proofs.service';
+import { StorageService } from '../../common/storage/storage.service';
+import { promises as fs } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import type { ErpDeliveryItem, ErpDeliveryRun } from './erp-delivery.types';
 
 const HAS_DB = Boolean(process.env.DB_NAME);
@@ -41,6 +47,11 @@ run('delivery rep phase 1 (real DB)', () => {
   let intake: DeliveryIntakeService;
   let mode: 'FLAT' | 'TREE' = 'FLAT';
   const events: Array<Record<string, unknown>> = [];
+  const notified: Array<Record<string, unknown>> = [];
+  let proofs: DeliveryProofsService;
+  let storage: StorageService;
+  let storageRoot = '';
+  let proofRequiredBefore = true;
   const pushed: string[] = [];
   let repD = '';
   let repS = '';
@@ -194,15 +205,38 @@ run('delivery rep phase 1 (real DB)', () => {
       settings as never,
       erp as never,
       mirror,
+      ds.getRepository(DeliveryProof),
     );
-    intake = new DeliveryIntakeService(ds, deliveries, mirror, {
-      registerHandler: () => undefined,
-      pushRefNow: async (ref: string) => void pushed.push(ref),
-    } as never);
+    storageRoot = await fs.mkdtemp(join(tmpdir(), 'zzdlv-proofs-'));
+    storage = new StorageService({ get: (k: string, d: unknown) => (k === 'storage.localRoot' ? storageRoot : d) } as never);
+    intake = new DeliveryIntakeService(
+      ds,
+      deliveries,
+      mirror,
+      {
+        registerHandler: () => undefined,
+        pushRefNow: async (ref: string) => void pushed.push(ref),
+      } as never,
+      { notifyManagers: async (n: Record<string, unknown>) => void notified.push(n) } as never,
+      storage,
+    );
+    proofs = new DeliveryProofsService(
+      ds,
+      ds.getRepository(DeliveryProof),
+      ds.getRepository(DeliveryStop),
+      ds.getRepository(DeliveryRun),
+      storage,
+      deliveries,
+    );
+    [{ required: proofRequiredBefore }] = await q<{ required: boolean }>(
+      `SELECT delivery_proof_required AS required FROM app_settings WHERE id = 1`,
+    );
   });
 
   afterAll(async () => {
+    if (storageRoot) await fs.rm(storageRoot, { recursive: true, force: true });
     if (!ds?.isInitialized) return;
+    await q(`UPDATE app_settings SET delivery_proof_required = $1 WHERE id = 1`, [proofRequiredBefore]);
     await purge();
     await ds.destroy();
   });
@@ -305,6 +339,8 @@ run('delivery rep phase 1 (real DB)', () => {
   });
 
   it('intake: SENDING at once, idempotent, 409 on a final stop; inbox + outbox written together', async () => {
+    // Phase 1's whole-invoice result, with the company's proof switch off.
+    await q(`UPDATE app_settings SET delivery_proof_required = false WHERE id = 1`);
     const s1 = await stopId('s1');
     const dto = { clientRef: `${P}-ref-1`, stopId: s1, outcome: 'DELIVERED', deliveredAt: '2026-11-07T10:00:00+03:00', signedByName: 'Abu Ali', lat: 31.95, lng: 35.91 } as never;
     expect(await intake.ingest(dto, deliveryRep())).toEqual({ status: 'accepted' });
@@ -433,5 +469,119 @@ run('delivery rep phase 1 (real DB)', () => {
     expect(await mirror.pullRun(`${P}-run-1`)).toBeNull();
     expect(await q(`SELECT 1 FROM delivery_runs WHERE erp_id = $1`, [`${P}-run-1`])).toEqual([]);
     expect(await q(`SELECT 1 FROM delivery_stops WHERE erp_id LIKE $1`, [`${P}-s%`])).toEqual([]);
+  });
+
+  it('phase 2: proofs uploaded once, a PARTIAL result checked, SENDING with the phone\'s lines, then the ERP\'s', async () => {
+    await q(`UPDATE app_settings SET delivery_proof_required = true WHERE id = 1`);
+    const runP = erpRun({
+      id: `${P}-run-p2`,
+      runNumber: `${P}-DR-P2`,
+      updatedAt: '2026-11-08T08:00:00.000Z',
+      items: [item('s7', '7', `${P}C1`), item('s8', '8', `${P}C2`)],
+    });
+    runP.items![0].invoice!.lines = [
+      { id: `${P}-line-7-1`, lineNo: 1, skuCode: 'W1', nameEn: 'Water', unit: 'CTN', quantity: 10, quantityReturned: 0, unitPrice: 1, taxRate: 16 },
+      { id: `${P}-line-7-2`, lineNo: 2, skuCode: 'J1', nameEn: 'Juice', unit: 'CTN', quantity: 4, quantityReturned: 1, unitPrice: 2, taxRate: 16 },
+    ];
+    await mirror.applyRun(runP);
+    const s7 = await stopId('s7');
+    const runPId = (await q<{ id: string }>(`SELECT id FROM delivery_runs WHERE erp_id = $1`, [`${P}-run-p2`]))[0].id;
+    // invoiced = quantity − already returned; nameAr falls back to the ERP's one name.
+    const lines = await q<{ erp_invoice_item_id: string; invoiced_qty: string; name_ar: string }>(
+      `SELECT erp_invoice_item_id, invoiced_qty, name_ar FROM delivery_stop_lines l
+         JOIN delivery_stops s ON s.id = l.stop_id WHERE s.id = $1 ORDER BY line_no`,
+      [s7],
+    );
+    expect(lines.map((l) => [Number(l.invoiced_qty), l.name_ar])).toEqual([[10, 'Water'], [3, 'Juice']]);
+
+    const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(64)]);
+    const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]);
+    const up = (ref: string, kind: 'PHOTO' | 'SIGNATURE', buf: Buffer) =>
+      proofs.upload({ buffer: buf } as Express.Multer.File, { clientRef: ref, stopId: s7, kind } as never, deliveryRep());
+    expect(await up(`${P}-p-1`, 'PHOTO', JPEG)).toMatchObject({ created: true });
+    const again = await up(`${P}-p-1`, 'PHOTO', JPEG);
+    expect(again.created).toBe(false);
+    await up(`${P}-s-1`, 'SIGNATURE', PNG);
+    await expect(up(`${P}-s-2`, 'SIGNATURE', JPEG)).rejects.toMatchObject({ status: 422 });
+    expect(await fs.readFile(join(storageRoot, `deliveries/${s7}/${P}-p-1.jpg`))).toEqual(JPEG);
+
+    const base = { clientRef: `${P}-ref-p2`, stopId: s7, deliveredAt: '2026-11-08T10:00:00+03:00', signedByName: 'Abu Ali' };
+    const short = [{ erpInvoiceItemId: `${P}-line-7-1`, deliveredQty: 6, reasonCode: 'DAMAGED', note: 'wet' }];
+    // The checks, on the real stop.
+    expect(await intake.ingest({ ...base, outcome: 'PARTIAL', lines: short, proofRefs: [`${P}-p-1`] } as never, deliveryRep()))
+      .toEqual({ status: 'rejected', reason: 'PROOF_MISSING' });
+    expect(await intake.ingest({ ...base, outcome: 'DELIVERED', lines: short, proofRefs: [`${P}-p-1`, `${P}-s-1`] } as never, deliveryRep()))
+      .toEqual({ status: 'rejected', reason: 'OUTCOME_MISMATCH' });
+    expect(
+      await intake.ingest(
+        { ...base, outcome: 'PARTIAL', lines: [{ erpInvoiceItemId: `${P}-line-7-2`, deliveredQty: 4, reasonCode: 'LOST' }], proofRefs: [`${P}-p-1`, `${P}-s-1`] } as never,
+        deliveryRep(),
+      ),
+    ).toEqual({ status: 'rejected', reason: 'QTY_OUT_OF_RANGE' });
+
+    expect(
+      await intake.ingest({ ...base, outcome: 'PARTIAL', lines: short, proofRefs: [`${P}-p-1`, `${P}-s-1`] } as never, deliveryRep()),
+    ).toEqual({ status: 'accepted' });
+    const outbox = await q<{ kind: string; ref: string }>(
+      `SELECT kind, ref FROM erp_outbox WHERE ref IN ($1, $2, $3) ORDER BY kind`,
+      [`${P}-p-1`, `${P}-s-1`, `${P}-ref-p2`],
+    );
+    expect(outbox).toEqual([
+      { kind: 'DELIVERY_PROOF', ref: `${P}-p-1` },
+      { kind: 'DELIVERY_PROOF', ref: `${P}-s-1` },
+      { kind: 'DELIVERY_RESULT', ref: `${P}-ref-p2` },
+    ]);
+    expect(notified.at(-1)).toMatchObject({ kind: 'delivery.return_requested', refId: s7 });
+
+    let detail = await deliveries.runDetail(runPId);
+    let stop = detail.stops.find((x) => x.id === s7)!;
+    expect(stop).toMatchObject({ displayStatus: 'SENDING', returnStatus: 'PENDING' });
+    expect(stop.lines.map((l) => [l.deliveredQty, l.reasonCode, l.condition])).toEqual([
+      [6, 'DAMAGED', 'DAMAGED'],
+      [3, null, null],
+    ]);
+    expect(stop.proofs.map((p) => p.kind)).toEqual(['PHOTO', 'SIGNATURE']);
+    expect(stop.proofs[0].url).toBe(`/api/v1/deliveries/stops/${s7}/proofs/${stop.proofs[0].id}`);
+    expect(detail.counts.sending).toBe(1);
+    expect(detail.goodsBack).toEqual([{ skuCode: 'W1', nameAr: 'Water', nameEn: 'Water', unit: 'CTN', qty: 4 }]);
+
+    // The files stream back: the dashboard's route, and the phone's for its own rep only.
+    const f = await proofs.file(s7, stop.proofs[0].id, 'dashboard');
+    expect(f).toMatchObject({ mime: 'image/jpeg' });
+    expect(f.buffer).toEqual(JPEG);
+    expect((await proofs.file(s7, stop.proofs[1].id, 'phone', deliveryRep())).mime).toBe('image/png');
+    await expect(proofs.file(s7, stop.proofs[0].id, 'phone', { repId: repS } as never)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    await expect(proofs.file(await stopId('s8'), stop.proofs[0].id, 'dashboard')).rejects.toMatchObject({ status: 404 });
+
+    // The ERP took it: PARTIAL, PENDING, one differing line; an attachment it holds that is not ours is counted.
+    await q(`UPDATE delivery_proofs SET erp_attachment_id = 'att-' || client_ref WHERE stop_id = $1`, [s7]);
+    const settled = erpRun({ ...runP, updatedAt: '2026-11-08T08:05:00.000Z' });
+    Object.assign(settled.items![0], {
+      status: 'PARTIAL',
+      returnStatus: 'PENDING',
+      deliveredAt: '2026-11-08T07:00:00.000Z',
+      resultExternalRef: `${P}-ref-p2`,
+      results: [{ invoiceItemId: `${P}-line-7-1`, invoicedQty: 10, deliveredQty: 6, reasonCode: 'DAMAGED', condition: 'DAMAGED', note: 'wet' }],
+      attachments: [{ id: `att-${P}-p-1` }, { id: `att-${P}-s-1` }, { id: 'att-from-erp-screen' }],
+    });
+    await mirror.applyRun(settled);
+    detail = await deliveries.runDetail(runPId);
+    stop = detail.stops.find((x) => x.id === s7)!;
+    expect(stop).toMatchObject({ status: 'PARTIAL', displayStatus: 'PARTIAL', returnStatus: 'PENDING', erpOnlyAttachments: 1 });
+    expect(stop.lines.map((l) => l.deliveredQty)).toEqual([6, 3]);
+    expect(detail.counts).toMatchObject({ partial: 1, loaded: 1, sending: 0 });
+    expect(detail.returns.pending).toBe(1);
+    expect(detail.goodsBack).toEqual([{ skuCode: 'W1', nameAr: 'Water', nameEn: 'Water', unit: 'CTN', qty: 4 }]);
+    // Delivered or partly delivered: not offered for loading again (INV-7 was
+    // loadable in the loadable-invoices test above).
+    const loadable = await deliveries.loadableInvoices({ q: `${P}-INV-7` });
+    expect(loadable.items.map((i) => i.invoiceNumber)).toEqual([]);
+
+    // A stop the ERP dropped takes its proofs with it.
+    erp.getRun.mockResolvedValueOnce(null);
+    await mirror.pullRun(`${P}-run-p2`);
+    expect(await q(`SELECT 1 FROM delivery_proofs WHERE stop_id = $1`, [s7])).toEqual([]);
   });
 });

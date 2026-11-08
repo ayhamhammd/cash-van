@@ -8,12 +8,18 @@ import { toFils } from '../erp-sync/erp-sync.service';
 import { ErpSyncCursor } from '../erp-sync/entities/erp-sync-cursor.entity';
 import { DeliveryErpClient } from './delivery-erp.client';
 import { DeliveryRun, type DeliveryRunStatus } from './entities/delivery-run.entity';
-import { DeliveryStop, type DeliveryStopStatus } from './entities/delivery-stop.entity';
+import {
+  DeliveryStop,
+  type DeliveryReturnStatus,
+  type DeliveryStopStatus,
+} from './entities/delivery-stop.entity';
+import { conditionOf } from './delivery-reasons';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import type {
   ErpDeliveryItem,
   ErpDeliveryLine,
   ErpDeliveryRun,
+  ErpLineResult,
 } from './erp-delivery.types';
 
 // Read from process.env: @Interval() is evaluated at class-definition time,
@@ -24,6 +30,7 @@ const DELIVERY_PULL_MS = parseInt(process.env.DELIVERY_PULL_INTERVAL_MS ?? '1200
 export const DELIVERY_CURSOR = 'delivery_runs';
 
 const STOP_STATUSES = new Set<DeliveryStopStatus>(['LOADED', 'DELIVERED', 'PARTIAL', 'RETURNED']);
+const RETURN_STATUSES = new Set<DeliveryReturnStatus>(['NONE', 'PENDING', 'APPROVED', 'REJECTED']);
 
 /** What one apply did, for the caller and for the signal. */
 export interface ApplyRunResult {
@@ -362,13 +369,20 @@ export class DeliveryMirrorService {
       const stop = known ?? stops.create({ erpId: itemId, runId });
       let changed = !known;
       changed = this.patchStop(stop, runId, item, await this.customerIdFor(em, item)) || changed;
+      changed =
+        assignChanged(stop, {
+          erpOnlyAttachments: await this.erpOnlyAttachments(em, known?.id ?? null, item),
+        }, ['erpOnlyAttachments']) || changed;
       const ref = stop.localResultRef;
       if (ref && (ref === str(item.resultExternalRef) || ref === opts.settledRef)) {
         stop.localResultRef = null;
         changed = true;
       }
       const saved = changed ? await stops.save(stop) : stop;
-      const linesChanged = await this.applyLines(em, saved.id, item.invoice?.lines ?? []);
+      const linesChanged = await this.applyLines(em, saved.id, item.invoice?.lines ?? [], {
+        status: saved.status,
+        results: item.results ?? null,
+      });
       if (changed || linesChanged) changedStopIds.push(saved.id);
     }
 
@@ -401,6 +415,7 @@ export class DeliveryMirrorService {
   ): boolean {
     const inv = item.invoice ?? {};
     const rawStatus = String(item.status ?? 'LOADED').toUpperCase() as DeliveryStopStatus;
+    const rawReturn = String(item.returnStatus ?? 'NONE').toUpperCase() as DeliveryReturnStatus;
     return assignChanged(
       stop,
       {
@@ -424,6 +439,7 @@ export class DeliveryMirrorService {
         jofotaraQr: str(inv.jofotaraQrCode),
         jofotaraUuid: str(inv.jofotaraUuid),
         status: STOP_STATUSES.has(rawStatus) ? rawStatus : 'LOADED',
+        returnStatus: RETURN_STATUSES.has(rawReturn) ? rawReturn : 'NONE',
         deliveredAt: date(item.deliveredAt),
         signedByName: str(item.signedByName),
         lat: num(item.deliveredLat),
@@ -435,12 +451,31 @@ export class DeliveryMirrorService {
     );
   }
 
-  /** Upsert a stop's lines by ERP line id; drop the ones the ERP no longer has. */
+  /**
+   * Upsert a stop's lines by ERP line id; drop the ones the ERP no longer has.
+   *
+   * The invoiced quantity is the invoice line's quantity less what was already
+   * returned on it. The result side comes from the ERP's item `results`, which
+   * lists only the lines that differ: a line it does not list was delivered in
+   * full. Two exceptions: a stop still LOADED has no result at all, and a
+   * RETURNED stop with no line rows (a whole refusal, or one recorded before
+   * the ERP kept line rows) delivered nothing.
+   */
   private async applyLines(
     em: EntityManager,
     stopId: string,
     lines: ErpDeliveryLine[],
+    ctx: { status: DeliveryStopStatus; results: ErpLineResult[] | null } = {
+      status: 'LOADED',
+      results: null,
+    },
   ): Promise<boolean> {
+    const results = new Map(
+      (ctx.results ?? [])
+        .filter((r) => r && r.invoiceItemId !== undefined && r.invoiceItemId !== null)
+        .map((r) => [String(r.invoiceItemId), r]),
+    );
+    const wholeRefusal = ctx.status === 'RETURNED' && results.size === 0;
     const repo = em.getRepository(DeliveryStopLine);
     const existing = await repo.find({ where: { stopId } });
     const byItem = new Map(existing.map((l) => [l.erpInvoiceItemId, l]));
@@ -452,6 +487,26 @@ export class DeliveryMirrorService {
       seen.add(itemId);
       const known = byItem.get(itemId);
       const line = known ?? repo.create({ stopId, erpInvoiceItemId: itemId });
+      const invoiced = Math.max(0, (Number(l.quantity) || 0) - (Number(l.quantityReturned) || 0));
+      const r = results.get(itemId);
+      const outcome =
+        ctx.status === 'LOADED'
+          ? { deliveredQty: null, reasonCode: null, condition: null, note: null, approvedQty: null }
+          : r
+            ? {
+                deliveredQty: num(r.deliveredQty),
+                reasonCode: str(r.reasonCode),
+                condition: str(r.condition) ?? conditionOf(r.reasonCode),
+                note: str(r.note),
+                approvedQty: num(r.approvedQty),
+              }
+            : {
+                deliveredQty: wholeRefusal ? '0' : String(invoiced),
+                reasonCode: null,
+                condition: null,
+                note: null,
+                approvedQty: null,
+              };
       const diff = assignChanged(
         line,
         {
@@ -462,11 +517,12 @@ export class DeliveryMirrorService {
           nameAr: str(l.nameAr) ?? str(l.nameEn),
           nameEn: str(l.nameEn),
           unit: str(l.unit),
-          invoicedQty: num(l.quantity) ?? '0',
+          invoicedQty: String(invoiced),
           unitPriceFils: String(toFils(l.unitPrice)),
           taxRate: num(l.taxRate),
+          ...outcome,
         },
-        ['lineNo', 'invoicedQty', 'unitPriceFils', 'taxRate'],
+        ['lineNo', 'invoicedQty', 'unitPriceFils', 'taxRate', 'deliveredQty', 'approvedQty'],
       );
       if (!known || diff) {
         await repo.save(line);
@@ -479,6 +535,30 @@ export class DeliveryMirrorService {
       changed = true;
     }
     return changed;
+  }
+
+  /**
+   * How many of the ERP item's attachments are not one of our proofs — one
+   * uploaded in the ERP's own screen. Counted, never mirrored: the files the
+   * dashboard and the phone show are this server's own copies.
+   */
+  private async erpOnlyAttachments(
+    em: EntityManager,
+    stopId: string | null,
+    item: ErpDeliveryItem,
+  ): Promise<number> {
+    const ids = (item.attachments ?? [])
+      .map((a) => (a && a.id !== undefined && a.id !== null ? String(a.id) : null))
+      .filter((x): x is string => !!x);
+    if (!ids.length) return 0;
+    if (!stopId) return ids.length;
+    const ours: Array<{ erp_attachment_id: string }> = await em.query(
+      `SELECT erp_attachment_id FROM delivery_proofs
+        WHERE stop_id = $1 AND erp_attachment_id = ANY($2::text[])`,
+      [stopId, ids],
+    );
+    const known = new Set(ours.map((o) => o.erp_attachment_id));
+    return ids.filter((id) => !known.has(id)).length;
   }
 
   /** Driver salesmanCode → reps.code (R7: van code = salesman code). */

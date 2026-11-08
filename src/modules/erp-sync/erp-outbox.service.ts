@@ -116,6 +116,11 @@ export interface OutboxCall {
   body: Record<string, unknown>;
   idem?: string;
   method?: 'PATCH';
+  /** Sent as multipart/form-data instead of JSON (an attachment); `body` is then unused. */
+  multipart?: {
+    fields: Record<string, string>;
+    file: { buffer: Buffer; filename: string; contentType: string };
+  };
 }
 
 /**
@@ -689,8 +694,9 @@ export class ErpOutboxService {
       // retry replays them idempotently. (Most kinds are a single call.)
       let lastData: unknown = null;
       for (const c of calls) {
-        const res =
-          c.method === 'PATCH'
+        const res = c.multipart
+          ? await this.erp.postMultipart(c.path, c.multipart, c.idem ?? row.ref)
+          : c.method === 'PATCH'
             ? await this.erp.patchResult(c.path, c.body)
             : await this.erp.post(c.path, c.body, c.idem ?? row.ref);
         if (!res.ok) {

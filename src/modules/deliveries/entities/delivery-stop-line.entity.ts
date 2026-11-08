@@ -8,8 +8,10 @@ import {
 } from 'typeorm';
 
 /**
- * Mirror of one invoice line on a stop. Phase 1 fills only the invoiced side;
- * delivered_qty / reason_code / note / condition / approved_qty are phase 2–3.
+ * Mirror of one invoice line on a stop. invoiced_qty is the invoice line's
+ * quantity less what was already returned on it. delivered_qty / reason_code /
+ * condition / note come from the ERP's item results (lines it does not list
+ * were delivered in full); approved_qty is phase 3.
  */
 @Entity({ name: 'delivery_stop_lines' })
 @Index('uq_delivery_stop_lines_item', ['stopId', 'erpInvoiceItemId'], { unique: true })
@@ -61,6 +63,18 @@ export class DeliveryStopLine {
 
   @Column({ name: 'approved_qty', type: 'numeric', nullable: true })
   approvedQty?: string | null;
+
+  // ---- the phone's line result while the stop's result is in flight --------
+
+  /** What the phone says was delivered; every line of the stop gets one at intake. */
+  @Column({ name: 'local_delivered_qty', type: 'numeric', nullable: true })
+  localDeliveredQty?: string | null;
+
+  @Column({ name: 'local_reason_code', type: 'text', nullable: true })
+  localReasonCode?: string | null;
+
+  @Column({ name: 'local_note', type: 'text', nullable: true })
+  localNote?: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

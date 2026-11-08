@@ -9,8 +9,11 @@ import {
   Patch,
   Post,
   Query,
+  Res,
+  StreamableFile,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { RequirePermissionKeys } from '../../common/decorators/permissions.decorator';
@@ -20,6 +23,8 @@ import {
   PERM_DELIVERIES_VIEW,
 } from '../../common/constants/permissions';
 import { DeliveriesService } from './deliveries.service';
+import { streamProof } from './deliveries-app.controller';
+import { DeliveryProofsService } from './delivery-proofs.service';
 import { CreateRunDto, ListRunsQuery, LoadableInvoicesQuery, PatchRunDto } from './dto/deliveries.dto';
 
 /**
@@ -35,7 +40,10 @@ import { CreateRunDto, ListRunsQuery, LoadableInvoicesQuery, PatchRunDto } from 
 @UseGuards(RolesGuard)
 @Controller({ path: 'deliveries', version: '1' })
 export class DeliveriesController {
-  constructor(private readonly deliveries: DeliveriesService) {}
+  constructor(
+    private readonly deliveries: DeliveriesService,
+    private readonly proofs: DeliveryProofsService,
+  ) {}
 
   @Get('runs')
   @RequirePermissionKeys(PERM_DELIVERIES_VIEW)
@@ -48,7 +56,7 @@ export class DeliveriesController {
   @Get('runs/:id')
   @RequirePermissionKeys(PERM_DELIVERIES_VIEW)
   @ApiOperation({ summary: 'One run with its stops and lines' })
-  @ApiOkResponse({ description: 'RunDetail' })
+  @ApiOkResponse({ description: 'RunDetail & { goodsBack: [{ skuCode, nameAr, nameEn, unit, qty }] }' })
   get(@Param('id', ParseUUIDPipe) id: string) {
     return this.deliveries.runDetail(id);
   }
@@ -93,6 +101,17 @@ export class DeliveriesController {
   @ApiOkResponse({ description: '{ items: [{ erpId, name, plateNumber }] }' })
   vehicles() {
     return this.deliveries.vehicles();
+  }
+
+  @Get('stops/:stopId/proofs/:proofId')
+  @RequirePermissionKeys(PERM_DELIVERIES_VIEW)
+  @ApiOperation({ summary: 'A delivery proof (photo or signature), streamed with its Content-Type' })
+  async proof(
+    @Param('stopId', ParseUUIDPipe) stopId: string,
+    @Param('proofId', ParseUUIDPipe) proofId: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    return streamProof(res, await this.proofs.file(stopId, proofId, 'dashboard'));
   }
 
   @Get('stops/by-invoice/:invoiceNumber')

@@ -231,6 +231,60 @@ export class ErpHttpClient {
   }
 
   /**
+   * POST a multipart form (an attachment upload) with an Idempotency-Key.
+   * Answers exactly like `post`, so the outbox treats both the same; a 409
+   * DUPLICATE_EXTERNAL_ID is the document already being there.
+   *
+   * The boundary and Content-Type are left to fetch's FormData encoding.
+   */
+  async postMultipart(
+    path: string,
+    form: {
+      fields: Record<string, string>;
+      file: { buffer: Buffer; filename: string; contentType: string };
+    },
+    idempotencyKey: string,
+  ): Promise<{ ok: boolean; duplicate: boolean; data: unknown; status: number; error?: string }> {
+    const cfg = await this.settings.getErpConfig();
+    if (!cfg.baseUrl || !cfg.apiKey) {
+      throw new Error('ERP base URL or API key not configured');
+    }
+    const base = cfg.baseUrl.replace(/\/+$/, '');
+    const body = new FormData();
+    for (const [k, v] of Object.entries(form.fields)) body.append(k, v);
+    body.append(
+      'file',
+      new Blob([new Uint8Array(form.file.buffer)], { type: form.file.contentType }),
+      form.file.filename,
+    );
+    this.logger.log(
+      `→ POST ${base}/api/v1/${path} multipart fields=${brief(form.fields)} file=${form.file.filename} (${form.file.buffer.length}b)`,
+    );
+    const res = await fetch(`${base}/api/v1/${path}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Idempotency-Key': idempotencyKey },
+      body,
+      signal: AbortSignal.timeout(this.timeout()),
+    });
+    const json: unknown = await res.json().catch(() => null);
+    this.logger.log(`← POST ${path} ${res.status} res=${brief(json)}`);
+    const code = this.errorCode(json);
+    if (res.status === 409 && code === 'DUPLICATE_EXTERNAL_ID') {
+      return { ok: true, duplicate: true, data: json, status: res.status };
+    }
+    if (!res.ok) {
+      return {
+        ok: false,
+        duplicate: false,
+        data: json,
+        status: res.status,
+        error: this.errorDetail(json) ?? code ?? `HTTP ${res.status}`,
+      };
+    }
+    return { ok: true, duplicate: false, data: json, status: res.status };
+  }
+
+  /**
    * One call with the ERP's answer handed back whole: status and parsed body,
    * success or not. Throws only when no answer came (network, timeout, missing
    * configuration), so a caller can tell "the ERP refused" from "the ERP is not

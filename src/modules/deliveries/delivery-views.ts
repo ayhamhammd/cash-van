@@ -1,6 +1,8 @@
 import type { DeliveryRun } from './entities/delivery-run.entity';
 import type { DeliveryStop, DeliveryStopStatus } from './entities/delivery-stop.entity';
 import type { DeliveryStopLine } from './entities/delivery-stop-line.entity';
+import type { DeliveryProof } from './entities/delivery-proof.entity';
+import { conditionOf } from './delivery-reasons';
 
 /** The answer shapes of contract §B "Types". Money is fils (numbers). */
 
@@ -31,7 +33,37 @@ export interface LineView {
   taxRate: number | null;
   deliveredQty: number | null;
   reasonCode: string | null;
+  /** GOOD | DAMAGED — from the reason. */
+  condition: string | null;
   note: string | null;
+}
+
+export interface ProofView {
+  id: string;
+  kind: DeliveryProof['kind'];
+  mime: string;
+  sizeBytes: number;
+  capturedAt: string | null;
+  /** Streams the file: the dashboard's or the phone's route, by who is asking. */
+  url: string;
+}
+
+/** Who the answer is for — decides which proof route the urls point at. */
+export type ProofAudience = 'dashboard' | 'phone';
+
+/** Path from the site root, so an `<img src>` works with the session cookie. */
+export function proofUrl(audience: ProofAudience, stopId: string, proofId: string): string {
+  return audience === 'phone'
+    ? `/api/v1/deliveries/my-stops/${stopId}/proofs/${proofId}`
+    : `/api/v1/deliveries/stops/${stopId}/proofs/${proofId}`;
+}
+
+export interface GoodsBackRow {
+  skuCode: string | null;
+  nameAr: string | null;
+  nameEn: string | null;
+  unit: string | null;
+  qty: number;
 }
 
 export type DisplayStatus = DeliveryStopStatus | 'SENDING';
@@ -64,6 +96,9 @@ export interface StopView {
   creditNoteNumber: string | null;
   collectedFils: number;
   lines: LineView[];
+  proofs: ProofView[];
+  /** ERP attachments on the stop that are not one of these proofs (added in the ERP). */
+  erpOnlyAttachments: number;
 }
 
 export interface RunSummaryView {
@@ -84,6 +119,8 @@ export interface RunSummaryView {
 
 export interface RunDetailView extends RunSummaryView {
   stops: StopView[];
+  /** Goods coming back on this run: invoiced − delivered over its finished stops, by item. */
+  goodsBack?: GoodsBackRow[];
 }
 
 const n = (v: string | number | null | undefined): number => {
@@ -99,7 +136,12 @@ export function displayStatusOf(stop: Pick<DeliveryStop, 'status' | 'localResult
   return stop.localResultRef ? 'SENDING' : stop.status;
 }
 
-export function lineView(l: DeliveryStopLine): LineView {
+/**
+ * One line. While the stop's result is in flight the phone's own figures are
+ * shown (the ERP still has none), so the office sees the difference at once.
+ */
+export function lineView(l: DeliveryStopLine, sending = false): LineView {
+  const reasonCode = sending ? (l.localReasonCode ?? null) : (l.reasonCode ?? null);
   return {
     id: l.id,
     erpInvoiceItemId: l.erpInvoiceItemId,
@@ -111,10 +153,27 @@ export function lineView(l: DeliveryStopLine): LineView {
     invoicedQty: n(l.invoicedQty),
     unitPriceFils: n(l.unitPriceFils),
     taxRate: nOrNull(l.taxRate),
-    deliveredQty: nOrNull(l.deliveredQty),
-    reasonCode: l.reasonCode ?? null,
-    note: l.note ?? null,
+    deliveredQty: nOrNull(sending ? l.localDeliveredQty : l.deliveredQty),
+    reasonCode,
+    condition: sending ? conditionOf(reasonCode) : (l.condition ?? conditionOf(reasonCode)),
+    note: sending ? (l.localNote ?? null) : (l.note ?? null),
   };
+}
+
+export function proofView(p: DeliveryProof, audience: ProofAudience): ProofView {
+  return {
+    id: p.id,
+    kind: p.kind,
+    mime: p.mime,
+    sizeBytes: p.sizeBytes,
+    capturedAt: iso(p.capturedAt),
+    url: proofUrl(audience, p.stopId, p.id),
+  };
+}
+
+/** A line came back short. */
+export function lineDiffers(l: Pick<LineView, 'invoicedQty' | 'deliveredQty'>): boolean {
+  return l.deliveredQty !== null && l.deliveredQty < l.invoicedQty - 1e-9;
 }
 
 /**
@@ -127,8 +186,13 @@ export function stopView(
   lines: DeliveryStopLine[],
   customer: CustomerRef | null,
   collectedFils: number,
+  proofs: DeliveryProof[] = [],
+  audience: ProofAudience = 'dashboard',
 ): StopView {
   const sending = !!s.localResultRef;
+  const lineViews = [...lines]
+    .sort((a, b) => (a.lineNo ?? 0) - (b.lineNo ?? 0))
+    .map((l) => lineView(l, sending));
   return {
     id: s.id,
     erpId: s.erpId,
@@ -153,13 +217,38 @@ export function stopView(
     signedByName: s.signedByName ?? (sending ? (s.localSignedBy ?? null) : null),
     lat: nOrNull(s.lat ?? (sending ? s.localLat : null)),
     lng: nOrNull(s.lng ?? (sending ? s.localLng : null)),
-    returnStatus: s.returnStatus,
+    // A difference sent from the phone is a return request the moment it lands;
+    // the ERP will say PENDING too once it has the result.
+    returnStatus:
+      sending && s.returnStatus === 'NONE' && lineViews.some(lineDiffers) ? 'PENDING' : s.returnStatus,
     creditNoteNumber: s.creditNoteNumber ?? null,
     collectedFils,
-    lines: [...lines]
-      .sort((a, b) => (a.lineNo ?? 0) - (b.lineNo ?? 0))
-      .map(lineView),
+    lines: lineViews,
+    proofs: [...proofs]
+      .sort((a, b) => (a.kind === b.kind ? +a.createdAt - +b.createdAt : a.kind === 'PHOTO' ? -1 : 1))
+      .map((p) => proofView(p, audience)),
+    erpOnlyAttachments: s.erpOnlyAttachments ?? 0,
   };
+}
+
+/**
+ * Goods coming back on a run: for every finished stop (or one being sent),
+ * invoiced − delivered, summed by item and unit. A stop still LOADED is not
+ * counted — nothing has come back from it yet.
+ */
+export function goodsBack(stops: StopView[]): GoodsBackRow[] {
+  const by = new Map<string, GoodsBackRow>();
+  for (const s of stops) {
+    if (s.displayStatus === 'LOADED') continue;
+    for (const l of s.lines) {
+      if (!lineDiffers(l)) continue;
+      const key = `${l.skuCode ?? l.erpInvoiceItemId}|${l.unit ?? ''}`;
+      const row = by.get(key) ?? { skuCode: l.skuCode, nameAr: l.nameAr, nameEn: l.nameEn, unit: l.unit, qty: 0 };
+      row.qty = Math.round((row.qty + (l.invoicedQty - (l.deliveredQty ?? 0))) * 1000) / 1000;
+      by.set(key, row);
+    }
+  }
+  return [...by.values()].sort((a, b) => String(a.skuCode ?? '').localeCompare(String(b.skuCode ?? '')));
 }
 
 /** The run header with its stop counts (by display status) and money collected. */

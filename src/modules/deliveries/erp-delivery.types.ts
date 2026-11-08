@@ -48,8 +48,32 @@ export interface ErpDeliveryInvoice {
   lines?: ErpDeliveryLine[] | null;
 }
 
+/** One line the ERP recorded as different (phase 2). Lines not listed were delivered in full. */
+export interface ErpLineResult {
+  invoiceItemId: string;
+  lineNo?: number | null;
+  invoicedQty?: number | string | null;
+  deliveredQty?: number | string | null;
+  reasonCode?: string | null;
+  condition?: string | null;
+  note?: string | null;
+  approvedQty?: number | string | null;
+}
+
+export interface ErpAttachmentRef {
+  id: string;
+  role?: string | null;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
+  createdAt?: string | null;
+}
+
 export interface ErpDeliveryItem {
   id: string;
+  /** NONE | PENDING | APPROVED | REJECTED (phase 2). */
+  returnStatus?: string | null;
+  results?: ErpLineResult[] | null;
+  attachments?: ErpAttachmentRef[] | null;
   sequence?: number | null;
   status?: string | null;
   deliveredAt?: string | null;
@@ -80,6 +104,14 @@ export interface ErpDeliveryRun {
   } | null;
   vehicle?: { id?: string | null; name?: string | null; plateNumber?: string | null } | null;
   items?: ErpDeliveryItem[] | null;
+}
+
+/** `POST /api/v1/attachments` answer: `{ success, data: { id, role, mimeType, sizeBytes, createdAt } }`. */
+export function attachmentIdOf(body: unknown): string | null {
+  const top = obj(body);
+  if (!top) return null;
+  const d = obj(top.data) ?? top;
+  return typeof d.id === 'string' || typeof d.id === 'number' ? String(d.id) : null;
 }
 
 export interface ErpVehicle {

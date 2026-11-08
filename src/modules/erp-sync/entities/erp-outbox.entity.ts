@@ -37,7 +37,11 @@ export type ErpOutboxKind =
   // (docs/SPEC-delivery-rep.md §6.5). `ref` is the phone's clientRef, which is
   // also the ERP externalId. Built and answered by the deliveries module through
   // ErpOutboxService.registerHandler, so erp-sync does not depend on it.
-  | 'DELIVERY_RESULT';
+  | 'DELIVERY_RESULT'
+  // One proof (photo or signature) of a delivery, copied to the ERP as an
+  // attachment of the run item. `ref` is the proof's clientRef. The result
+  // waits until every proof it names has its ERP attachment id.
+  | 'DELIVERY_PROOF';
 export type ErpOutboxStatus = 'pending' | 'posted' | 'failed' | 'dead_letter';
 
 /** Outbound queue: van transactions to push to the ERP (idempotent by `ref`). */

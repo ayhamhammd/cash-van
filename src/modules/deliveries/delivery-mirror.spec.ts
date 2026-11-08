@@ -4,7 +4,7 @@ import { DeliveryMirrorService, assignChanged, runDay } from './delivery-mirror.
 import { DeliveryRun } from './entities/delivery-run.entity';
 import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
-import { stopView, runSummaryView } from './delivery-views';
+import { goodsBack, stopView, runSummaryView } from './delivery-views';
 import type { ErpDeliveryRun } from './erp-delivery.types';
 
 /**
@@ -54,6 +54,7 @@ const db = {
   reps: [] as Array<{ id: string; code: string }>,
   customers: [] as Array<{ id: string; customer_number: string }>,
   idmap: [] as Array<{ erp_id: string; local_id: string }>,
+  proofs: [] as Array<{ stop_id: string; erp_attachment_id: string }>,
 };
 
 function repoFor(entity: unknown) {
@@ -67,6 +68,10 @@ const em = {
   getRepository: repoFor,
   query: async (sql: string, params: unknown[]) => {
     if (sql.includes('pg_advisory_xact_lock')) return [];
+    if (sql.includes('FROM delivery_proofs')) {
+      const ids = params[1] as string[];
+      return db.proofs.filter((p) => p.stop_id === params[0] && ids.includes(p.erp_attachment_id));
+    }
     if (sql.includes('FROM reps')) return db.reps.filter((r) => r.code === params[0]).map((r) => ({ id: r.id }));
     if (sql.includes('FROM erp_id_map')) {
       const m = db.idmap.find((x) => x.erp_id === params[0]);
@@ -187,6 +192,7 @@ beforeEach(() => {
     { id: 'cust-2', customer_number: 'ERP-2798694a' },
   ];
   db.idmap = [{ erp_id: 'erp-cust-2', local_id: 'ERP-2798694a' }];
+  db.proofs = [];
   events.length = 0;
   erp.getRun.mockReset();
   erp.listRunsSince.mockReset();
@@ -320,6 +326,70 @@ describe('delivery mirror — apply', () => {
   });
 });
 
+describe('delivery mirror — phase 2 results', () => {
+  const lineOf = (stopErp: string, itemId: string) =>
+    db.lines.rows.find((l) => l.stopId === stopByErp(stopErp).id && l.erpInvoiceItemId === itemId)!;
+
+  it('invoiced is the quantity less what was already returned', async () => {
+    const r = erpRun();
+    r.items![0].invoice!.lines = [line('ii-1', { quantity: 10, quantityReturned: 3 })];
+    await svc.applyRun(r);
+    expect(lineOf('item-1', 'ii-1').invoicedQty).toBe('7');
+    // Still LOADED: no result side at all.
+    expect(lineOf('item-1', 'ii-1').deliveredQty).toBeNull();
+  });
+
+  it('PARTIAL: a listed line takes the ERP result; an unlisted one was delivered in full; returnStatus PENDING', async () => {
+    const r = erpRun({ updatedAt: '2026-11-07T10:00:00.000Z' });
+    r.items![0].invoice!.lines = [line('ii-1'), line('ii-1b', { lineNo: 2, quantity: 4 })];
+    Object.assign(r.items![0], {
+      status: 'PARTIAL',
+      returnStatus: 'PENDING',
+      results: [
+        { invoiceItemId: 'ii-1', invoicedQty: 10, deliveredQty: 7, reasonCode: 'DAMAGED', condition: 'DAMAGED', note: 'wet', approvedQty: null },
+      ],
+    });
+    await svc.applyRun(r);
+    expect(stopByErp('item-1')).toMatchObject({ status: 'PARTIAL', returnStatus: 'PENDING' });
+    expect(lineOf('item-1', 'ii-1')).toMatchObject({ deliveredQty: '7', reasonCode: 'DAMAGED', condition: 'DAMAGED', note: 'wet' });
+    expect(lineOf('item-1', 'ii-1b')).toMatchObject({ deliveredQty: '4', reasonCode: null, condition: null });
+  });
+
+  it('the condition comes from the reason when the ERP leaves it out', async () => {
+    const r = erpRun();
+    Object.assign(r.items![0], {
+      status: 'PARTIAL',
+      results: [{ invoiceItemId: 'ii-1', deliveredQty: 9, reasonCode: 'WRONG_ITEM' }],
+    });
+    await svc.applyRun(r);
+    expect(lineOf('item-1', 'ii-1').condition).toBe('GOOD');
+  });
+
+  it('RETURNED with no line rows delivered nothing', async () => {
+    const r = erpRun();
+    Object.assign(r.items![0], { status: 'RETURNED', returnStatus: 'PENDING', results: [] });
+    await svc.applyRun(r);
+    expect(lineOf('item-1', 'ii-1').deliveredQty).toBe('0');
+    expect(stopByErp('item-1').returnStatus).toBe('PENDING');
+  });
+
+  it('an unknown returnStatus reads as NONE', async () => {
+    const r = erpRun();
+    Object.assign(r.items![0], { returnStatus: 'WHATEVER' });
+    await svc.applyRun(r);
+    expect(stopByErp('item-1').returnStatus).toBe('NONE');
+  });
+
+  it('counts ERP attachments that are not one of our proofs, without mirroring them', async () => {
+    await svc.applyRun(erpRun());
+    db.proofs = [{ stop_id: stopByErp('item-1').id, erp_attachment_id: 'att-ours' }];
+    const r = erpRun({ updatedAt: '2026-11-07T11:00:00.000Z' });
+    r.items![0].attachments = [{ id: 'att-ours', role: 'PHOTO' }, { id: 'att-erp', role: 'PHOTO' }];
+    await svc.applyRun(r);
+    expect(stopByErp('item-1').erpOnlyAttachments).toBe(1);
+  });
+});
+
 describe('delivery mirror — pull cursor', () => {
   it('advances to the newest updatedAt and records the run', async () => {
     erp.listRunsSince.mockResolvedValue([
@@ -381,6 +451,90 @@ describe('delivery views', () => {
     expect(sum.stopsTotal).toBe(4);
     expect(sum.collectedFils).toBe(600);
     expect(sum.returns).toEqual({ pending: 0, approved: 0, rejected: 0 });
+  });
+});
+
+describe('delivery views — phase 2', () => {
+  const stop = (over: Record<string, unknown>) =>
+    ({
+      id: 'st-1',
+      erpId: 'e',
+      sequence: 1,
+      status: 'LOADED',
+      returnStatus: 'NONE',
+      totalFils: '0',
+      taxFils: '0',
+      paidFils: '0',
+      localResultRef: null,
+      erpOnlyAttachments: 0,
+      ...over,
+    }) as unknown as DeliveryStop;
+  const ln = (over: Record<string, unknown>) =>
+    ({
+      id: 'l',
+      erpInvoiceItemId: 'ii',
+      lineNo: 1,
+      skuCode: 'W1',
+      nameAr: 'ماء',
+      nameEn: 'Water',
+      unit: 'CTN',
+      invoicedQty: '10',
+      unitPriceFils: '1000',
+      taxRate: '16',
+      ...over,
+    }) as unknown as DeliveryStopLine;
+
+  it('while SENDING the phone\'s line figures show, and the stop is waiting for approval', () => {
+    const v = stopView(
+      stop({ localResultRef: 'd-1' }),
+      [ln({ deliveredQty: null, localDeliveredQty: '7', localReasonCode: 'EXPIRED', localNote: 'old' })],
+      null,
+      0,
+    );
+    expect(v.displayStatus).toBe('SENDING');
+    expect(v.returnStatus).toBe('PENDING');
+    expect(v.lines[0]).toMatchObject({ deliveredQty: 7, reasonCode: 'EXPIRED', condition: 'DAMAGED', note: 'old' });
+  });
+
+  it('once settled the ERP figures show', () => {
+    const v = stopView(
+      stop({ status: 'PARTIAL', returnStatus: 'PENDING' }),
+      [ln({ deliveredQty: '8', reasonCode: 'DAMAGED', condition: 'DAMAGED', localDeliveredQty: '7' })],
+      null,
+      0,
+    );
+    expect(v.lines[0]).toMatchObject({ deliveredQty: 8, reasonCode: 'DAMAGED', condition: 'DAMAGED' });
+  });
+
+  it('proofs carry the url of the route that may stream them, photos first', () => {
+    const proofs = [
+      { id: 'pr-s', stopId: 'st-1', kind: 'SIGNATURE', mime: 'image/png', sizeBytes: 900, capturedAt: null, createdAt: new Date(1) },
+      { id: 'pr-p', stopId: 'st-1', kind: 'PHOTO', mime: 'image/jpeg', sizeBytes: 9000, capturedAt: new Date('2026-11-08T07:00:00Z'), createdAt: new Date(2) },
+    ] as never;
+    const dash = stopView(stop({}), [], null, 0, proofs, 'dashboard');
+    expect(dash.proofs.map((p) => p.kind)).toEqual(['PHOTO', 'SIGNATURE']);
+    expect(dash.proofs[0]).toEqual({
+      id: 'pr-p',
+      kind: 'PHOTO',
+      mime: 'image/jpeg',
+      sizeBytes: 9000,
+      capturedAt: '2026-11-08T07:00:00.000Z',
+      url: '/api/v1/deliveries/stops/st-1/proofs/pr-p',
+    });
+    expect(stopView(stop({}), [], null, 0, proofs, 'phone').proofs[0].url).toBe(
+      '/api/v1/deliveries/my-stops/st-1/proofs/pr-p',
+    );
+  });
+
+  it('goodsBack sums invoiced − delivered by item over finished stops only', () => {
+    const views = [
+      stopView(stop({ id: 'a', status: 'PARTIAL' }), [ln({ deliveredQty: '7' }), ln({ id: 'l2', skuCode: 'J1', nameEn: 'Juice', deliveredQty: '10' })], null, 0),
+      stopView(stop({ id: 'b', status: 'RETURNED' }), [ln({ deliveredQty: '0', invoicedQty: '2.5' })], null, 0),
+      stopView(stop({ id: 'c', status: 'LOADED' }), [ln({ deliveredQty: null })], null, 0),
+    ];
+    expect(goodsBack(views)).toEqual([{ skuCode: 'W1', nameAr: 'ماء', nameEn: 'Water', unit: 'CTN', qty: 5.5 }]);
+    const sum = runSummaryView({ id: 'r', erpId: 'e', status: 'OPEN' } as DeliveryRun, views, null);
+    expect(sum.counts).toMatchObject({ partial: 1, returned: 1, loaded: 1 });
   });
 });
 
