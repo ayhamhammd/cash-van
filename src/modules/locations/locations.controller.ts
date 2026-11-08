@@ -12,6 +12,7 @@ import {
   ListLocationsQuery,
   LocationMembersDto,
   ReorderLocationsDto,
+  SetExtraRepsDto,
   SetLocationRepDto,
   SwitchLocationModeDto,
   UpdateLocationDto,
@@ -119,6 +120,17 @@ export class LocationTreeController {
     @Query() q: DryRunQuery,
   ) {
     return this.locations.setRep(id, dto.repId ?? null, q.dryRun ?? false);
+  }
+
+  /**
+   * Salesmen who also serve this place's customers — a second van in the same
+   * area. The main salesman, his debt and the ERP stay as they are.
+   */
+  @Put(':id/extra-reps')
+  @RequirePermissionKeys('areas.edit', 'customers.assignSalesman')
+  @ApiOperation({ summary: 'Set the salesmen who also serve this place (replaces the set)' })
+  setExtraReps(@Param('id', ParseUUIDPipe) id: string, @Body() dto: SetExtraRepsDto) {
+    return this.locations.setExtraReps(id, dto.repIds);
   }
 
   @Get(':id/members')

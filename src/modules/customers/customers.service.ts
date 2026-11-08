@@ -34,6 +34,7 @@ import { StorageService } from '../../common/storage/storage.service';
 import { randomUUID } from 'crypto';
 import { AreasService } from '../areas/areas.service';
 import { LocationTreeService } from '../locations/locations.service';
+import { ALSO_SERVED_BY_CUSTOMERS_SQL, alsoServedByRepSql, type AlsoServedRep } from '../locations/also-served';
 import { SettingsService } from '../settings/settings.service';
 import { applyTokenSearch } from '../../common/search/token-search.util';
 
@@ -589,7 +590,11 @@ export class CustomersService {
       .skip(query.offset ?? 0);
 
     if (query.unassigned) qb.andWhere('c.rep_id IS NULL');
-    else if (query.repId) qb.andWhere('c.rep_id = :repId', { repId: query.repId });
+    // A salesman's own list also holds the shops he serves beside their main
+    // salesman (§5.6). The office's "by salesman" filter stays the main one.
+    else if (query.repId && opts.forSalesman) {
+      qb.andWhere(`(c.rep_id = :repId OR ${alsoServedByRepSql(':repId')})`, { repId: query.repId });
+    } else if (query.repId) qb.andWhere('c.rep_id = :repId', { repId: query.repId });
     // Supervisor scope, applied on TOP of any repId filter above rather than
     // instead of it: a scoped user narrowing to one of their own salesmen must
     // still not be able to widen past their assignment by sending someone else's.
@@ -654,6 +659,9 @@ export class CustomersService {
 
     const [items, total] = await qb.getManyAndCount();
     await this.attachPlace(items, opts);
+    if (opts.forSalesman && query.repId) {
+      for (const c of items) Object.assign(c, { servedAs: c.repId === query.repId ? 'MAIN' : 'ALSO' });
+    }
     return { items, total };
   }
 
@@ -677,6 +685,7 @@ export class CustomersService {
    */
   private async attachPlace(items: Customer[], opts: { forSalesman?: boolean }): Promise<void> {
     await this.attachAreaNames(items);
+    await this.attachAlsoServedBy(items);
     const tree = !opts.forSalesman || (await this.settings.locationMode()) === 'TREE';
     const legacy = !!opts.forSalesman && tree;
     const labels = await this.locations.labels(tree ? items.map((c) => c.locationId ?? '').filter(Boolean) : []);
@@ -691,6 +700,64 @@ export class CustomersService {
       });
       if (legacy) Object.assign(c, { areaId: l?.locationId ?? null, areaName: l?.locationLabel ?? null });
     }
+  }
+
+  /** Who else serves each customer besides its main salesman (§5.6). */
+  private async attachAlsoServedBy(items: Customer[]): Promise<void> {
+    if (!items.length) return;
+    const rows: Array<{ customer_id: string; rep_id: string; rep_name: string; source: 'DIRECT' | 'AREA'; location_id: string | null }> =
+      await this.customers.query(ALSO_SERVED_BY_CUSTOMERS_SQL, [items.map((c) => c.id)]);
+    const by = new Map<string, AlsoServedRep[]>();
+    for (const r of rows) {
+      by.set(r.customer_id, [
+        ...(by.get(r.customer_id) ?? []),
+        { repId: r.rep_id, repName: r.rep_name, source: r.source, locationId: r.location_id },
+      ]);
+    }
+    for (const c of items) Object.assign(c, { alsoServedBy: by.get(c.id) ?? [] });
+  }
+
+  /**
+   * The salesmen chosen to also serve this one customer, as a whole set. They
+   * see it on their phone and can route, sell and collect there; its main
+   * salesman, debt, statement and ERP salesman stay as they are.
+   */
+  async setExtraReps(id: string, repIds: string[]): Promise<Customer> {
+    const customer = await this.findOneOrThrow(id);
+    const wanted = [...new Set(repIds)].filter((r) => r !== customer.repId);
+    const before: Array<{ rep_id: string }> = await this.customers.query(
+      `SELECT rep_id FROM customer_extra_reps WHERE customer_id = $1`,
+      [id],
+    );
+    const had = new Set(before.map((r) => r.rep_id));
+    const added = wanted.filter((r) => !had.has(r));
+    if (added.length) {
+      const ok: Array<{ id: string }> = await this.customers.query(
+        `SELECT id FROM reps WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL AND is_active`,
+        [added],
+      );
+      if (ok.length !== added.length) {
+        throw new BadRequestException('One of those salesmen is inactive or no longer exists. Refresh and choose again.');
+      }
+    }
+    await this.customers.manager.transaction(async (m) => {
+      await m.query(`DELETE FROM customer_extra_reps WHERE customer_id = $1 AND NOT (rep_id = ANY($2::uuid[]))`, [
+        id,
+        wanted,
+      ]);
+      if (added.length) {
+        await m.query(
+          `INSERT INTO customer_extra_reps (customer_id, rep_id)
+           SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING`,
+          [id, added],
+        );
+      }
+    });
+    const touched = new Set([...added, ...[...had].filter((r) => !wanted.includes(r))]);
+    for (const repId of touched) {
+      this.events.emit('customer.changed', { repId, reason: 'customer.extra' });
+    }
+    return this.getWithPlace(id);
   }
 
   /**

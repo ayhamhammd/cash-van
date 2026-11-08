@@ -15,6 +15,8 @@ function build(mode: 'FLAT' | 'TREE') {
   const svc = Object.create(CustomersService.prototype) as Record<string, unknown>;
   svc.areas = { namesById: async () => new Map([['area-1', 'الشمال']]) };
   svc.settings = { locationMode: async () => mode };
+  // Who also serves each shop — none here.
+  svc.customers = { query: async () => [] };
   svc.locations = {
     labels: async (ids: string[]) =>
       new Map(

@@ -8,6 +8,7 @@ import {
   Param,
   ParseUUIDPipe,
   Patch,
+  Put,
   BadRequestException,
   Post,
   Query,
@@ -43,6 +44,7 @@ import { ListCustomersQuery } from './dto/list-customers.query';
 import { ListVisitsQuery } from './dto/list-visits.query';
 import { CreateVisitDto } from './dto/create-visit.dto';
 import { ReassignCustomerDto } from './dto/reassign-customer.dto';
+import { SetExtraRepsDto } from '../locations/dto/location.dto';
 import { RequirePermissions, RequirePermissionKeys } from '../../common/decorators/permissions.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -291,6 +293,20 @@ export class CustomersController {
     @Body() dto: ReassignCustomerDto,
   ) {
     return this.customers.reassign(id, dto.newRepId);
+  }
+
+  @Put(':id/extra-reps')
+  @Roles('admin', 'manager')
+  @RequirePermissionKeys(CUSTOMER_ASSIGN_SALESMAN_KEY)
+  @ApiOperation({
+    summary: 'Set the salesmen who also serve this customer (replaces the set)',
+    description:
+      'A second van for the same shop: they see it on their phone and can route, sell and collect there. ' +
+      'Its main salesman — debt, statement, reports, the ERP — does not change.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid', description: 'Customer id' })
+  setExtraReps(@Param('id', ParseUUIDPipe) id: string, @Body() dto: SetExtraRepsDto) {
+    return this.customers.setExtraReps(id, dto.repIds);
   }
 
   @Post(':id/use-area-salesman')

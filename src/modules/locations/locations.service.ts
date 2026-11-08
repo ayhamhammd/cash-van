@@ -49,12 +49,29 @@ export interface LocationRow {
   /** The active salesman it gets from above when it has none of its own (or his is inactive). */
   inheritedRepId: string | null;
   inheritedRepName: string | null;
+  /** Salesmen who ALSO serve this place's customers, set on this place itself (§5.6). */
+  extraReps: ExtraRep[];
+  /** Those set on places above it, which apply here too. Active ones only. */
+  inheritedExtraReps: ExtraRep[];
+}
+
+export interface ExtraRep {
+  repId: string;
+  repName: string;
+  active: boolean;
 }
 
 /** A node as it is stored — without the counts and names list() works out. */
 type NodeView = Omit<
   LocationRow,
-  'customerCount' | 'subtreeCustomerCount' | 'repName' | 'repActive' | 'inheritedRepId' | 'inheritedRepName'
+  | 'customerCount'
+  | 'subtreeCustomerCount'
+  | 'repName'
+  | 'repActive'
+  | 'inheritedRepId'
+  | 'inheritedRepName'
+  | 'extraReps'
+  | 'inheritedExtraReps'
 >;
 
 /** One customer whose salesman a resolution changed. */
@@ -147,7 +164,15 @@ export class LocationTreeService {
         subtree.set(ancestorId, (subtree.get(ancestorId) ?? 0) + count);
       }
     }
-    const reps = await this.repInfo(nodes.map((n) => n.repId ?? '').filter(Boolean));
+    const extraRows: Array<{ location_id: string; rep_id: string }> = await this.locations.query(
+      `SELECT location_id, rep_id FROM location_extra_reps ORDER BY created_at`,
+    );
+    const extrasOf = new Map<string, string[]>();
+    for (const r of extraRows) extrasOf.set(r.location_id, [...(extrasOf.get(r.location_id) ?? []), r.rep_id]);
+    const reps = await this.repInfo([
+      ...nodes.map((n) => n.repId ?? '').filter(Boolean),
+      ...extraRows.map((r) => r.rep_id),
+    ]);
     const repNames = new Map([...reps].map(([id, r]) => [id, r.name]));
     const active = (repId: string | null | undefined) => !!repId && reps.get(repId)?.active === true;
     const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -170,6 +195,19 @@ export class LocationTreeService {
           repActive: n.repId ? active(n.repId) : null,
           inheritedRepId: above?.repId ?? null,
           inheritedRepName: above?.repId ? (repNames.get(above.repId) ?? null) : null,
+          extraReps: (extrasOf.get(n.id) ?? []).map((repId) => ({
+            repId,
+            repName: repNames.get(repId) ?? '—',
+            active: active(repId),
+          })),
+          inheritedExtraReps: [
+            ...new Set(
+              idsOnPath(n.path)
+                .slice(0, -1)
+                .flatMap((id) => extrasOf.get(id) ?? [])
+                .filter((repId) => active(repId) && !(extrasOf.get(n.id) ?? []).includes(repId)),
+            ),
+          ].map((repId) => ({ repId, repName: repNames.get(repId) ?? '—', active: true })),
         };
       });
     return { items, total: items.length };
@@ -794,6 +832,57 @@ export class LocationTreeService {
     this.changed('location.rep');
     if (!tree) return this.report([], false, false, scope);
     return this.applyReps(scope);
+  }
+
+  /**
+   * The salesmen who ALSO serve every customer under a place (§5.6), as a
+   * whole set: what is sent replaces what was there. They see those shops on
+   * their phone and can route, sell and collect there; the main salesman —
+   * debt, statement, reports, the ERP — does not change. Stored in FLAT mode
+   * too, but only counts in TREE mode.
+   */
+  async setExtraReps(id: string, repIds: string[]): Promise<{ extraReps: ExtraRep[] }> {
+    await this.getOne(id);
+    const wanted = [...new Set(repIds)];
+    const before: Array<{ rep_id: string }> = await this.locations.query(
+      `SELECT rep_id FROM location_extra_reps WHERE location_id = $1`,
+      [id],
+    );
+    const had = new Set(before.map((r) => r.rep_id));
+    const added = wanted.filter((r) => !had.has(r));
+    if (added.length) {
+      const ok: Array<{ id: string }> = await this.locations.query(
+        `SELECT id FROM reps WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL AND is_active`,
+        [added],
+      );
+      if (ok.length !== added.length) {
+        throw new BadRequestException('One of those salesmen is inactive or no longer exists. Refresh and choose again.');
+      }
+    }
+    await this.dataSource.transaction(async (m) => {
+      await m.query(`DELETE FROM location_extra_reps WHERE location_id = $1 AND NOT (rep_id = ANY($2::uuid[]))`, [
+        id,
+        wanted,
+      ]);
+      if (added.length) {
+        await m.query(
+          `INSERT INTO location_extra_reps (location_id, rep_id)
+           SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING`,
+          [id, added],
+        );
+      }
+    });
+    // Each salesman who gained or lost these shops re-pulls his list.
+    const touched = new Set([...added, ...[...had].filter((r) => !wanted.includes(r))]);
+    for (const repId of touched) this.events.emit('customer.changed', { repId, reason: 'location.extra' });
+    const info = await this.repInfo(wanted);
+    return {
+      extraReps: wanted.map((repId) => ({
+        repId,
+        repName: info.get(repId)?.name ?? '—',
+        active: info.get(repId)?.active ?? false,
+      })),
+    };
   }
 
   /**

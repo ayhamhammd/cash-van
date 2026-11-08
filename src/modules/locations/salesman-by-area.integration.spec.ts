@@ -243,4 +243,70 @@ run('salesmen by area (real DB)', () => {
     await tree.update(areaN2, { parentId: govN });
     await tree.setRep(govS, null);
   });
+
+  it('lets other salesmen also serve a place or one shop, without changing its main salesman', async () => {
+    const mk = async (code: string) =>
+      (await q(`INSERT INTO reps (code, name_ar) VALUES ($1, $1) RETURNING id`, [code]))[0].id as string;
+    const snacks = await mk(`${P}-SNK`);
+    const ice = await mk(`${P}-ICE`);
+    const svc = Object.create(CustomersService.prototype) as Record<string, unknown>;
+    svc.customers = ds.getRepository('Customer');
+    svc.locations = tree;
+    svc.settings = settings;
+    svc.events = { emit: () => true };
+    svc.areas = { namesById: async () => new Map() };
+    const customers = svc as unknown as CustomersService;
+    const phoneList = async (repId: string) =>
+      (
+        await customers.list({ limit: 50, offset: 0, q: P, repId } as never, null, { forSalesman: true })
+      ).items.map((i) => i.id);
+    const modeBefore = (await q(`SELECT location_mode FROM app_settings WHERE id = 1`))[0].location_mode;
+    await q(`UPDATE app_settings SET location_mode = 'TREE' WHERE id = 1`);
+    try {
+      const mainBefore = await Promise.all(c.map(repOf));
+
+      // A governorate's extra salesman serves every shop in its areas.
+      await tree.setExtraReps(govN, [snacks]);
+      expect((await phoneList(snacks)).sort()).toEqual([...c].sort());
+      const items = (await tree.list()).items;
+      expect(items.find((i) => i.id === govN)!.extraReps).toEqual([
+        expect.objectContaining({ repId: snacks, active: true }),
+      ]);
+      expect(items.find((i) => i.id === areaN1)!.inheritedExtraReps).toEqual([
+        expect.objectContaining({ repId: snacks }),
+      ]);
+
+      // One shop can be given one more of its own.
+      await customers.setExtraReps(c[0], [ice]);
+      expect(await phoneList(ice)).toEqual([c[0]]);
+      const one = await customers.getWithPlace(c[0]);
+      const also = (one as unknown as { alsoServedBy: Array<{ repId: string; source: string }> }).alsoServedBy;
+      expect(also.map((a) => [a.repId, a.source]).sort()).toEqual(
+        [[ice, 'DIRECT'], [snacks, 'AREA']].sort(),
+      );
+      // The phone tells him it is not his own shop.
+      const row = (
+        await customers.list({ limit: 50, offset: 0, q: P, repId: ice } as never, null, { forSalesman: true })
+      ).items[0] as unknown as { servedAs: string };
+      expect(row.servedAs).toBe('ALSO');
+
+      // Nobody's main salesman moved; the office's "by salesman" filter is still the main one.
+      expect(await Promise.all(c.map(repOf))).toEqual(mainBefore);
+      const office = await customers.list({ limit: 50, offset: 0, q: P, repId: snacks } as never, null, {});
+      expect(office.items).toHaveLength(0);
+
+      // An inactive salesman cannot be added.
+      await q(`UPDATE reps SET is_active = false WHERE id = $1`, [ice]);
+      await expect(tree.setExtraReps(govS, [ice])).rejects.toThrow(/inactive/);
+
+      // Places only count in TREE mode; a shop's own extra still does.
+      await q(`UPDATE app_settings SET location_mode = 'FLAT' WHERE id = 1`);
+      expect(await phoneList(snacks)).toEqual([]);
+      expect(await phoneList(ice)).toEqual([c[0]]);
+    } finally {
+      await q(`UPDATE app_settings SET location_mode = $1 WHERE id = 1`, [modeBefore]);
+      await tree.setExtraReps(govN, []);
+      await q(`DELETE FROM customer_extra_reps WHERE rep_id = ANY($1::uuid[])`, [[snacks, ice]]);
+    }
+  });
 });

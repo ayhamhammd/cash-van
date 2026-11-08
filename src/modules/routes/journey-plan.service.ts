@@ -10,6 +10,7 @@ import { Repository } from 'typeorm';
 import { JourneyPlanEntry } from './entities/journey-plan-entry.entity';
 import { Rep } from '../reps/entities/rep.entity';
 import { Customer } from '../customers/entities/customer.entity';
+import { alsoServedByRepSql } from '../locations/also-served';
 import {
   BulkSetJourneyPlanDto,
   SetRouteCycleDto,
@@ -452,6 +453,12 @@ export class JourneyPlanService {
       throw new BadRequestException(`Customer ${customerId} does not exist`);
     }
     if (customer.repId && customer.repId !== repId) {
+      // A salesman who also serves the shop beside its main one may route it.
+      const [also] = await this.customers.query(
+        `SELECT ${alsoServedByRepSql('$2')} AS ok FROM customers c WHERE c.id = $1`,
+        [customerId, repId],
+      );
+      if (also?.ok) return;
       throw new BadRequestException(
         `Customer ${customerId} is assigned to a different rep`,
       );

@@ -189,8 +189,8 @@ For each customer, in TREE mode:
 3. **None** — no node up the path has a salesman: `rep_id = NULL`, `rep_source = NULL`
    (the customer is unassigned, exactly like today).
 
-One salesman per node. Two vans sharing one area is out of scope for v1 (open question
-Q1); today a customer has one `rep_id`, and every report depends on that.
+One **main** salesman per node and per customer (`rep_id`). A second van in the same
+area (Q1) is an *also-serves* salesman — §5.6 — and does not change `rep_id`.
 
 ### 5.2 Materialised, not computed per query
 
@@ -244,6 +244,33 @@ offline for a shop that just left still sync, because sales/collections don't ch
 ownership (unchanged).
 
 ---
+
+### 5.6 Salesmen who also serve a shop (Q1)
+
+A cold-drinks van and a snacks van can both cover one shop. The shop keeps **one main
+salesman** (`customers.rep_id`, resolved as above): he owns its debt, statement, AR,
+targets-by-customer, reports, supervisor scope and the ERP's salesman field. Any number
+of other salesmen can **also serve** it:
+
+- `location_extra_reps (location_id, rep_id)` — they also serve every customer under that
+  place (a governorate's apply to all its areas). Counts in TREE mode only (Q2: no).
+- `customer_extra_reps (customer_id, rep_id)` — chosen for one customer; any mode.
+
+Not materialised: who also serves a shop is read through its place when asked
+(`locations/also-served.ts`), so nothing drifts. Inactive/deleted salesmen serve nobody
+and cannot be added; the main salesman is never listed as "also".
+
+What an also-serving salesman gets: the shop in his phone's customer list
+(`GET /customers` for a salesman: `rep_id = me OR also-served`, each row `servedAs:
+MAIN|ALSO`), the right to put it on his journey plan, and — as before for any shop — to
+sell and collect there; his sales count for him by the voucher's rep. Nothing else reads
+him. The office's "by salesman" filter stays the main one.
+
+API: `PUT /locations/:id/extra-reps {repIds}` (areas.edit + customers.assignSalesman),
+`PUT /customers/:id/extra-reps {repIds}` (customers.assignSalesman) — each replaces the
+set and signals every salesman who gained or lost shops. Tree rows carry `extraReps` and
+`inheritedExtraReps`; customer rows carry `alsoServedBy [{repId, repName, source:
+DIRECT|AREA, locationId}]`. Migration `AlsoServedBy1728690000000`.
 
 ## 6. API
 
@@ -432,11 +459,10 @@ new app build shows the two levels (governorate → area).
 
 ## 12. Open questions
 
-- **Q1** Two salesmen in one area (e.g. a cold-drinks van and a snacks van)? v1: one per
-  node. Supporting it means a customer with more than one `rep_id`, which touches every
-  report.
-- **Q2** Should salesman-by-area also work in FLAT mode (on `customer_areas`)? v1: TREE only.
-- **Q3** Offer eligibility by governorate/area (`locationIds`) next to `regionIds`?
+- **Q1** (decided 2026-11-08: yes, as *main + also serves*) Two salesmen in one area — §5.6.
+- **Q2** (decided 2026-11-08: no) Salesman-by-area stays TREE only.
+- **Q3** (maybe — not now) Offer eligibility by governorate/area (`locationIds`) next to
+  `regionIds`.
 - **Q4** (decided 2026-11-08) A salesman creating a shop in an area covered by another
   salesman **keeps it** — DIRECT, today's behaviour.
 

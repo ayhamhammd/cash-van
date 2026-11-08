@@ -197,6 +197,19 @@ export class SwitchLocationModeDto {
   dryRun?: boolean;
 }
 
+/** Salesmen who also serve a place's (or one customer's) shops — the whole set. */
+export class SetExtraRepsDto {
+  @ApiProperty({
+    type: [String],
+    format: 'uuid',
+    description: 'Every salesman who also serves these shops; an empty list removes them all.',
+  })
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('all', { each: true })
+  repIds!: string[];
+}
+
 export class SetLocationRepDto {
   @ApiPropertyOptional({
     format: 'uuid',
