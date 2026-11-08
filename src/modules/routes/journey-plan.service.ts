@@ -28,6 +28,11 @@ export interface JourneyPlanRow {
   city: string | null;
   /** "governorate - area" from the location tree; null when the customer has no tree area. */
   locationLabel: string | null;
+  /**
+   * The shop's MAIN salesman. A stop on another salesman's shop is one this
+   * salesman also serves (docs/SPEC-location-tree.md §5.6); the phone tags it.
+   */
+  customerRepId: string | null;
   addressAr: string | null;
   phone: string | null;
   lat: number | null;
@@ -307,6 +312,7 @@ export class JourneyPlanService {
         `CASE WHEN loc.id IS NULL THEN NULL
               WHEN gov.id IS NULL THEN loc.name_ar
               ELSE gov.name_ar || ' - ' || loc.name_ar END AS "locationLabel"`,
+        'c.rep_id AS "customerRepId"',
         'c.address_ar AS "addressAr"',
         'c.phone AS phone',
         'c.latitude AS lat',
@@ -328,6 +334,7 @@ export class JourneyPlanService {
       nameEn: string | null;
       city: string | null;
       locationLabel: string | null;
+      customerRepId: string | null;
       addressAr: string | null;
       phone: string | null;
       lat: string | null;
@@ -349,6 +356,7 @@ export class JourneyPlanService {
       nameEn: r.nameEn,
       city: r.city,
       locationLabel: r.locationLabel,
+      customerRepId: r.customerRepId,
       addressAr: r.addressAr,
       phone: r.phone,
       lat: r.lat === null ? null : Number(r.lat),
