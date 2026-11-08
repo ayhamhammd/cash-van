@@ -258,7 +258,8 @@ run('salesmen by area (real DB)', () => {
     const customers = svc as unknown as CustomersService;
     const phoneList = async (repId: string) =>
       (
-        await customers.list({ limit: 50, offset: 0, q: P, repId } as never, null, { forSalesman: true })
+        // As the controller calls it for a salesman: his own scope is [himself].
+        await customers.list({ limit: 50, offset: 0, q: P, repId } as never, [repId], { forSalesman: true })
       ).items.map((i) => i.id);
     const modeBefore = (await q(`SELECT location_mode FROM app_settings WHERE id = 1`))[0].location_mode;
     await q(`UPDATE app_settings SET location_mode = 'TREE' WHERE id = 1`);
@@ -286,7 +287,7 @@ run('salesmen by area (real DB)', () => {
       );
       // The phone tells him it is not his own shop.
       const row = (
-        await customers.list({ limit: 50, offset: 0, q: P, repId: ice } as never, null, { forSalesman: true })
+        await customers.list({ limit: 50, offset: 0, q: P, repId: ice } as never, [ice], { forSalesman: true })
       ).items[0] as unknown as { servedAs: string };
       expect(row.servedAs).toBe('ALSO');
 

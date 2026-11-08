@@ -598,12 +598,19 @@ export class CustomersService {
     // Supervisor scope, applied on TOP of any repId filter above rather than
     // instead of it: a scoped user narrowing to one of their own salesmen must
     // still not be able to widen past their assignment by sending someone else's.
+    //
+    // A salesman's scope is himself; the shops he also serves are his to see
+    // too, or the clause above would be undone here.
     if (visibleRepIds !== null) {
-      qb.andWhere('c.rep_id IN (:...visibleRepIds)', {
-        visibleRepIds: visibleRepIds.length
-          ? visibleRepIds
-          : ['00000000-0000-0000-0000-000000000000'],
-      });
+      const scoped = 'c.rep_id IN (:...visibleRepIds)';
+      qb.andWhere(
+        opts.forSalesman && query.repId ? `(${scoped} OR ${alsoServedByRepSql(':repId')})` : scoped,
+        {
+          visibleRepIds: visibleRepIds.length
+            ? visibleRepIds
+            : ['00000000-0000-0000-0000-000000000000'],
+        },
+      );
     }
     // Customers free to join a segment. One segment per customer is enforced in
     // the schema, so anyone already in one can only be REFUSED by the add flow —
