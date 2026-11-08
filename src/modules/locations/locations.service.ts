@@ -2,9 +2,10 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { EventEmitter2 } from '@nestjs/event-emitter';
+import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { DataSource, EntityManager, In, IsNull, Repository } from 'typeorm';
@@ -40,13 +41,21 @@ export interface LocationRow {
   /** The salesman set on this node itself. */
   repId: string | null;
   repName: string | null;
-  /** The salesman it gets from above when it has none of its own. */
+  /**
+   * False when the node's own salesman is deactivated: he moves nobody, and
+   * the node's customers follow the next active salesman up. Null with no rep.
+   */
+  repActive: boolean | null;
+  /** The active salesman it gets from above when it has none of its own (or his is inactive). */
   inheritedRepId: string | null;
   inheritedRepName: string | null;
 }
 
 /** A node as it is stored — without the counts and names list() works out. */
-type NodeView = Omit<LocationRow, 'customerCount' | 'subtreeCustomerCount' | 'repName' | 'inheritedRepId' | 'inheritedRepName'>;
+type NodeView = Omit<
+  LocationRow,
+  'customerCount' | 'subtreeCustomerCount' | 'repName' | 'repActive' | 'inheritedRepId' | 'inheritedRepName'
+>;
 
 /** One customer whose salesman a resolution changed. */
 export interface RepMove {
@@ -114,6 +123,8 @@ const CHILD_KIND: Record<LocationKind, LocationKind | null> = {
  */
 @Injectable()
 export class LocationTreeService {
+  private readonly logger = new Logger(LocationTreeService.name);
+
   constructor(
     @InjectRepository(Location) private readonly locations: Repository<Location>,
     @InjectRepository(Customer) private readonly customers: Repository<Customer>,
@@ -136,23 +147,27 @@ export class LocationTreeService {
         subtree.set(ancestorId, (subtree.get(ancestorId) ?? 0) + count);
       }
     }
-    const repNames = await this.repNames(nodes.map((n) => n.repId ?? '').filter(Boolean));
+    const reps = await this.repInfo(nodes.map((n) => n.repId ?? '').filter(Boolean));
+    const repNames = new Map([...reps].map(([id, r]) => [id, r.name]));
+    const active = (repId: string | null | undefined) => !!repId && reps.get(repId)?.active === true;
     const byId = new Map(nodes.map((n) => [n.id, n]));
     const items = nodes
       .filter((n) => includeInactive || n.isActive)
       .map((n) => {
-        // The nearest node above with a salesman of its own.
+        // The nearest node above with an active salesman of its own — the one
+        // the resolver hands this node's customers to.
         const above = idsOnPath(n.path)
           .slice(0, -1)
           .reverse()
           .map((id) => byId.get(id))
-          .find((a) => a?.repId);
+          .find((a) => active(a?.repId));
         return {
           ...this.toRow(n),
           customerCount: own.get(n.id) ?? 0,
           subtreeCustomerCount: subtree.get(n.id) ?? 0,
           repId: n.repId ?? null,
           repName: n.repId ? (repNames.get(n.repId) ?? null) : null,
+          repActive: n.repId ? active(n.repId) : null,
           inheritedRepId: above?.repId ?? null,
           inheritedRepName: above?.repId ? (repNames.get(above.repId) ?? null) : null,
         };
@@ -724,6 +739,20 @@ export class LocationTreeService {
   // ── Salesmen by area ────────────────────────────────────────────────────
 
   /**
+   * A salesman deactivated, deleted or reactivated. His areas' customers go
+   * to the next active salesman up the tree — or come back to him. Customers
+   * he holds directly stay his: that choice was made for each of them.
+   */
+  @OnEvent('rep.active.changed')
+  async onRepActiveChanged(): Promise<void> {
+    try {
+      await this.applyReps({ all: true });
+    } catch (e) {
+      this.logger.warn(`re-resolving area salesmen failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
    * Give a place a salesman, or take it away (`repId: null`). Every customer
    * below it without a salesman of their own (BE spec §5.1) follows: to this
    * salesman, or — when cleared — to the next one up, or to none.
@@ -735,11 +764,14 @@ export class LocationTreeService {
   async setRep(id: string, repId: string | null, dryRun = false): Promise<RepChangeReport> {
     const node = await this.getOne(id);
     if (repId) {
-      const rows: Array<{ id: string }> = await this.locations.query(
-        `SELECT id FROM reps WHERE id = $1 AND deleted_at IS NULL`,
+      const rows: Array<{ id: string; is_active: boolean }> = await this.locations.query(
+        `SELECT id, is_active FROM reps WHERE id = $1 AND deleted_at IS NULL`,
         [repId],
       );
       if (!rows.length) throw new BadRequestException('That salesman no longer exists. Refresh and choose again.');
+      if (!rows[0].is_active) {
+        throw new BadRequestException('That salesman is inactive. Reactivate him first, or choose another.');
+      }
     }
     const tree = (await this.settings.locationMode()) === 'TREE';
     const scope = { nodePath: node.path };
@@ -792,7 +824,8 @@ export class LocationTreeService {
       WITH target AS (
         SELECT c.id, c.rep_id AS old_rep,
                (SELECT a.rep_id FROM locations a
-                 WHERE a.deleted_at IS NULL AND a.rep_id IS NOT NULL
+                  JOIN reps r ON r.id = a.rep_id AND r.is_active AND r.deleted_at IS NULL
+                 WHERE a.deleted_at IS NULL
                    AND l.path LIKE a.path || '%'
                  ORDER BY a.depth DESC LIMIT 1) AS new_rep
           FROM customers c
@@ -873,13 +906,22 @@ export class LocationTreeService {
 
   /** "أحمد (201)" by rep id. */
   private async repNames(ids: string[]): Promise<Map<string, string>> {
+    return new Map([...(await this.repInfo(ids))].map(([id, r]) => [id, r.name]));
+  }
+
+  /** Name, and whether he can hold customers (active, not deleted), by rep id. */
+  private async repInfo(ids: string[]): Promise<Map<string, { name: string; active: boolean }>> {
     const unique = [...new Set(ids)];
     if (!unique.length) return new Map();
-    const rows: Array<{ id: string; name_ar: string; code: string | null }> = await this.locations.query(
-      `SELECT id, name_ar, code FROM reps WHERE id = ANY($1::uuid[])`,
-      [unique],
+    const rows: Array<{ id: string; name_ar: string; code: string | null; active: boolean }> =
+      await this.locations.query(
+        `SELECT id, name_ar, code, (is_active AND deleted_at IS NULL) AS active
+           FROM reps WHERE id = ANY($1::uuid[])`,
+        [unique],
+      );
+    return new Map(
+      rows.map((r) => [r.id, { name: r.code ? `${r.name_ar} (${r.code})` : r.name_ar, active: r.active }]),
     );
-    return new Map(rows.map((r) => [r.id, r.code ? `${r.name_ar} (${r.code})` : r.name_ar]));
   }
 
   // ── Internals ───────────────────────────────────────────────────────────

@@ -54,6 +54,8 @@ run('salesmen by area (real DB)', () => {
 
   async function purge() {
     await q(`DELETE FROM customers WHERE customer_number LIKE $1`, [`${P}%`]);
+    await q(`UPDATE locations SET rep_id = NULL WHERE name_ar LIKE $1`, [`${P}%`]);
+    await q(`DELETE FROM reps WHERE code LIKE $1`, [`${P}%`]);
     await q(`DELETE FROM locations WHERE kind = 'AREA' AND name_ar LIKE $1`, [`${P}%`]);
     await q(`DELETE FROM locations WHERE kind = 'GOVERNORATE' AND name_ar LIKE $1`, [`${P}%`]);
   }
@@ -75,7 +77,7 @@ run('salesmen by area (real DB)', () => {
     await lock.connect();
     await lock.query(`SELECT pg_advisory_lock(hashtext('location-tree-tests'))`);
     await purge();
-    const reps = await q(`SELECT id FROM reps WHERE deleted_at IS NULL ORDER BY id LIMIT 2`);
+    const reps = await q(`SELECT id FROM reps WHERE deleted_at IS NULL AND is_active ORDER BY id LIMIT 2`);
     [repA, repB] = reps.map((r: { id: string }) => r.id);
     signals = [];
     tree = new LocationTreeService(
@@ -206,5 +208,39 @@ run('salesmen by area (real DB)', () => {
     // Placed in another area, a customer that follows its area follows it.
     await customers.update(c[1], { locationId: areaN2 }, { canAssignSalesman: true });
     expect(await repOf(c[1])).toEqual({ rep_id: null, rep_source: null });
+  });
+
+  it("hands a deactivated salesman's area customers to the next one up, and back when he returns", async () => {
+    const mk = async (code: string) =>
+      (await q(`INSERT INTO reps (code, name_ar) VALUES ($1, $1) RETURNING id`, [code]))[0].id as string;
+    const up = await mk(`${P}-UP`);
+    const own = await mk(`${P}-OWN`);
+    await tree.setRep(govS, up);
+    await tree.setRep(areaN2, null);
+    await tree.update(areaN2, { parentId: govS });
+    await tree.setRep(areaN2, own);
+    expect(await repOf(c[3])).toEqual({ rep_id: own, rep_source: 'AREA' });
+
+    await q(`UPDATE reps SET is_active = false WHERE id = $1`, [own]);
+    await tree.onRepActiveChanged();
+    expect(await repOf(c[3])).toEqual({ rep_id: up, rep_source: 'AREA' });
+    const n2 = (await tree.list()).items.find((i) => i.id === areaN2)!;
+    expect(n2).toMatchObject({ repId: own, repActive: false, inheritedRepId: up });
+
+    // An inactive salesman cannot be given an area.
+    await expect(tree.setRep(govN, own)).rejects.toThrow(/inactive/);
+
+    await q(`UPDATE reps SET is_active = true WHERE id = $1`, [own]);
+    await tree.onRepActiveChanged();
+    expect(await repOf(c[3])).toEqual({ rep_id: own, rep_source: 'AREA' });
+
+    // Deleted counts as gone too.
+    await q(`UPDATE reps SET deleted_at = now() WHERE id = $1`, [own]);
+    await tree.onRepActiveChanged();
+    expect(await repOf(c[3])).toEqual({ rep_id: up, rep_source: 'AREA' });
+
+    await tree.setRep(areaN2, null);
+    await tree.update(areaN2, { parentId: govN });
+    await tree.setRep(govS, null);
   });
 });

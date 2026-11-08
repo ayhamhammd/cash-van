@@ -179,9 +179,13 @@ For each customer, in TREE mode:
 
 1. **Direct** — `rep_source = 'DIRECT'`: `rep_id` is what the office (or the creating
    salesman) set. An area change never overrides it.
-2. **By area** — otherwise: the salesman of the **nearest node up the path** that has one
-   (area → governorate → country). An area with no salesman inherits its governorate's;
-   a whole governorate can be given to one salesman with a single assignment.
+2. **By area** — otherwise: the salesman of the **nearest node up the path** that has an
+   **active** one (area → governorate → country). An area with no salesman inherits its
+   governorate's; a whole governorate can be given to one salesman with a single
+   assignment. A deactivated or deleted salesman holds no area: his areas' customers go
+   to the next active salesman up, and come back when he is reactivated (re-resolved on
+   `rep.active.changed` from the salesman edit/delete). His DIRECT customers stay his.
+   He cannot be given a place while inactive; the tree shows him with `repActive: false`.
 3. **None** — no node up the path has a salesman: `rep_id = NULL`, `rep_source = NULL`
    (the customer is unassigned, exactly like today).
 
@@ -433,8 +437,8 @@ new app build shows the two levels (governorate → area).
   report.
 - **Q2** Should salesman-by-area also work in FLAT mode (on `customer_areas`)? v1: TREE only.
 - **Q3** Offer eligibility by governorate/area (`locationIds`) next to `regionIds`?
-- **Q4** Should a salesman creating a shop in an area covered by another salesman keep it
-  (DIRECT, today's behaviour) or hand it to the area's salesman?
+- **Q4** (decided 2026-11-08) A salesman creating a shop in an area covered by another
+  salesman **keeps it** — DIRECT, today's behaviour.
 
 ERP follow-ups: **E1** (done) `salesmanCode: null` on `assign-salesmen` clears a salesman; **E2**
 (done) `cityCode` on `PATCH /api/v1/customers/:id`.

@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, ILike, IsNull, Not, Repository } from 'typeorm';
 
@@ -41,6 +42,7 @@ export class RepsService {
     private readonly erpSync: ErpSyncService,
     private readonly settings: SettingsService,
     private readonly users: UsersService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /**
@@ -340,8 +342,12 @@ export class RepsService {
 
     if (fields.userId) await this.assertUserUnlinked(fields.userId, id);
     if (fields.code) await this.assertCodeUnique(fields.code, id);
+    const wasActive = rep.isActive;
     Object.assign(rep, fields);
     const saved = await this.repo.save(rep);
+    // An inactive salesman holds no area: his areas' shops go to the next
+    // salesman up the location tree, and come back when he is reactivated.
+    if (saved.isActive !== wasActive) this.events.emit('rep.active.changed', { repId: id });
 
     // Set/change the salesman's login password on the linked user.
     if (password) {
@@ -388,6 +394,7 @@ export class RepsService {
     if (!result.affected) {
       throw new NotFoundException(`Rep ${id} not found`);
     }
+    this.events.emit('rep.active.changed', { repId: id });
   }
 
   /** Stub — populated by plan 06 (invoices) once revenue data exists. */
