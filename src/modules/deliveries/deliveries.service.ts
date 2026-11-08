@@ -411,7 +411,7 @@ export class DeliveriesService {
     });
   }
 
-  private async stopViews(
+  async stopViews(
     stops: DeliveryStop[],
     opts: { lines?: boolean; audience?: ProofAudience } = {},
   ): Promise<StopView[]> {

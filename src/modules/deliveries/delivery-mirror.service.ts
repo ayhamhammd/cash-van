@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Interval } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
@@ -14,6 +14,7 @@ import {
   type DeliveryStopStatus,
 } from './entities/delivery-stop.entity';
 import { conditionOf } from './delivery-reasons';
+import { NotificationsService } from '../notifications/notifications.service';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import type {
   ErpDeliveryItem,
@@ -40,6 +41,46 @@ export interface ApplyRunResult {
   runChanged: boolean;
   changedStopIds: string[];
   removedStopIds: string[];
+  /** Returns this apply saw the ERP decide (PENDING → APPROVED / REJECTED). */
+  decisions?: ReturnDecision[];
+}
+
+/** A return the ERP has just decided, for the rep's notification. */
+export interface ReturnDecision {
+  stopId: string;
+  invoiceNumber: string | null;
+  status: 'APPROVED' | 'REJECTED';
+  creditNoteNumber: string | null;
+  note: string | null;
+}
+
+/** The rep's notification text for one decision (contract §B, ar/en). */
+export function decisionNotice(d: ReturnDecision): {
+  kind: string;
+  titleAr: string;
+  titleEn: string;
+  bodyAr: string;
+  bodyEn: string;
+} {
+  const inv = d.invoiceNumber ?? '';
+  if (d.status === 'APPROVED') {
+    const cn = d.creditNoteNumber ? ` (إشعار دائن ${d.creditNoteNumber})` : '';
+    const cnEn = d.creditNoteNumber ? ` (credit note ${d.creditNoteNumber})` : '';
+    return {
+      kind: 'delivery.return_approved',
+      titleAr: 'اعتُمد المرتجع',
+      titleEn: 'Return approved',
+      bodyAr: `اعتُمد مرتجع الفاتورة ${inv}${cn}`,
+      bodyEn: `Return for invoice ${inv} approved${cnEn}`,
+    };
+  }
+  return {
+    kind: 'delivery.return_rejected',
+    titleAr: 'رُفض المرتجع',
+    titleEn: 'Return rejected',
+    bodyAr: `رُفض مرتجع الفاتورة ${inv}${d.note ? `: ${d.note}` : ''}`,
+    bodyEn: `Return for invoice ${inv} rejected${d.note ? `: ${d.note}` : ''}`,
+  };
 }
 
 /**
@@ -92,6 +133,15 @@ function date(v: unknown): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/** The ERP's decider: a name, or `{ id, name }`. */
+function decidedBy(v: unknown): string | null {
+  if (v && typeof v === 'object') {
+    const o = v as { name?: unknown; id?: unknown };
+    return str(o.name) ?? str(o.id);
+  }
+  return str(v);
+}
+
 function num(v: unknown): string | null {
   if (v === undefined || v === null || v === '') return null;
   const n = Number(v);
@@ -141,6 +191,8 @@ export class DeliveryMirrorService {
     private readonly erp: DeliveryErpClient,
     @InjectRepository(ErpSyncCursor) private readonly cursors: Repository<ErpSyncCursor>,
     private readonly events: EventEmitter2,
+    // APPENDED: the specs build this service positionally.
+    @Optional() private readonly notifications?: NotificationsService,
   ) {}
 
   /** Every 2 minutes (DELIVERY_PULL_INTERVAL_MS), when ERP sync is on. */
@@ -249,8 +301,35 @@ export class DeliveryMirrorService {
   async applyRun(run: ErpDeliveryRun, opts: { settledRef?: string } = {}): Promise<ApplyRunResult> {
     const erpId = String(run.id);
     const result = await this.dataSource.transaction((em) => this.applyWithin(em, erpId, run, opts));
-    this.signal(result, 'erp.pull');
+    this.signal(result, result.decisions?.length ? 'delivery.return.decided' : 'erp.pull');
+    if (result.decisions?.length) await this.notifyDecisions(result.repId, result.decisions);
     return result;
+  }
+
+  /**
+   * Tell the run's rep that the office decided his return — whether it was
+   * decided from the dashboard or in the ERP's own screen, the pull is where
+   * it is seen, so this is the one place that says it. Best effort.
+   */
+  private async notifyDecisions(repId: string | null, decisions: ReturnDecision[]): Promise<void> {
+    if (!repId || !this.notifications) return;
+    try {
+      const rows: Array<{ user_id: string | null }> = await this.dataSource.query(
+        `SELECT user_id FROM reps WHERE id = $1`,
+        [repId],
+      );
+      const userId = rows[0]?.user_id;
+      if (!userId) return;
+      for (const d of decisions) {
+        await this.notifications.notifyUser(userId, {
+          ...decisionNotice(d),
+          refType: 'delivery_stop',
+          refId: d.stopId,
+        });
+      }
+    } catch (e) {
+      this.logger.warn(`return-decision notification failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   /** Clear an in-flight ref the ERP has answered, wherever it sits. Returns the stop. */
@@ -360,6 +439,7 @@ export class DeliveryMirrorService {
     const byErp = new Map(existing.map((s) => [s.erpId, s]));
     const seen = new Set<string>();
     const changedStopIds: string[] = [];
+    const decisions: ReturnDecision[] = [];
 
     for (const item of run.items ?? []) {
       if (!item || item.id === undefined || item.id === null) continue;
@@ -367,6 +447,7 @@ export class DeliveryMirrorService {
       seen.add(itemId);
       const known = byErp.get(itemId) ?? (await stops.findOne({ where: { erpId: itemId } }));
       const stop = known ?? stops.create({ erpId: itemId, runId });
+      const returnBefore = known?.returnStatus ?? null;
       let changed = !known;
       changed = this.patchStop(stop, runId, item, await this.customerIdFor(em, item)) || changed;
       changed =
@@ -384,6 +465,15 @@ export class DeliveryMirrorService {
         results: item.results ?? null,
       });
       if (changed || linesChanged) changedStopIds.push(saved.id);
+      if (returnBefore === 'PENDING' && (saved.returnStatus === 'APPROVED' || saved.returnStatus === 'REJECTED')) {
+        decisions.push({
+          stopId: saved.id,
+          invoiceNumber: saved.invoiceNumber ?? null,
+          status: saved.returnStatus,
+          creditNoteNumber: saved.creditNoteNumber ?? null,
+          note: saved.returnDecisionNote ?? null,
+        });
+      }
     }
 
     const removedStopIds: string[] = [];
@@ -403,6 +493,7 @@ export class DeliveryMirrorService {
       runChanged,
       changedStopIds,
       removedStopIds,
+      decisions,
     };
   }
 
@@ -440,6 +531,17 @@ export class DeliveryMirrorService {
         jofotaraUuid: str(inv.jofotaraUuid),
         status: STOP_STATUSES.has(rawStatus) ? rawStatus : 'LOADED',
         returnStatus: RETURN_STATUSES.has(rawReturn) ? rawReturn : 'NONE',
+        // The decision and the credit note it issued (phase 3).
+        returnDecidedAt: date(item.returnDecidedAt),
+        returnDecidedBy: decidedBy(item.returnDecidedBy),
+        returnDecisionNote: str(item.returnDecisionNote),
+        creditNoteErpId: str(item.creditNote?.id),
+        creditNoteNumber: str(item.creditNote?.number),
+        creditNoteTotalFils: item.creditNote ? String(toFils(item.creditNote.total)) : null,
+        creditNoteTaxFils: item.creditNote ? String(toFils(item.creditNote.taxTotal)) : null,
+        creditNoteQr: str(item.creditNote?.jofotara?.qrCode),
+        creditNoteJofotaraStatus: str(item.creditNote?.jofotara?.status),
+        creditNoteUuid: str(item.creditNote?.jofotara?.uuid),
         deliveredAt: date(item.deliveredAt),
         signedByName: str(item.signedByName),
         lat: num(item.deliveredLat),
@@ -447,7 +549,7 @@ export class DeliveryMirrorService {
         resultSource: str(item.resultSource),
         resultExternalRef: str(item.resultExternalRef),
       },
-      ['sequence', 'totalFils', 'taxFils', 'paidFils', 'lat', 'lng'],
+      ['sequence', 'totalFils', 'taxFils', 'paidFils', 'lat', 'lng', 'creditNoteTotalFils', 'creditNoteTaxFils'],
     );
   }
 
@@ -487,8 +589,17 @@ export class DeliveryMirrorService {
       seen.add(itemId);
       const known = byItem.get(itemId);
       const line = known ?? repo.create({ stopId, erpInvoiceItemId: itemId });
-      const invoiced = Math.max(0, (Number(l.quantity) || 0) - (Number(l.quantityReturned) || 0));
       const r = results.get(itemId);
+      // "Read when the result arrives": once the stop has a result its invoiced
+      // quantity is frozen. Otherwise the credit note an approval issues, which
+      // raises the line's quantityReturned, would shrink it to what was
+      // delivered and the difference would vanish from every screen.
+      const billed = Math.max(0, Number(l.quantity) || 0);
+      const current = Math.max(0, billed - (Number(l.quantityReturned) || 0));
+      const frozen = ctx.status !== 'LOADED' && known && known.deliveredQty != null ? Number(known.invoicedQty) : null;
+      const invoiced = r && r.invoicedQty != null && Number.isFinite(Number(r.invoicedQty))
+        ? Number(r.invoicedQty)
+        : (frozen ?? current);
       const outcome =
         ctx.status === 'LOADED'
           ? { deliveredQty: null, reasonCode: null, condition: null, note: null, approvedQty: null }
@@ -518,11 +629,13 @@ export class DeliveryMirrorService {
           nameEn: str(l.nameEn),
           unit: str(l.unit),
           invoicedQty: String(invoiced),
+          billedQty: String(billed),
+          lineTotalFils: String(toFils(l.lineTotal)),
           unitPriceFils: String(toFils(l.unitPrice)),
           taxRate: num(l.taxRate),
           ...outcome,
         },
-        ['lineNo', 'invoicedQty', 'unitPriceFils', 'taxRate', 'deliveredQty', 'approvedQty'],
+        ['lineNo', 'invoicedQty', 'billedQty', 'lineTotalFils', 'unitPriceFils', 'taxRate', 'deliveredQty', 'approvedQty'],
       );
       if (!known || diff) {
         await repo.save(line);

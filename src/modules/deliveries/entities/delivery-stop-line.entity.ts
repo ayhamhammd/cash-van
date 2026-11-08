@@ -43,6 +43,14 @@ export class DeliveryStopLine {
   @Column({ name: 'invoiced_qty', type: 'numeric', default: 0 })
   invoicedQty!: string;
 
+  /** The invoice line's billed quantity — what line_total_fils is the price of. */
+  @Column({ name: 'billed_qty', type: 'numeric', nullable: true })
+  billedQty?: string | null;
+
+  /** The invoice line's total, tax included, in fils. */
+  @Column({ name: 'line_total_fils', type: 'bigint', default: 0 })
+  lineTotalFils!: string;
+
   @Column({ name: 'unit_price_fils', type: 'bigint', default: 0 })
   unitPriceFils!: string;
 

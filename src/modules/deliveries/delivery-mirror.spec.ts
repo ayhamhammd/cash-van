@@ -92,14 +92,20 @@ const cursors = {
   create: (o: Record<string, unknown>) => ({ ...o }),
   save: async (o: Record<string, unknown>) => (cursors.row = o),
 };
+const notices: Array<{ userId: string; n: Record<string, unknown> }> = [];
 const svc = new DeliveryMirrorService(
   {
     transaction: async (fn: (m: typeof em) => unknown) => fn(em),
     getRepository: repoFor,
+    query: async (sql: string, params: unknown[]) =>
+      sql.includes('SELECT user_id FROM reps')
+        ? db.reps.filter((r) => r.id === params[0]).map((r) => ({ user_id: `user-of-${r.id}` }))
+        : [],
   } as never,
   erp as never,
   cursors as never,
   { emit: (name: string, p: Record<string, unknown>) => events.push({ name, p }) } as never,
+  { notifyUser: async (userId: string, n: Record<string, unknown>) => void notices.push({ userId, n }) } as never,
 );
 
 const line = (id: string, over: Record<string, unknown> = {}) => ({
@@ -194,6 +200,7 @@ beforeEach(() => {
   db.idmap = [{ erp_id: 'erp-cust-2', local_id: 'ERP-2798694a' }];
   db.proofs = [];
   events.length = 0;
+  notices.length = 0;
   erp.getRun.mockReset();
   erp.listRunsSince.mockReset();
   cursors.row = null;
@@ -387,6 +394,109 @@ describe('delivery mirror — phase 2 results', () => {
     r.items![0].attachments = [{ id: 'att-ours', role: 'PHOTO' }, { id: 'att-erp', role: 'PHOTO' }];
     await svc.applyRun(r);
     expect(stopByErp('item-1').erpOnlyAttachments).toBe(1);
+  });
+});
+
+describe('delivery mirror — phase 3 decisions', () => {
+  const pendingRun = (over: Partial<ErpDeliveryRun> = {}) => {
+    const r = erpRun(over);
+    Object.assign(r.items![0], {
+      status: 'PARTIAL',
+      returnStatus: 'PENDING',
+      results: [{ invoiceItemId: 'ii-1', invoicedQty: 10, deliveredQty: 6, reasonCode: 'DAMAGED', condition: 'DAMAGED', approvedQty: null }],
+    });
+    return r;
+  };
+  const approved = (updatedAt: string) => {
+    const r = pendingRun({ updatedAt });
+    Object.assign(r.items![0], {
+      returnStatus: 'APPROVED',
+      returnDecidedAt: '2026-11-08T09:00:00.000Z',
+      returnDecidedBy: { id: 'u-9', name: 'Office Admin' },
+      returnDecisionNote: 'ok',
+      results: [{ invoiceItemId: 'ii-1', invoicedQty: 10, deliveredQty: 6, reasonCode: 'DAMAGED', condition: 'DAMAGED', approvedQty: 3 }],
+      creditNote: { id: 'cn-1', number: 'CN-0007', total: 3.48, taxTotal: 0.48, jofotara: { status: 'SUBMITTED', qrCode: 'CNQR', uuid: 'cn-uuid' } },
+    });
+    // The credit note raised the line's quantityReturned on the invoice.
+    r.items![0].invoice!.lines = [line('ii-1', { quantityReturned: 3 })];
+    return r;
+  };
+
+  it('mirrors the decision and the credit note, and tells the rep once', async () => {
+    await svc.applyRun(pendingRun());
+    events.length = 0;
+    await svc.applyRun(approved('2026-11-08T09:00:01.000Z'));
+    const s = stopByErp('item-1');
+    expect(s).toMatchObject({
+      returnStatus: 'APPROVED',
+      returnDecidedBy: 'Office Admin',
+      returnDecisionNote: 'ok',
+      creditNoteErpId: 'cn-1',
+      creditNoteNumber: 'CN-0007',
+      creditNoteTotalFils: '3480',
+      creditNoteTaxFils: '480',
+      creditNoteQr: 'CNQR',
+      creditNoteJofotaraStatus: 'SUBMITTED',
+      creditNoteUuid: 'cn-uuid',
+    });
+    expect(s.returnDecidedAt).toEqual(new Date('2026-11-08T09:00:00.000Z'));
+    const l = db.lines.rows.find((x) => x.stopId === s.id && x.erpInvoiceItemId === 'ii-1')!;
+    // Frozen at the result: the credit note's quantityReturned does not shrink it.
+    expect(l).toMatchObject({ approvedQty: '3', invoicedQty: '10', deliveredQty: '6', billedQty: '10', lineTotalFils: '14500' });
+    expect(notices).toEqual([
+      {
+        userId: 'user-of-rep-1',
+        n: expect.objectContaining({
+          kind: 'delivery.return_approved',
+          bodyEn: 'Return for invoice INV-1 approved (credit note CN-0007)',
+          refType: 'delivery_stop',
+          refId: s.id,
+        }),
+      },
+    ]);
+    expect(events[0].p).toMatchObject({ repId: 'rep-1', reason: 'delivery.return.decided' });
+
+    // Seen again by the next pull: no second notification.
+    await svc.applyRun(approved('2026-11-08T09:05:00.000Z'));
+    expect(notices).toHaveLength(1);
+  });
+
+  it('the invoiced quantity is frozen once the stop has a result, even without results[].invoicedQty', async () => {
+    const r1 = pendingRun();
+    r1.items![0].results = [{ invoiceItemId: 'ii-1', deliveredQty: 6, reasonCode: 'DAMAGED' }];
+    await svc.applyRun(r1);
+    const r2 = approved('2026-11-08T09:00:01.000Z');
+    r2.items![0].results = [{ invoiceItemId: 'ii-1', deliveredQty: 6, reasonCode: 'DAMAGED', approvedQty: 4 }];
+    r2.items![0].invoice!.lines = [line('ii-1', { quantityReturned: 4 })];
+    await svc.applyRun(r2);
+    const l = db.lines.rows.find((x) => x.stopId === stopByErp('item-1').id)!;
+    expect(l).toMatchObject({ invoicedQty: '10', deliveredQty: '6', approvedQty: '4' });
+  });
+
+  it('a rejection tells the rep with the office note', async () => {
+    await svc.applyRun(pendingRun());
+    const r = pendingRun({ updatedAt: '2026-11-08T09:00:00.000Z' });
+    Object.assign(r.items![0], { returnStatus: 'REJECTED', returnDecidedBy: 'Finance', returnDecisionNote: 'customer took it' });
+    await svc.applyRun(r);
+    expect(stopByErp('item-1')).toMatchObject({ returnStatus: 'REJECTED', returnDecidedBy: 'Finance', creditNoteNumber: null });
+    expect(notices[0].n).toMatchObject({
+      kind: 'delivery.return_rejected',
+      bodyEn: 'Return for invoice INV-1 rejected: customer took it',
+      bodyAr: 'رُفض مرتجع الفاتورة INV-1: customer took it',
+    });
+  });
+
+  it('a stop first seen already decided notifies nobody', async () => {
+    await svc.applyRun(approved('2026-11-08T09:00:01.000Z'));
+    expect(stopByErp('item-1').returnStatus).toBe('APPROVED');
+    expect(notices).toEqual([]);
+  });
+
+  it('a decision on a run with no rep is mirrored and notifies nobody', async () => {
+    await svc.applyRun(pendingRun({ driver: { salesmanCode: 'NOBODY' } }));
+    await svc.applyRun({ ...approved('2026-11-08T09:00:01.000Z'), driver: { salesmanCode: 'NOBODY' } });
+    expect(stopByErp('item-1').returnStatus).toBe('APPROVED');
+    expect(notices).toEqual([]);
   });
 });
 

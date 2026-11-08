@@ -346,3 +346,90 @@ export class SyncDeliveryDto {
   @MaxLength(1000)
   note?: string;
 }
+
+// ── delivery returns (phase 3) ───────────────────────────────────────────────
+
+export class ListReturnsQuery {
+  @ApiPropertyOptional({ enum: ['PENDING', 'DECIDED', 'ALL'], default: 'PENDING' })
+  @IsOptional()
+  @IsIn(['PENDING', 'DECIDED', 'ALL'])
+  status?: 'PENDING' | 'DECIDED' | 'ALL';
+
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  repId?: string;
+
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  customerId?: string;
+
+  @ApiPropertyOptional({ example: '2026-11-01', description: 'Delivered on or after (company time).' })
+  @IsOptional()
+  @Matches(YMD, { message: 'from must be YYYY-MM-DD' })
+  from?: string;
+
+  @ApiPropertyOptional({ example: '2026-11-08' })
+  @IsOptional()
+  @Matches(YMD, { message: 'to must be YYYY-MM-DD' })
+  to?: string;
+
+  @ApiPropertyOptional({ default: 1, minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @ApiPropertyOptional({ default: 50, minimum: 1, maximum: 200 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  pageSize?: number;
+}
+
+export class ApproveReturnLineDto {
+  @ApiProperty({ description: 'Line.erpInvoiceItemId' })
+  @IsString()
+  @Length(1, 100)
+  erpInvoiceItemId!: string;
+
+  @ApiProperty({ minimum: 0, description: '0 … invoiced − delivered; 0 = this line is not returned.' })
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0)
+  qty!: number;
+
+  @ApiProperty({ enum: ['GOOD', 'DAMAGED'] })
+  @IsIn(['GOOD', 'DAMAGED'])
+  condition!: 'GOOD' | 'DAMAGED';
+}
+
+export class ApproveReturnDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  note?: string;
+
+  @ApiPropertyOptional({
+    type: [ApproveReturnLineDto],
+    description: 'Edited quantities and conditions; lines left out return invoiced − delivered as recorded.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => ApproveReturnLineDto)
+  lines?: ApproveReturnLineDto[];
+}
+
+export class RejectReturnDto {
+  @ApiProperty({ description: 'Why: the rep and the customer are told.' })
+  @IsString()
+  @Matches(/\S/, { message: 'note is required' })
+  @MaxLength(1000)
+  note!: string;
+}

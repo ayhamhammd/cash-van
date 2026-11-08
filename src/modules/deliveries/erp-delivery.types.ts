@@ -68,8 +68,22 @@ export interface ErpAttachmentRef {
   createdAt?: string | null;
 }
 
+/** The credit note an approved return issued (phase 3). Money in major units. */
+export interface ErpCreditNote {
+  id?: string | null;
+  number?: string | null;
+  total?: ErpMoney;
+  taxTotal?: ErpMoney;
+  jofotara?: { status?: string | null; qrCode?: string | null; uuid?: string | null } | null;
+}
+
 export interface ErpDeliveryItem {
   id: string;
+  /** Who decided the return: a name, or `{ id, name }`. */
+  returnDecidedBy?: string | { id?: string | null; name?: string | null } | null;
+  returnDecidedAt?: string | null;
+  returnDecisionNote?: string | null;
+  creditNote?: ErpCreditNote | null;
   /** NONE | PENDING | APPROVED | REJECTED (phase 2). */
   returnStatus?: string | null;
   results?: ErpLineResult[] | null;
@@ -112,6 +126,18 @@ export function attachmentIdOf(body: unknown): string | null {
   if (!top) return null;
   const d = obj(top.data) ?? top;
   return typeof d.id === 'string' || typeof d.id === 'number' ? String(d.id) : null;
+}
+
+/** `POST delivery-returns/{itemId}/approve|reject` answer: `{ data: { item, creditNote? } }`. */
+export function unwrapDecision(body: unknown): { item: ErpDeliveryItem | null; creditNote: ErpCreditNote | null } {
+  const top = obj(body);
+  const d = (top && obj(top.data)) ?? top;
+  const item = d ? obj(d.item) : null;
+  const cn = d ? obj(d.creditNote) : null;
+  return {
+    item: item && item.id != null ? ({ ...item, id: String(item.id) } as unknown as ErpDeliveryItem) : null,
+    creditNote: (cn as ErpCreditNote | null) ?? ((item?.creditNote as ErpCreditNote | null) ?? null),
+  };
 }
 
 export interface ErpVehicle {

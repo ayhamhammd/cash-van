@@ -30,6 +30,7 @@ import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import { DeliveryProof } from './entities/delivery-proof.entity';
 import { DeliveryProofsService } from './delivery-proofs.service';
+import { DeliveryReturnsService } from './delivery-returns.service';
 import { StorageService } from '../../common/storage/storage.service';
 import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
@@ -72,7 +73,10 @@ run('delivery rep phase 1 (real DB)', () => {
     patchRun: jest.fn(),
     closeRun: jest.fn(),
     vehicles: jest.fn(),
+    approveReturn: jest.fn(),
+    rejectReturn: jest.fn(),
   };
+  const repNotices: Array<{ userId: string; kind: string; bodyEn: string; refId: string }> = [];
   const settings = { locationMode: async () => mode };
 
   const item = (id: string, inv: string, customerCode: string, over: Partial<ErpDeliveryItem> = {}): ErpDeliveryItem => ({
@@ -123,6 +127,7 @@ run('delivery rep phase 1 (real DB)', () => {
     await q(`DELETE FROM locations WHERE name_ar LIKE $1 AND kind = 'GOVERNORATE'`, [`${P}%`]);
     await q(`DELETE FROM locations WHERE name_ar LIKE $1 AND kind = 'COUNTRY'`, [`${P}%`]);
     await q(`DELETE FROM reps WHERE code LIKE $1`, [`${P}%`]);
+    await q(`DELETE FROM users WHERE user_number LIKE $1`, [`${P}%`]);
     await q(`DELETE FROM erp_sync_cursor WHERE entity = 'delivery_runs'`);
   }
 
@@ -195,6 +200,10 @@ run('delivery rep phase 1 (real DB)', () => {
       erp as never,
       ds.getRepository(ErpSyncCursor),
       { emit: (name: string, p: Record<string, unknown>) => events.push({ name, ...p }) } as never,
+      {
+        notifyUser: async (userId: string, n: { kind: string; bodyEn: string; refId: string }) =>
+          void repNotices.push({ userId, kind: n.kind, bodyEn: n.bodyEn, refId: n.refId }),
+      } as never,
     );
     deliveries = new DeliveriesService(
       ds,
@@ -583,5 +592,157 @@ run('delivery rep phase 1 (real DB)', () => {
     erp.getRun.mockResolvedValueOnce(null);
     await mirror.pullRun(`${P}-run-p2`);
     expect(await q(`SELECT 1 FROM delivery_proofs WHERE stop_id = $1`, [s7])).toEqual([]);
+  });
+
+  it('phase 3: the queue from the mirror, approve and reject through the ERP, the rep told once', async () => {
+    // The delivery rep has a login, so he can be told.
+    const [{ id: userD }] = await q<{ id: string }>(
+      `INSERT INTO users (user_number, name, password_hash, user_type, role)
+       VALUES ($1, 'Driver D', 'x', 'SALES', 'viewer') RETURNING id`,
+      [`${P}UD`],
+    );
+    const [{ id: office }] = await q<{ id: string }>(
+      `INSERT INTO users (user_number, name, password_hash, user_type, role)
+       VALUES ($1, 'Office Admin', 'x', 'ADMIN', 'admin') RETURNING id`,
+      [`${P}UA`],
+    );
+    await q(`UPDATE reps SET user_id = $1 WHERE id = $2`, [userD, repD]);
+    const returns = new DeliveryReturnsService(
+      ds,
+      ds.getRepository(DeliveryStop),
+      ds.getRepository(DeliveryRun),
+      ds.getRepository(DeliveryStopLine),
+      ds.getRepository(Rep),
+      deliveries,
+      erp as never,
+      mirror,
+    );
+
+    const lines = [
+      { id: `${P}-line-9-1`, lineNo: 1, skuCode: 'W1', nameEn: 'Water', unit: 'CTN', quantity: 10, quantityReturned: 0, unitPrice: 1, taxRate: 16, lineTotal: 11.6 },
+      { id: `${P}-line-9-2`, lineNo: 2, skuCode: 'J1', nameEn: 'Juice', unit: 'CTN', quantity: 2, quantityReturned: 0, unitPrice: 2, taxRate: 16, lineTotal: 4.64 },
+    ];
+    const run3 = (updatedAt: string, s9: Partial<ErpDeliveryItem>, s10: Partial<ErpDeliveryItem>) => {
+      const r = erpRun({
+        id: `${P}-run-p3`,
+        runNumber: `${P}-DR-P3`,
+        updatedAt,
+        items: [item('s9', '9', `${P}C1`, s9), item('s10', '10', `${P}C2`, s10)],
+      });
+      r.items![0].invoice!.lines = lines;
+      r.items![1].invoice!.lines = [{ ...lines[0], id: `${P}-line-10-1` }];
+      return r;
+    };
+    const pending9 = {
+      status: 'PARTIAL',
+      returnStatus: 'PENDING',
+      deliveredAt: '2026-11-08T07:00:00.000Z',
+      results: [{ invoiceItemId: `${P}-line-9-1`, invoicedQty: 10, deliveredQty: 6, reasonCode: 'DAMAGED', condition: 'DAMAGED' }],
+    };
+    const pending10 = { status: 'RETURNED', returnStatus: 'PENDING', results: [] };
+    await mirror.applyRun(run3('2026-11-08T08:00:00.000Z', pending9, pending10));
+    const s9 = await stopId('s9');
+    const s10 = await stopId('s10');
+
+    // The queue and the badge.
+    const before = await returns.count();
+    expect(before.pending).toBeGreaterThanOrEqual(2);
+    const queue = await returns.list({ status: 'PENDING', repId: repD });
+    const r9 = queue.items.find((i) => i.id === s9)!;
+    expect(r9).toMatchObject({
+      returnStatus: 'PENDING',
+      run: { runNumber: `${P}-DR-P3`, rep: { id: repD } },
+      // 4 of 10 waters back, at 11.600 for 10 (tax included).
+      returnValueFils: 4640,
+      creditNote: null,
+      decidedAt: null,
+    });
+    // The whole refusal: everything back.
+    expect(queue.items.find((i) => i.id === s10)?.returnValueFils).toBe(11600);
+    expect((await returns.list({ status: 'DECIDED', repId: repD })).items.map((i) => i.id)).not.toContain(s9);
+
+    // Approve: the ERP is called with the office user and the key; the run is re-read.
+    erp.approveReturn.mockResolvedValueOnce({
+      item: { id: `${P}-s9` },
+      creditNote: { id: 'cn-9', number: `${P}-CN-9`, total: 3.48, taxTotal: 0.48, jofotara: { status: 'SUBMITTED', qrCode: 'CNQR' } },
+    });
+    const approved9 = {
+      ...pending9,
+      returnStatus: 'APPROVED',
+      returnDecidedAt: '2026-11-08T09:00:00.000Z',
+      returnDecidedBy: { id: office, name: 'Office Admin' },
+      returnDecisionNote: 'three damaged',
+      results: [{ ...pending9.results[0], approvedQty: 3 }],
+      creditNote: { id: 'cn-9', number: `${P}-CN-9`, total: 3.48, taxTotal: 0.48, jofotara: { status: 'SUBMITTED', qrCode: 'CNQR', uuid: 'u9' } },
+    };
+    const afterApprove = run3('2026-11-08T09:00:00.000Z', approved9, pending10);
+    // The credit note raised quantityReturned on the invoice line.
+    afterApprove.items![0].invoice!.lines = [{ ...lines[0], quantityReturned: 3 }, lines[1]];
+    erp.getRun.mockResolvedValueOnce(afterApprove);
+    const out = await returns.approve(
+      s9,
+      { note: 'three damaged', lines: [{ erpInvoiceItemId: `${P}-line-9-1`, qty: 3, condition: 'DAMAGED' }] },
+      { sub: office } as never,
+      'click-1',
+    );
+    expect(erp.approveReturn).toHaveBeenCalledWith(
+      `${P}-s9`,
+      {
+        approvedBy: { id: office, name: 'Office Admin' },
+        note: 'three damaged',
+        lines: [{ invoiceItemId: `${P}-line-9-1`, qty: 3, condition: 'DAMAGED' }],
+      },
+      'click-1',
+    );
+    expect(erp.getRun).toHaveBeenCalledWith(`${P}-run-p3`);
+    expect(out.creditNote).toEqual({ number: `${P}-CN-9`, totalFils: 3480, jofotaraStatus: 'SUBMITTED', qr: 'CNQR' });
+    expect(out.stop).toMatchObject({
+      returnStatus: 'APPROVED',
+      returnDecisionNote: 'three damaged',
+      creditNoteNumber: `${P}-CN-9`,
+      creditNoteQr: 'CNQR',
+      creditNoteTotalFils: 3480,
+      returnDecidedBy: 'Office Admin',
+    });
+    // Frozen at the result: still 10 invoiced, 6 delivered, 3 approved.
+    expect(out.stop.lines[0]).toMatchObject({ invoicedQty: 10, deliveredQty: 6, approvedQty: 3 });
+    expect(repNotices).toEqual([
+      { userId: userD, kind: 'delivery.return_approved', bodyEn: `Return for invoice ${P}-INV-9 approved (credit note ${P}-CN-9)`, refId: s9 },
+    ]);
+    expect(events.some((e) => e.name === 'delivery.changed' && e.repId === repD && e.reason === 'delivery.return.decided')).toBe(true);
+
+    const decided = await returns.list({ status: 'DECIDED', repId: repD });
+    expect(decided.items.find((i) => i.id === s9)).toMatchObject({
+      decidedBy: 'Office Admin',
+      decisionNote: 'three damaged',
+      returnValueFils: 3480,
+      creditNote: { number: `${P}-CN-9`, totalFils: 3480 },
+    });
+    expect((await returns.count()).pending).toBe(before.pending - 1);
+
+    // The phone sees the decision on its own stop.
+    const phone = await deliveries.appStop(deliveryRep(), s9);
+    expect(phone).toMatchObject({ returnStatus: 'APPROVED', creditNoteNumber: `${P}-CN-9`, creditNoteTotalFils: 3480 });
+
+    // Reject the refusal; the pull that carries it tells the rep with the note.
+    erp.rejectReturn.mockResolvedValueOnce({ item: { id: `${P}-s10` } });
+    erp.getRun.mockResolvedValueOnce(
+      run3('2026-11-08T09:30:00.000Z', approved9, {
+        ...pending10,
+        returnStatus: 'REJECTED',
+        returnDecidedBy: 'Office Admin',
+        returnDecisionNote: 'customer kept the goods',
+      }),
+    );
+    const rej = await returns.reject(s10, { note: 'customer kept the goods' }, { sub: office } as never, 'click-2');
+    expect(rej.stop).toMatchObject({ returnStatus: 'REJECTED', returnDecisionNote: 'customer kept the goods', creditNoteNumber: null });
+    expect(repNotices.map((n) => n.kind)).toEqual(['delivery.return_approved', 'delivery.return_rejected']);
+    expect(repNotices[1].bodyEn).toBe(`Return for invoice ${P}-INV-10 rejected: customer kept the goods`);
+
+    // A later pull of the same decisions tells nobody again.
+    await mirror.applyRun(
+      run3('2026-11-08T10:00:00.000Z', approved9, { ...pending10, returnStatus: 'REJECTED', returnDecisionNote: 'customer kept the goods' }),
+    );
+    expect(repNotices).toHaveLength(2);
   });
 });

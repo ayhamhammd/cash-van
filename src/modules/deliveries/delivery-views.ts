@@ -36,6 +36,8 @@ export interface LineView {
   /** GOOD | DAMAGED — from the reason. */
   condition: string | null;
   note: string | null;
+  /** What the office accepted back on approval (phase 3); null until then. */
+  approvedQty: number | null;
 }
 
 export interface ProofView {
@@ -93,7 +95,13 @@ export interface StopView {
   lat: number | null;
   lng: number | null;
   returnStatus: DeliveryStop['returnStatus'];
+  returnDecidedAt: string | null;
+  returnDecidedBy: string | null;
+  returnDecisionNote: string | null;
   creditNoteNumber: string | null;
+  creditNoteQr: string | null;
+  /** So the phone can take the credit off what is left to collect before the invoice mirror catches up. */
+  creditNoteTotalFils: number | null;
   collectedFils: number;
   lines: LineView[];
   proofs: ProofView[];
@@ -157,6 +165,7 @@ export function lineView(l: DeliveryStopLine, sending = false): LineView {
     reasonCode,
     condition: sending ? conditionOf(reasonCode) : (l.condition ?? conditionOf(reasonCode)),
     note: sending ? (l.localNote ?? null) : (l.note ?? null),
+    approvedQty: nOrNull(l.approvedQty),
   };
 }
 
@@ -221,7 +230,12 @@ export function stopView(
     // the ERP will say PENDING too once it has the result.
     returnStatus:
       sending && s.returnStatus === 'NONE' && lineViews.some(lineDiffers) ? 'PENDING' : s.returnStatus,
+    returnDecidedAt: iso(s.returnDecidedAt),
+    returnDecidedBy: s.returnDecidedBy ?? null,
+    returnDecisionNote: s.returnDecisionNote ?? null,
     creditNoteNumber: s.creditNoteNumber ?? null,
+    creditNoteQr: s.creditNoteQr ?? null,
+    creditNoteTotalFils: nOrNull(s.creditNoteTotalFils),
     collectedFils,
     lines: lineViews,
     proofs: [...proofs]
@@ -285,5 +299,63 @@ export function runSummaryView(
     counts,
     collectedFils: stops.reduce((sum, s) => sum + s.collectedFils, 0),
     returns,
+  };
+}
+
+/** One stop in the office's delivery-returns queue (phase-3 contract §B). */
+export interface ReturnRequestView extends StopView {
+  run: { id: string; runNumber: string | null; runDate: string | null; rep: RepRef | null };
+  /** What comes back at the invoice's own prices, tax included. */
+  returnValueFils: number;
+  decidedAt: string | null;
+  decidedBy: string | null;
+  decisionNote: string | null;
+  creditNote: { number: string | null; totalFils: number; jofotaraStatus: string | null; qr: string | null } | null;
+}
+
+/**
+ * The value of what comes back, at the invoice's own prices with tax: each
+ * line's total prorated over its billed quantity. An approved return is valued
+ * at what was approved; anything else at invoiced − delivered.
+ */
+export function returnValueFils(
+  stop: Pick<DeliveryStop, 'returnStatus'>,
+  lines: Array<Pick<DeliveryStopLine, 'invoicedQty' | 'deliveredQty' | 'approvedQty' | 'billedQty' | 'lineTotalFils' | 'unitPriceFils' | 'taxRate'>>,
+): number {
+  let total = 0;
+  for (const l of lines) {
+    const short = Math.max(0, n(l.invoicedQty) - n(l.deliveredQty ?? l.invoicedQty));
+    const qty = stop.returnStatus === 'APPROVED' && l.approvedQty != null ? n(l.approvedQty) : short;
+    if (qty <= 0) continue;
+    const billed = n(l.billedQty);
+    total +=
+      billed > 0 && n(l.lineTotalFils) > 0
+        ? (n(l.lineTotalFils) * qty) / billed
+        : n(l.unitPriceFils) * qty * (1 + n(l.taxRate) / 100);
+  }
+  return Math.round(total);
+}
+
+export function returnRequestView(
+  stop: DeliveryStop,
+  view: StopView,
+  lines: DeliveryStopLine[],
+  run: { id: string; runNumber: string | null; runDate: string | null; rep: RepRef | null },
+): ReturnRequestView {
+  return {
+    ...view,
+    run,
+    returnValueFils: returnValueFils(stop, lines),
+    decidedAt: iso(stop.returnDecidedAt),
+    decidedBy: stop.returnDecidedBy ?? null,
+    decisionNote: stop.returnDecisionNote ?? null,
+    creditNote: stop.creditNoteNumber || stop.creditNoteErpId
+      ? {
+          number: stop.creditNoteNumber ?? null,
+          totalFils: n(stop.creditNoteTotalFils),
+          jofotaraStatus: stop.creditNoteJofotaraStatus ?? null,
+          qr: stop.creditNoteQr ?? null,
+        }
+      : null,
   };
 }

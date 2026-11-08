@@ -124,6 +124,26 @@ export class DeliveryStop {
   @Column({ name: 'credit_note_total_fils', type: 'bigint', nullable: true })
   creditNoteTotalFils?: string | null;
 
+  /** When the ERP decided the return (approve or reject). */
+  @Column({ name: 'return_decided_at', type: 'timestamptz', nullable: true })
+  returnDecidedAt?: Date | null;
+
+  /** Who decided it, as the ERP recorded them (a name). */
+  @Column({ name: 'return_decided_by', type: 'text', nullable: true })
+  returnDecidedBy?: string | null;
+
+  @Column({ name: 'credit_note_erp_id', type: 'text', nullable: true })
+  creditNoteErpId?: string | null;
+
+  @Column({ name: 'credit_note_tax_fils', type: 'bigint', nullable: true })
+  creditNoteTaxFils?: string | null;
+
+  @Column({ name: 'credit_note_jofotara_status', type: 'text', nullable: true })
+  creditNoteJofotaraStatus?: string | null;
+
+  @Column({ name: 'credit_note_uuid', type: 'text', nullable: true })
+  creditNoteUuid?: string | null;
+
   /** ERP attachments on the item that are not one of our proofs (counted, not mirrored). */
   @Column({ name: 'erp_only_attachments', type: 'integer', default: 0 })
   erpOnlyAttachments!: number;

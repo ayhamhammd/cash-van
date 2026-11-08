@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -19,13 +20,27 @@ import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swa
 import { RequirePermissionKeys } from '../../common/decorators/permissions.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import {
+  PERM_DELIVERIES_APPROVE_RETURN,
   PERM_DELIVERIES_MANAGE,
   PERM_DELIVERIES_VIEW,
 } from '../../common/constants/permissions';
+import {
+  CurrentUser,
+  type AuthenticatedUser,
+} from '../../common/decorators/current-user.decorator';
+import { DeliveryReturnsService } from './delivery-returns.service';
 import { DeliveriesService } from './deliveries.service';
 import { streamProof } from './deliveries-app.controller';
 import { DeliveryProofsService } from './delivery-proofs.service';
-import { CreateRunDto, ListRunsQuery, LoadableInvoicesQuery, PatchRunDto } from './dto/deliveries.dto';
+import {
+  ApproveReturnDto,
+  CreateRunDto,
+  ListReturnsQuery,
+  ListRunsQuery,
+  LoadableInvoicesQuery,
+  PatchRunDto,
+  RejectReturnDto,
+} from './dto/deliveries.dto';
 
 /**
  * Delivery runs, for the office (docs/SPEC-delivery-rep.md §6.2).
@@ -43,7 +58,60 @@ export class DeliveriesController {
   constructor(
     private readonly deliveries: DeliveriesService,
     private readonly proofs: DeliveryProofsService,
+    private readonly returns: DeliveryReturnsService,
   ) {}
+
+  // ── delivery returns (phase 3) ──────────────────────────────────────────
+
+  @Get('returns')
+  @RequirePermissionKeys(PERM_DELIVERIES_VIEW)
+  @ApiOperation({ summary: 'The delivery-returns queue (PENDING by default, DECIDED, ALL)' })
+  @ApiOkResponse({ description: '{ items: ReturnRequest[], total }' })
+  listReturns(@Query() q: ListReturnsQuery) {
+    return this.returns.list(q);
+  }
+
+  @Get('returns/count')
+  @RequirePermissionKeys(PERM_DELIVERIES_VIEW)
+  @ApiOperation({ summary: 'Pending delivery returns, for the badge' })
+  @ApiOkResponse({ description: '{ pending }' })
+  countReturns() {
+    return this.returns.count();
+  }
+
+  @Post('returns/:stopId/approve')
+  @RequirePermissionKeys(PERM_DELIVERIES_APPROVE_RETURN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Approve a stop's return on the ERP; it issues the credit note",
+    description:
+      'Send an Idempotency-Key header per click (passed to the ERP). ERP refusals pass through ' +
+      'with their code: 409 RETURN_ALREADY_DECIDED, 422 NOTHING_TO_RETURN / QTY_OUT_OF_RANGE / ' +
+      'NO_DAMAGED_WAREHOUSE. 503 ERP_UNAVAILABLE.',
+  })
+  @ApiOkResponse({ description: '{ stop: Stop, creditNote: { number, totalFils, jofotaraStatus, qr } | null }' })
+  approveReturn(
+    @Param('stopId', ParseUUIDPipe) stopId: string,
+    @Body() dto: ApproveReturnDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.returns.approve(stopId, dto, user, idempotencyKey);
+  }
+
+  @Post('returns/:stopId/reject')
+  @RequirePermissionKeys(PERM_DELIVERIES_APPROVE_RETURN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Reject a stop's return on the ERP (note required)" })
+  @ApiOkResponse({ description: '{ stop: Stop }' })
+  rejectReturn(
+    @Param('stopId', ParseUUIDPipe) stopId: string,
+    @Body() dto: RejectReturnDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.returns.reject(stopId, dto, user, idempotencyKey);
+  }
 
   @Get('runs')
   @RequirePermissionKeys(PERM_DELIVERIES_VIEW)

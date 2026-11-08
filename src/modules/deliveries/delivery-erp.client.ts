@@ -7,8 +7,11 @@ import {
   erpErrorMessage,
   erpRefusals,
   erpWarnings,
+  unwrapDecision,
   unwrapList,
   unwrapRun,
+  type ErpCreditNote,
+  type ErpDeliveryItem,
   type ErpDeliveryRun,
   type ErpLoadWarning,
   type ErpVehicle,
@@ -146,6 +149,45 @@ export class DeliveryErpClient {
     const res = await this.call('POST', `delivery-runs/${encodeURIComponent(erpId)}/close`, {});
     this.assertOk(res);
     return unwrapRun(res.data);
+  }
+
+  /**
+   * Approve a stop's return: the ERP issues the credit note (stock, journal,
+   * JoFotara) through the sales-returns path. Idempotent on `idempotencyKey`,
+   * which the dashboard mints per click.
+   */
+  async approveReturn(
+    erpItemId: string,
+    body: {
+      approvedBy: { id: string; name: string };
+      note?: string;
+      lines?: Array<{ invoiceItemId: string; qty: number; condition: 'GOOD' | 'DAMAGED' }>;
+    },
+    idempotencyKey: string,
+  ): Promise<{ item: ErpDeliveryItem | null; creditNote: ErpCreditNote | null }> {
+    const res = await this.call(
+      'POST',
+      `delivery-returns/${encodeURIComponent(erpItemId)}/approve`,
+      body,
+      idempotencyKey,
+    );
+    this.assertOk(res);
+    return unwrapDecision(res.data);
+  }
+
+  async rejectReturn(
+    erpItemId: string,
+    body: { rejectedBy: { id: string; name: string }; note: string },
+    idempotencyKey: string,
+  ): Promise<{ item: ErpDeliveryItem | null }> {
+    const res = await this.call(
+      'POST',
+      `delivery-returns/${encodeURIComponent(erpItemId)}/reject`,
+      body,
+      idempotencyKey,
+    );
+    this.assertOk(res);
+    return { item: unwrapDecision(res.data).item };
   }
 
   async vehicles(): Promise<ErpVehicle[]> {

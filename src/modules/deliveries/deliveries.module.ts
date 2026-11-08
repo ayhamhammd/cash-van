@@ -17,12 +17,14 @@ import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import { DeliveryProof } from './entities/delivery-proof.entity';
 import { DeliveryProofsService } from './delivery-proofs.service';
+import { DeliveryReturnsService } from './delivery-returns.service';
 import { NotificationsModule } from '../notifications/notifications.module';
 
 /**
  * Delivery & collection representative (docs/SPEC-delivery-rep.md): the mirror
  * of the ERP's delivery runs, the office's run screens, the delivery rep's phone
- * routes, his results line by line and his proofs (phases 1–2).
+ * routes, his results line by line and his proofs, and the office's return
+ * approvals through the ERP (phases 1–3).
  */
 @Module({
   imports: [
@@ -45,6 +47,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     DeliveriesService,
     DeliveryIntakeService,
     DeliveryProofsService,
+    DeliveryReturnsService,
   ],
   exports: [DeliveriesService, DeliveryMirrorService],
 })
