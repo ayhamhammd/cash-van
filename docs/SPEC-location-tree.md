@@ -371,13 +371,15 @@ new app build shows the two levels (governorate → area).
   `{assignments:[{customerCode, salesmanCode}]}` in calls of 50 — the ERP names at most
   50 refused rows, so every refusal lands on its own customer and retries there. A
   customer not yet in the ERP waits; a salesman without a code is dead-lettered with
-  that reason. A customer moved to *no* salesman cannot be sent: it is dead-lettered
-  ("the ERP cannot clear a salesman yet") until the ERP has an "unassign" (follow-up
-  E1). The ERP pull that sets a salesman *from* the ERP does not emit the event.
-- **Governorate code** — the ERP's customer PATCH accepts `address` but **not**
-  `cityCode` (`ERP src/app/api/v1/customers/[id]/route.ts`). Sending `JO-xx` to the ERP
-  needs an ERP change (follow-up E2). Until then `city_code` is filled on the VanFlow
-  side only, for VanFlow's own JoFotara filings.
+  that reason. A customer moved to *no* salesman is sent as `salesmanCode: null`,
+  which clears it (E1, built — the ERP counts these as `cleared`). Clears go in calls
+  of their own, so an ERP from before E1 refuses only them, dead-lettered with "update
+  the ERP, then retry". The ERP pull that sets a salesman *from* the ERP does not emit
+  the event.
+- **Governorate code** (E2, built) — the ERP's customer PATCH now takes `cityCode`
+  (ISO 3166-2, checked for shape, null clears). VanFlow sends it on the same
+  `CUSTOMER_AREA` PATCH as the address, only when well-formed; a change of the code
+  alone re-sends that row. An ERP from before E2 ignores the field.
 
 ---
 
@@ -419,7 +421,7 @@ new app build shows the two levels (governorate → area).
 |---|---|---|
 | 1 | Table, CRUD, seed, import, `location_mode` (FLAT default), customer `locationId` + list fields, picker endpoint, old-app compatibility | Yes — nothing changes until an admin switches |
 | 2 | Salesman by area: `locations.rep_id`, `rep_source`, resolver, `PUT /locations/:id/rep`, rep-source reset, mode-switch recompute | Yes |
-| 3 | ERP: label in `address`; `CUSTOMER_SALESMAN` outbox — **built**; only "no salesman" waits on ERP E1 | Yes |
+| 3 | ERP: label in `address`; `CUSTOMER_SALESMAN` outbox incl. clearing (E1) — **built** | Yes |
 | 4 | Reports: "Sales by governorate / area" (group `c.location_id` up the path) | Later |
 
 ---
@@ -434,5 +436,5 @@ new app build shows the two levels (governorate → area).
 - **Q4** Should a salesman creating a shop in an area covered by another salesman keep it
   (DIRECT, today's behaviour) or hand it to the area's salesman?
 
-ERP follow-ups: **E1** an "unassign salesman" path for `assign-salesmen`; **E2**
-`cityCode` on `PATCH /api/v1/customers/:id`.
+ERP follow-ups: **E1** (done) `salesmanCode: null` on `assign-salesmen` clears a salesman; **E2**
+(done) `cityCode` on `PATCH /api/v1/customers/:id`.

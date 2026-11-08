@@ -18,11 +18,11 @@ describe('ErpOutboxService — a customer’s salesman reaches the ERP', () => {
 
   function makeSvc(opts: {
     found: Found[];
-    reply?: (body: { assignments: Array<{ customerCode: string; salesmanCode: string }> }) => unknown;
+    reply?: (body: { assignments: Array<{ customerCode: string; salesmanCode: string | null }> }) => unknown;
     freshUpdatedAt?: Date;
   }) {
     const svc = Object.create(ErpOutboxService.prototype) as Record<string, unknown>;
-    const posts: Array<{ path: string; body: { assignments: Array<{ customerCode: string; salesmanCode: string }> } }> = [];
+    const posts: Array<{ path: string; body: { assignments: Array<{ customerCode: string; salesmanCode: string | null }> } }> = [];
     svc.logger = { log: () => undefined, warn: () => undefined };
     svc.outbox = {
       save: async (r: ErpOutbox) => r,
@@ -30,7 +30,7 @@ describe('ErpOutboxService — a customer’s salesman reaches the ERP', () => {
       findOne: async () => ({ updatedAt: opts.freshUpdatedAt ?? new Date(1000) }),
     };
     svc.erp = {
-      post: async (path: string, body: { assignments: Array<{ customerCode: string; salesmanCode: string }> }) => {
+      post: async (path: string, body: { assignments: Array<{ customerCode: string; salesmanCode: string | null }> }) => {
         posts.push({ path, body });
         return opts.reply
           ? opts.reply(body)
@@ -128,13 +128,30 @@ describe('ErpOutboxService — a customer’s salesman reaches the ERP', () => {
     expect(r.status).toBe('pending');
   });
 
-  it('dead-letters a customer left with no salesman — the ERP cannot clear one yet', async () => {
-    const { svc, posts } = makeSvc({ found: [mapped('C1', null)] });
-    const r = row('C1');
-    await svc.pushSalesmen([r]);
-    expect(posts).toHaveLength(0);
-    expect(r.status).toBe('dead_letter');
-    expect(r.error).toContain('cannot clear');
+  it('clears the salesman in the ERP when the customer has none, in a call of its own', async () => {
+    const { svc, posts } = makeSvc({ found: [mapped('C1', null), mapped('C2', '204')] });
+    const [a, b] = [row('C1'), row('C2')];
+    await svc.pushSalesmen([a, b]);
+    expect(posts.map((p) => p.body.assignments)).toEqual([
+      [{ customerCode: 'C2', salesmanCode: '204' }],
+      [{ customerCode: 'C1', salesmanCode: null }],
+    ]);
+    expect([a.status, b.status]).toEqual(['posted', 'posted']);
+  });
+
+  it('an ERP too old to clear refuses only the clears, which say to update it', async () => {
+    const { svc } = makeSvc({
+      found: [mapped('C1', null), mapped('C2', '204')],
+      reply: (body) =>
+        body.assignments.some((x) => x.salesmanCode === null)
+          ? { ok: false, status: 400, data: null, error: 'Validation failed.' }
+          : { ok: true, status: 200, data: { success: true, data: { failed: 0, problems: [] } } },
+    });
+    const [a, b] = [row('C1'), row('C2')];
+    await svc.pushSalesmen([a, b]);
+    expect(b.status).toBe('posted');
+    expect(a.status).toBe('dead_letter');
+    expect(a.error).toContain('Update the ERP');
   });
 
   it('dead-letters a salesman without a code, and a customer that is gone', async () => {

@@ -461,6 +461,7 @@ export class CustomersService {
     const areaBefore = customer.areaId ?? null;
     const locationBefore = customer.locationId ?? null;
     const repBefore = customer.repId ?? null;
+    const cityBefore = customer.cityCode ?? null;
     if (dto.areaId && dto.areaId !== customer.areaId) {
       await this.areas.assertAssignable(dto.areaId);
     }
@@ -507,9 +508,13 @@ export class CustomersService {
     // moving re-sends it.
     const areaMoved = (saved.areaId ?? null) !== areaBefore;
     const locationMoved = (saved.locationId ?? null) !== locationBefore;
-    if (areaMoved || locationMoved) {
+    // The governorate code goes with it, so a new code alone re-sends too.
+    const cityMoved = (saved.cityCode ?? null) !== cityBefore;
+    if (areaMoved || locationMoved || cityMoved) {
       const tree = (await this.settings.locationMode()) === 'TREE';
-      if (tree ? locationMoved : areaMoved) this.events.emit('erp.customer.area', { customerIds: [saved.id] });
+      if (cityMoved || (tree ? locationMoved : areaMoved)) {
+        this.events.emit('erp.customer.area', { customerIds: [saved.id] });
+      }
     }
     return saved;
   }

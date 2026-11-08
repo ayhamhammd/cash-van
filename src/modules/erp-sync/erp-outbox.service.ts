@@ -66,6 +66,8 @@ const TRANSIENT_BACKOFF_CAP_MS = 3_600_000;
 // class is defined, before DI exists. Validated in validation.schema.ts.
 const DRAIN_INTERVAL_MS = parseInt(process.env.ERP_OUTBOX_DRAIN_MS ?? '30000', 10);
 const BATCH = 20;
+/** An ISO 3166-2 region code, as `customers.city_code` holds ("JO-AM"). */
+const REGION_CODE = /^[A-Z]{2}-[A-Z0-9]{1,3}$/;
 /**
  * Customers per ERP `assign-salesmen` call. The ERP lists at most 50 refused
  * rows in its reply, so a batch no larger than that is one where every refusal
@@ -987,8 +989,9 @@ export class ErpOutboxService {
     // The place the company uses: the flat area's name, or in TREE mode
     // "governorate - area" from the location tree. Read at drain time, so a
     // mode switch re-sends whichever is current.
-    const rows: Array<{ area: string | null }> = await this.outbox.query(
-      `SELECT CASE
+    const rows: Array<{ area: string | null; city_code: string | null }> = await this.outbox.query(
+      `SELECT c.city_code,
+              CASE
                 WHEN s.location_mode = 'TREE'
                   THEN CASE WHEN l.id IS NULL THEN NULL
                             WHEN g.id IS NULL THEN l.name_ar
@@ -1007,9 +1010,17 @@ export class ErpOutboxService {
     if (!rows.length) {
       throw new TerminalPayloadError(`Customer ${ref} no longer exists in VanFlow.`);
     }
+    // The governorate code rides along (ERP follow-up E2): the ERP files the
+    // JoFotara invoice and needs the buyer's region. Only a well-formed code is
+    // sent — the ERP refuses anything else, and with it the address beside it.
+    // An ERP from before E2 ignores the field it does not know.
+    const cityCode = rows[0].city_code?.trim().toUpperCase() ?? '';
     return {
       path: `customers/${map.erpId}`,
-      body: { address: rows[0].area ?? null },
+      body: {
+        address: rows[0].area ?? null,
+        ...(REGION_CODE.test(cityCode) ? { cityCode } : {}),
+      },
       method: 'PATCH',
     };
   }
@@ -1022,10 +1033,10 @@ export class ErpOutboxService {
    * `POST customers/assign-salesmen`, which answers per row and never fails the
    * batch for one bad row, so each refusal is put back on its own customer.
    *
-   * A customer left with no salesman cannot be sent: the ERP has no way to
-   * clear one yet (spec follow-up E1). Its row is dead-lettered with that
-   * reason, so the office sees that the ERP still shows the old salesman,
-   * instead of a "sent" that did nothing.
+   * A customer left with no salesman is sent as `salesmanCode: null`, which
+   * clears it in the ERP. Clears go in calls of their own: an ERP from before
+   * clearing existed refuses the null as a validation error, and mixed into a
+   * batch that would refuse the real assignments beside it too.
    */
   private async pushSalesmen(rows: ErpOutbox[]): Promise<void> {
     const refs = [...new Set(rows.map((r) => r.ref))];
@@ -1059,7 +1070,7 @@ export class ErpOutboxService {
     }
     const byRef = new Map(found.map((f) => [f.customer_number, f]));
 
-    const ready: Array<{ row: ErpOutbox; customerCode: string; salesmanCode: string }> = [];
+    const ready: Array<{ row: ErpOutbox; customerCode: string; salesmanCode: string | null }> = [];
     for (const row of rows) {
       const c = byRef.get(row.ref);
       if (!c) {
@@ -1069,10 +1080,7 @@ export class ErpOutboxService {
         // this row follows once the customer is mapped.
         await this.fail(row, 'waiting on a prerequisite that has not synced yet', { transient: true });
       } else if (!c.rep_id) {
-        await this.failTerminal(
-          row,
-          'The customer has no salesman now, and the ERP cannot clear a salesman yet — the ERP still shows the previous one.',
-        );
+        ready.push({ row, customerCode: c.erp_code || c.customer_number, salesmanCode: null });
       } else if (!c.rep_code) {
         await this.failTerminal(
           row,
@@ -1083,15 +1091,19 @@ export class ErpOutboxService {
       }
     }
 
-    for (let i = 0; i < ready.length; i += SALESMAN_BATCH) {
-      const batch = ready.slice(i, i + SALESMAN_BATCH);
-      await this.sendSalesmanBatch(batch);
+    const assigns = ready.filter((r) => r.salesmanCode !== null);
+    const clears = ready.filter((r) => r.salesmanCode === null);
+    for (const group of [assigns, clears]) {
+      for (let i = 0; i < group.length; i += SALESMAN_BATCH) {
+        await this.sendSalesmanBatch(group.slice(i, i + SALESMAN_BATCH));
+      }
     }
   }
 
   private async sendSalesmanBatch(
-    batch: Array<{ row: ErpOutbox; customerCode: string; salesmanCode: string }>,
+    batch: Array<{ row: ErpOutbox; customerCode: string; salesmanCode: string | null }>,
   ): Promise<void> {
+    const clearing = batch[0].salesmanCode === null;
     let res: Awaited<ReturnType<ErpHttpClient['post']>>;
     try {
       res = await this.erp.post(
@@ -1108,6 +1120,17 @@ export class ErpOutboxService {
       return;
     }
     if (!res.ok) {
+      // Only a clear can be refused for its shape: the ERP is from before it
+      // could clear a salesman. No retry fixes that; updating the ERP does.
+      if (clearing && (res.status === 400 || res.status === 422)) {
+        for (const b of batch) {
+          await this.failTerminal(
+            b.row,
+            'The customer has no salesman now, but this ERP cannot clear a salesman — it still shows the previous one. Update the ERP, then retry.',
+          );
+        }
+        return;
+      }
       for (const b of batch) {
         if (res.status === 429) await this.softRetry(b.row, res.error ?? 'RATE_LIMITED');
         else
@@ -1136,7 +1159,7 @@ export class ErpOutboxService {
       if (await this.requeuedSinceRead(b.row)) continue;
       b.row.status = 'posted';
       b.row.error = null;
-      b.row.resultRef = b.salesmanCode;
+      b.row.resultRef = b.salesmanCode ?? 'cleared';
       await this.outbox.save(b.row);
     }
   }

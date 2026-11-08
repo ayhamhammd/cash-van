@@ -13,6 +13,7 @@ describe('ErpOutboxService — a customer area becomes the ERP address', () => {
   function makeSvc(opts: {
     erpId?: string | null;
     area?: string | null;
+    cityCode?: string | null;
     customerExists?: boolean;
     patch?: () => Promise<unknown>;
     freshUpdatedAt?: Date;
@@ -25,7 +26,8 @@ describe('ErpOutboxService — a customer area becomes the ERP address', () => {
     };
     svc.outbox = {
       save: async (r: ErpOutbox) => r,
-      query: async () => (opts.customerExists === false ? [] : [{ area: opts.area ?? null }]),
+      query: async () =>
+        opts.customerExists === false ? [] : [{ area: opts.area ?? null, city_code: opts.cityCode ?? null }],
       findOne: async () => ({ updatedAt: opts.freshUpdatedAt ?? new Date(1000) }),
     };
     svc.erp = {
@@ -56,6 +58,16 @@ describe('ErpOutboxService — a customer area becomes the ERP address', () => {
     expect(calls).toEqual([
       { path: 'customers/erp-uuid', body: { address: 'الزرقاء' }, method: 'PATCH' },
     ]);
+  });
+
+  it('sends the governorate code with the place, and never a malformed one', async () => {
+    const withCode = makeSvc({ erpId: 'erp-uuid', area: 'عمّان - الجبيهة', cityCode: ' jo-am ' });
+    expect((await withCode.svc.buildCalls(row()))?.[0].body).toEqual({
+      address: 'عمّان - الجبيهة',
+      cityCode: 'JO-AM',
+    });
+    const typo = makeSvc({ erpId: 'erp-uuid', area: 'عمّان', cityCode: 'Amman' });
+    expect((await typo.svc.buildCalls(row()))?.[0].body).toEqual({ address: 'عمّان' });
   });
 
   it('clears the address when the customer has no area', async () => {
