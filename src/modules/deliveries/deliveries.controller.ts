@@ -29,12 +29,16 @@ import {
   type AuthenticatedUser,
 } from '../../common/decorators/current-user.decorator';
 import { DeliveryReturnsService } from './delivery-returns.service';
+import { DeliveryIncreasesService } from './delivery-increases.service';
 import { DeliveriesService } from './deliveries.service';
 import { streamProof } from './deliveries-app.controller';
 import { DeliveryProofsService } from './delivery-proofs.service';
 import {
   ApproveReturnDto,
   CreateRunDto,
+  DismissIncreaseDto,
+  ListIncreasesQuery,
+  OrderIncreaseDto,
   ListReturnsQuery,
   ListRunsQuery,
   LoadableInvoicesQuery,
@@ -59,7 +63,60 @@ export class DeliveriesController {
     private readonly deliveries: DeliveriesService,
     private readonly proofs: DeliveryProofsService,
     private readonly returns: DeliveryReturnsService,
+    private readonly increases: DeliveryIncreasesService,
   ) {}
+
+  // ── increase requests (phase 4) ─────────────────────────────────────────
+
+  @Get('increases')
+  @RequirePermissionKeys(PERM_DELIVERIES_VIEW)
+  @ApiOperation({ summary: 'Increase requests from deliveries (PENDING by default, DECIDED, ALL)' })
+  @ApiOkResponse({ description: '{ items: IncreaseRequest[], total }' })
+  listIncreases(@Query() q: ListIncreasesQuery) {
+    return this.increases.list(q);
+  }
+
+  @Get('increases/count')
+  @RequirePermissionKeys(PERM_DELIVERIES_VIEW)
+  @ApiOperation({ summary: 'Pending increase requests, for the badge' })
+  @ApiOkResponse({ description: '{ pending }' })
+  countIncreases() {
+    return this.increases.count();
+  }
+
+  @Post('increases/:id/order')
+  @RequirePermissionKeys(PERM_DELIVERIES_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Turn an increase request into an ORDER voucher for its customer',
+    description:
+      'Through the vouchers service (pricing, tax mode, exemption, offers, ERP SALES_ORDER). ' +
+      'Send an Idempotency-Key header: the same key answers the same order. 409 ' +
+      'INCREASE_ALREADY_DECIDED; 422 with the voucher service\'s own code.',
+  })
+  @ApiOkResponse({ description: '{ request: IncreaseRequest, order: { id, voucherNumber, totalFils } }' })
+  orderIncrease(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: OrderIncreaseDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.increases.order(id, dto, user, idempotencyKey);
+  }
+
+  @Post('increases/:id/dismiss')
+  @RequirePermissionKeys(PERM_DELIVERIES_MANAGE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Dismiss an increase request (note required)' })
+  @ApiOkResponse({ description: '{ request: IncreaseRequest }' })
+  dismissIncrease(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: DismissIncreaseDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.increases.dismiss(id, dto, user, idempotencyKey);
+  }
 
   // ── delivery returns (phase 3) ──────────────────────────────────────────
 

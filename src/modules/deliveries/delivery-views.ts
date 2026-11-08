@@ -2,6 +2,7 @@ import type { DeliveryRun } from './entities/delivery-run.entity';
 import type { DeliveryStop, DeliveryStopStatus } from './entities/delivery-stop.entity';
 import type { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import type { DeliveryProof } from './entities/delivery-proof.entity';
+import type { DeliveryIncreaseRequest, IncreaseLine, IncreaseStatus } from './entities/delivery-increase-request.entity';
 import { conditionOf } from './delivery-reasons';
 
 /** The answer shapes of contract §B "Types". Money is fils (numbers). */
@@ -107,6 +108,13 @@ export interface StopView {
   proofs: ProofView[];
   /** ERP attachments on the stop that are not one of these proofs (added in the ERP). */
   erpOnlyAttachments: number;
+  /** The customer wanted more (phase 4) — never part of this invoice. */
+  increaseRequest: {
+    status: IncreaseStatus;
+    lines: IncreaseLine[];
+    orderVoucherNumber: string | null;
+    decisionNote: string | null;
+  } | null;
 }
 
 export interface RunSummaryView {
@@ -197,6 +205,7 @@ export function stopView(
   collectedFils: number,
   proofs: DeliveryProof[] = [],
   audience: ProofAudience = 'dashboard',
+  increase: DeliveryIncreaseRequest | null = null,
 ): StopView {
   const sending = !!s.localResultRef;
   const lineViews = [...lines]
@@ -242,6 +251,14 @@ export function stopView(
       .sort((a, b) => (a.kind === b.kind ? +a.createdAt - +b.createdAt : a.kind === 'PHOTO' ? -1 : 1))
       .map((p) => proofView(p, audience)),
     erpOnlyAttachments: s.erpOnlyAttachments ?? 0,
+    increaseRequest: increase
+      ? {
+          status: increase.status,
+          lines: increase.lines ?? [],
+          orderVoucherNumber: increase.orderVoucherNumber ?? null,
+          decisionNote: increase.decisionNote ?? null,
+        }
+      : null,
   };
 }
 

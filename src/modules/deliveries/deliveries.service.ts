@@ -18,6 +18,7 @@ import { DeliveryRun } from './entities/delivery-run.entity';
 import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import { DeliveryProof } from './entities/delivery-proof.entity';
+import { DeliveryIncreaseRequest } from './entities/delivery-increase-request.entity';
 import type { ErpDeliveryRun, ErpLoadWarning } from './erp-delivery.types';
 import {
   goodsBack,
@@ -423,6 +424,12 @@ export class DeliveriesService {
     const proofs = opts.lines === false ? [] : await this.proofs.find({ where: { stopId: In(ids) } });
     const proofsBy = new Map<string, DeliveryProof[]>();
     for (const p of proofs) proofsBy.set(p.stopId, [...(proofsBy.get(p.stopId) ?? []), p]);
+    // One request per result; the newest one when a stop somehow has two.
+    const increases = await this.dataSource.getRepository(DeliveryIncreaseRequest).find({
+      where: { stopId: In(ids) },
+      order: { createdAt: 'ASC' },
+    });
+    const increaseBy = new Map(increases.map((r) => [r.stopId!, r]));
     const linesBy = new Map<string, DeliveryStopLine[]>();
     for (const l of lines) linesBy.set(l.stopId, [...(linesBy.get(l.stopId) ?? []), l]);
     const customers = await this.customerRefs(stops.map((s) => s.customerId ?? null));
@@ -435,6 +442,7 @@ export class DeliveriesService {
         s.invoiceNumber ? (collected.get(s.invoiceNumber) ?? 0) : 0,
         proofsBy.get(s.id) ?? [],
         opts.audience ?? 'dashboard',
+        increaseBy.get(s.id) ?? null,
       ),
     );
   }

@@ -251,6 +251,18 @@ export class DeliveryLineResultDto {
   note?: string;
 }
 
+/** One line of an increase request: a product the customer wants, and how much. */
+export class IncreaseLineDto {
+  @ApiProperty({ format: 'uuid', description: 'A product (item) id from the catalogue.' })
+  @IsUUID()
+  productId!: string;
+
+  @ApiProperty({ description: '> 0; decimals for weight units.' })
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(0.001)
+  qty!: number;
+}
+
 /** A proof clientRef names its file on disk: letters, digits, dot, dash, underscore. */
 const PROOF_REF = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 
@@ -307,6 +319,19 @@ export class SyncDeliveryDto {
   @ValidateNested({ each: true })
   @Type(() => DeliveryLineResultDto)
   lines?: DeliveryLineResultDto[];
+
+  @ApiPropertyOptional({
+    type: [IncreaseLineDto],
+    description:
+      'The customer wants more than the invoice (phase 4). Never part of the invoice: the office ' +
+      'turns it into a separate order. Ignored while the company switch deliveryIncreaseRequests is off.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @ValidateNested({ each: true })
+  @Type(() => IncreaseLineDto)
+  increase?: IncreaseLineDto[];
 
   @ApiPropertyOptional({ type: [String], description: 'clientRefs of proofs already uploaded for this stop.' })
   @IsOptional()
@@ -428,6 +453,89 @@ export class ApproveReturnDto {
 
 export class RejectReturnDto {
   @ApiProperty({ description: 'Why: the rep and the customer are told.' })
+  @IsString()
+  @Matches(/\S/, { message: 'note is required' })
+  @MaxLength(1000)
+  note!: string;
+}
+
+// ── increase requests (phase 4) ──────────────────────────────────────────────
+
+export class ListIncreasesQuery {
+  @ApiPropertyOptional({ enum: ['PENDING', 'DECIDED', 'ALL'], default: 'PENDING' })
+  @IsOptional()
+  @IsIn(['PENDING', 'DECIDED', 'ALL'])
+  status?: 'PENDING' | 'DECIDED' | 'ALL';
+
+  @ApiPropertyOptional({ format: 'uuid', description: 'The delivery rep who recorded it.' })
+  @IsOptional()
+  @IsUUID()
+  repId?: string;
+
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  customerId?: string;
+
+  @ApiPropertyOptional({ example: '2026-11-01', description: 'Recorded on or after (company time).' })
+  @IsOptional()
+  @Matches(YMD, { message: 'from must be YYYY-MM-DD' })
+  from?: string;
+
+  @ApiPropertyOptional({ example: '2026-11-08' })
+  @IsOptional()
+  @Matches(YMD, { message: 'to must be YYYY-MM-DD' })
+  to?: string;
+
+  @ApiPropertyOptional({ default: 1, minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @ApiPropertyOptional({ default: 50, minimum: 1, maximum: 200 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  pageSize?: number;
+}
+
+export class OrderLineDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  productId!: string;
+
+  @ApiProperty({ minimum: 1 })
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(1)
+  qty!: number;
+}
+
+export class OrderIncreaseDto {
+  @ApiPropertyOptional({
+    type: [OrderLineDto],
+    description: "Replaces the request's lines (edited quantities, lines removed). Omitted = order as requested.",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(30)
+  @ValidateNested({ each: true })
+  @Type(() => OrderLineDto)
+  lines?: OrderLineDto[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  note?: string;
+}
+
+export class DismissIncreaseDto {
+  @ApiProperty({ description: 'Why: the rep is told.' })
   @IsString()
   @Matches(/\S/, { message: 'note is required' })
   @MaxLength(1000)

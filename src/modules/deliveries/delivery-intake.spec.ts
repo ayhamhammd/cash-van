@@ -60,7 +60,7 @@ describe('sync/deliveries — validation', () => {
   it('refuses a position off the globe and unknown fields', async () => {
     expect(await errorsOf({ ...valid, lat: 91 })).toContain('lat');
     expect(await errorsOf({ ...valid, lng: -181 })).toContain('lng');
-    expect(await errorsOf({ ...valid, increase: [] })).toContain('increase');
+    expect(await errorsOf({ ...valid, sellExtra: [] })).toContain('sellExtra');
   });
 });
 
@@ -140,8 +140,15 @@ describe('sync/deliveries — intake', () => {
   function world(
     stop: Stop | null,
     inbox: Array<{ client_ref: string; type: string }> = [],
-    opts: { lines?: Line[]; proofs?: Proof[]; proofRequired?: boolean } = {},
+    opts: {
+      lines?: Line[];
+      proofs?: Proof[];
+      proofRequired?: boolean;
+      increaseOn?: boolean;
+      products?: Array<{ id: string; item_number: string; name_ar: string; name_en: string | null; unit: string }>;
+    } = {},
   ) {
+    const increases: unknown[][] = [];
     const outbox: string[] = [];
     const updates: Array<Record<string, unknown>> = [];
     const lines = opts.lines ?? [];
@@ -154,7 +161,16 @@ describe('sync/deliveries — intake', () => {
         if (sql.includes('FROM delivery_stops WHERE id = $1 FOR UPDATE')) {
           return stop && stop.id === params[0] ? [{ id: stop.id }] : [];
         }
+        if (sql.includes('delivery_increase_requests AS')) return [{ on: opts.increaseOn ?? false }];
         if (sql.includes('FROM app_settings')) return [{ required: opts.proofRequired ?? false }];
+        if (sql.includes('FROM item_cart')) {
+          const ids = params[0] as string[];
+          return (opts.products ?? []).filter((p) => ids.includes(p.id));
+        }
+        if (sql.includes('INSERT INTO delivery_increase_requests')) {
+          increases.push(params);
+          return [];
+        }
         if (sql.includes('INSERT INTO voucher_inbox')) {
           if (inbox.some((r) => r.client_ref === params[0])) return [];
           inbox.push({ client_ref: params[0] as string, type: 'DELIVERY', payload: JSON.parse(params[3] as string) } as never);
@@ -203,7 +219,7 @@ describe('sync/deliveries — intake', () => {
       { notifyManagers: async (n: Record<string, unknown>) => void notified.push(n) } as never,
       {} as never,
     );
-    return { svc, outbox, updates, signals, pushed, inbox, lines, notified };
+    return { svc, outbox, updates, signals, pushed, inbox, lines, notified, increases };
   }
 
   const actor = { repId: 'rep-1' } as never;
@@ -351,6 +367,100 @@ describe('sync/deliveries — intake', () => {
       expect(w.notified).toHaveLength(1);
       const off = world(loaded(), [], { lines: lines(), proofs, proofRequired: false });
       expect(await off.svc.ingest(dto(), actor)).toEqual({ status: 'accepted' });
+    });
+  });
+
+  describe('phase 4 — increase requests', () => {
+    const P1 = '22222222-2222-4222-8222-222222222222';
+    const P2 = '33333333-3333-4333-8333-333333333333';
+    const products = [
+      { id: P1, item_number: 'W1', name_ar: 'ماء', name_en: 'Water', unit: 'CTN' },
+      { id: P2, item_number: 'J1', name_ar: 'عصير', name_en: null, unit: 'CTN' },
+    ];
+    const payloadOf = (w: ReturnType<typeof world>) =>
+      (w.inbox.find((r) => r.client_ref === 'd-1') as unknown as { payload: Record<string, unknown> }).payload;
+
+    it('switch off: the increase is ignored, the delivery still goes through', async () => {
+      const w = world(loaded(), [], { increaseOn: false, products });
+      expect(await w.svc.ingest(dto({ increase: [{ productId: P1, qty: 2 }] }), actor)).toEqual({ status: 'accepted' });
+      expect(w.increases).toEqual([]);
+      expect(payloadOf(w)).not.toHaveProperty('increase');
+      expect(w.notified).toEqual([]);
+    });
+
+    it('switch on: the request is stored with names snapshotted, sent to the ERP, and the managers told', async () => {
+      const w = world(loaded(), [], { increaseOn: true, products });
+      const out = await w.svc.ingest(
+        dto({ increase: [{ productId: P1, qty: 2 }, { productId: P2, qty: 1.5 }, { productId: P1, qty: 1 }] }),
+        actor,
+      );
+      expect(out).toEqual({ status: 'accepted' });
+      expect(w.increases).toHaveLength(1);
+      const [clientRef, stopId, runId, , repId, , linesJson] = w.increases[0] as string[];
+      expect([clientRef, stopId, runId, repId]).toEqual(['d-1', STOP, 'run-local', 'rep-1']);
+      // The same product twice is one line.
+      expect(JSON.parse(linesJson)).toEqual([
+        { productId: P1, skuCode: 'W1', nameAr: 'ماء', nameEn: 'Water', unit: 'CTN', qty: 3 },
+        { productId: P2, skuCode: 'J1', nameAr: 'عصير', nameEn: null, unit: 'CTN', qty: 1.5 },
+      ]);
+      expect(payloadOf(w).increase).toEqual([
+        { skuCode: 'W1', qty: 3 },
+        { skuCode: 'J1', qty: 1.5 },
+      ]);
+      expect(w.notified).toEqual([
+        expect.objectContaining({
+          kind: 'delivery.increase_requested',
+          bodyAr: expect.stringContaining('2 أصناف'),
+          bodyEn: expect.stringMatching(/^Increase request: invoice .*, 2 items$/),
+        }),
+      ]);
+    });
+
+    it('a refused stop may still carry one', async () => {
+      const w = world(loaded(), [], { increaseOn: true, products });
+      expect(
+        await w.svc.ingest(dto({ outcome: 'RETURNED', increase: [{ productId: P2, qty: 4 }] }), actor),
+      ).toEqual({ status: 'accepted' });
+      expect(w.increases).toHaveLength(1);
+    });
+
+    it('an unknown or inactive product rejects the result, and nothing is written', async () => {
+      const stop = loaded();
+      const w = world(stop, [], { increaseOn: true, products });
+      expect(
+        await w.svc.ingest(dto({ increase: [{ productId: '44444444-4444-4444-8444-444444444444', qty: 1 }] }), actor),
+      ).toEqual({ status: 'rejected', reason: 'INCREASE_UNKNOWN_PRODUCT' });
+      expect(w.increases).toEqual([]);
+      expect(stop.localResultRef).toBeNull();
+    });
+
+    it('the replayed result makes no second request', async () => {
+      const w = world(loaded(), [], { increaseOn: true, products });
+      await w.svc.ingest(dto({ increase: [{ productId: P1, qty: 1 }] }), actor);
+      await w.svc.ingest(dto({ increase: [{ productId: P1, qty: 1 }] }), actor);
+      expect(w.increases).toHaveLength(1);
+      expect(w.notified).toHaveLength(1);
+    });
+
+    it('the body: qty > 0 and at most 30 lines', async () => {
+      expect(await errorsOf({ ...valid, increase: [{ productId: P1, qty: 0.5 }] })).toEqual([]);
+      expect(await errorsOf({ ...valid, increase: [{ productId: P1, qty: 0 }] })).toContain('increase');
+      expect(await errorsOf({ ...valid, increase: [{ productId: 'nope', qty: 1 }] })).toContain('increase');
+      const many = Array.from({ length: 31 }, () => ({ productId: P1, qty: 1 }));
+      expect(await errorsOf({ ...valid, increase: many })).toContain('increase');
+    });
+
+    it('the ERP call carries increase as [{ skuCode, qty }]', () => {
+      const call = buildResultCall({
+        clientRef: 'd-1',
+        stopId: STOP,
+        erpItemId: 'item-9',
+        runErpId: 'run-1',
+        outcome: 'DELIVERED',
+        deliveredAt: '2026-11-08T07:00:00.000Z',
+        increase: [{ skuCode: 'W1', qty: 3 }],
+      });
+      expect(call.body.increase).toEqual([{ skuCode: 'W1', qty: 3 }]);
     });
   });
 

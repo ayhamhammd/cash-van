@@ -1,6 +1,6 @@
 import { ErpOutboxService } from '../erp-sync/erp-outbox.service';
 import type { ErpOutbox } from '../erp-sync/entities/erp-outbox.entity';
-import { DeliveryIntakeService } from './delivery-intake.service';
+import { DeliveryIntakeService, resultWarnings } from './delivery-intake.service';
 
 /**
  * DELIVERY_RESULT through the existing outbox drain: the deliveries module's
@@ -244,5 +244,18 @@ describe('outbox — proofs before the result', () => {
     const t = setup({ waiting: 0, proofReply: { success: true, duplicate: true } });
     await t.push(proofRow());
     expect(t.updates).toEqual([{ erpAttachmentId: 'UNKNOWN' }]);
+  });
+});
+
+describe('outbox — ERP warnings on a result', () => {
+  it('reads INCREASE_LINE_DROPPED from data.warnings; nothing else is an error', () => {
+    expect(
+      resultWarnings({
+        success: true,
+        data: { id: 'run-1', items: [], warnings: [{ code: 'INCREASE_LINE_DROPPED', skuCode: 'OLD-1', reason: 'ARCHIVED' }] },
+      }),
+    ).toEqual([{ code: 'INCREASE_LINE_DROPPED', skuCode: 'OLD-1', reason: 'ARCHIVED' }]);
+    expect(resultWarnings({ success: true, data: { id: 'run-1' } })).toEqual([]);
+    expect(resultWarnings(null)).toEqual([]);
   });
 });

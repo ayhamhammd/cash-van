@@ -18,6 +18,7 @@ import { DeliveryRun } from './entities/delivery-run.entity';
 import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import { DeliveryProof } from './entities/delivery-proof.entity';
+import type { IncreaseLine } from './entities/delivery-increase-request.entity';
 import { attachmentIdOf, erpErrorCode, unwrapRun } from './erp-delivery.types';
 import { checkLines, checkProofs, type RejectReason } from './delivery-result-checks';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -47,13 +48,15 @@ export interface DeliveryInboxPayload {
   lines?: Array<{ invoiceItemId: string; deliveredQty: number; reasonCode?: string | null; note?: string | null }>;
   /** Proof clientRefs; the result is held until each has its ERP attachment id. */
   proofRefs?: string[];
+  /** The customer wanted more (phase 4): sent to the ERP as `increase`. */
+  increase?: Array<{ skuCode: string; qty: number }>;
   /** Lines that came back short, for the office's notification. */
   differingLines?: number;
 }
 
 export interface DeliveryIntakeVerdict {
   status: 'accepted' | 'rejected';
-  reason?: RejectReason | 'STOP_NOT_FOUND' | 'CLIENT_REF_IN_USE';
+  reason?: RejectReason | 'STOP_NOT_FOUND' | 'CLIENT_REF_IN_USE' | 'INCREASE_UNKNOWN_PRODUCT';
 }
 
 /** Is a stop final, as far as a NEW result is concerned? */
@@ -84,8 +87,19 @@ export function buildResultCall(p: DeliveryInboxPayload): OutboxCall {
             })),
           }
         : {}),
+      ...(p.increase?.length ? { increase: p.increase.map((l) => ({ skuCode: l.skuCode, qty: l.qty })) } : {}),
     },
   };
+}
+
+/**
+ * One line per product, quantities added together (a picker can send the same
+ * product twice), rounded to the invoice-line scale.
+ */
+export function mergeIncrease(lines: Array<{ productId: string; qty: number }>): Array<{ productId: string; qty: number }> {
+  const by = new Map<string, number>();
+  for (const l of lines) by.set(l.productId, (by.get(l.productId) ?? 0) + l.qty);
+  return [...by.entries()].map(([productId, qty]) => ({ productId, qty: Math.round(qty * 1000) / 1000 }));
 }
 
 /** The ERP attachment upload for one proof. Pure, for the spec. */
@@ -107,6 +121,20 @@ export function buildProofCall(
       },
     },
   };
+}
+
+/** `data.warnings` (or top-level `warnings`) of a result reply, e.g. INCREASE_LINE_DROPPED. */
+export function resultWarnings(reply: unknown): Array<{ code: string; skuCode?: string; reason?: string }> {
+  const top = reply && typeof reply === 'object' ? (reply as Record<string, unknown>) : null;
+  const data = top?.data && typeof top.data === 'object' ? (top.data as Record<string, unknown>) : null;
+  const list = (Array.isArray(data?.warnings) ? data!.warnings : Array.isArray(top?.warnings) ? top!.warnings : []) as unknown[];
+  return list
+    .filter((w): w is Record<string, unknown> => !!w && typeof w === 'object')
+    .map((w) => ({
+      code: String(w.code ?? 'WARNING'),
+      ...(typeof w.skuCode === 'string' ? { skuCode: w.skuCode } : {}),
+      ...(typeof w.reason === 'string' ? { reason: w.reason } : {}),
+    }));
 }
 
 /** A 409 STOP_ALREADY_FINAL / RUN_CLOSED is the ERP's last word on this result. */
@@ -202,6 +230,33 @@ export class DeliveryIntakeService implements OnModuleInit {
       const proofProblem = checkProofs(await this.proofRequired(em), dto.outcome, proofRefs, uploaded);
       if (proofProblem) return { verdict: { status: 'rejected' as const, reason: proofProblem } };
 
+      // The customer wants more (phase 4). Only with the company switch on;
+      // off, the request is dropped and the delivery still goes through.
+      let increase: IncreaseLine[] = [];
+      if (dto.increase?.length) {
+        if (!(await this.increaseRequestsOn(em))) {
+          this.logger.log(
+            `result ${clientRef}: increase request ignored (${dto.increase.length} line(s)) — deliveryIncreaseRequests is off`,
+          );
+        } else {
+          const wanted = mergeIncrease(dto.increase);
+          const products: Array<{ id: string; item_number: string; name_ar: string | null; name_en: string | null; unit: string | null }> =
+            await em.query(
+              `SELECT id, item_number, name_ar, name_en, unit FROM item_cart
+                WHERE id = ANY($1::uuid[]) AND is_active AND deleted_at IS NULL`,
+              [wanted.map((w) => w.productId)],
+            );
+          const byId = new Map(products.map((p) => [p.id, p]));
+          if (wanted.some((w) => !byId.has(w.productId))) {
+            return { verdict: { status: 'rejected' as const, reason: 'INCREASE_UNKNOWN_PRODUCT' as const } };
+          }
+          increase = wanted.map((w) => {
+            const p = byId.get(w.productId)!;
+            return { productId: p.id, skuCode: p.item_number, nameAr: p.name_ar, nameEn: p.name_en, unit: p.unit, qty: w.qty };
+          });
+        }
+      }
+
       const payload: DeliveryInboxPayload = {
         clientRef,
         stopId: stop.id,
@@ -221,6 +276,7 @@ export class DeliveryIntakeService implements OnModuleInit {
         })),
         proofRefs,
         differingLines: lines.differing,
+        ...(increase.length ? { increase: increase.map((l) => ({ skuCode: l.skuCode, qty: l.qty })) } : {}),
       };
       const claimed: Array<{ id: string }> = await em.query(
         `INSERT INTO voucher_inbox
@@ -253,6 +309,15 @@ export class DeliveryIntakeService implements OnModuleInit {
           { localDeliveredQty: String(l.deliveredQty), localReasonCode: l.reasonCode, localNote: l.note },
         );
       }
+      if (increase.length) {
+        await em.query(
+          `INSERT INTO delivery_increase_requests
+             (client_ref, stop_id, run_id, customer_id, rep_id, invoice_number, lines)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+           ON CONFLICT (client_ref) DO NOTHING`,
+          [clientRef, stop.id, stop.runId, stop.customerId ?? null, rep.id, stop.invoiceNumber ?? null, JSON.stringify(increase)],
+        );
+      }
       // Proofs first, then the result — which waits for them anyway.
       for (const ref of proofRefs) await enqueueOutboxWithin(em, DELIVERY_PROOF_KIND, ref);
       await enqueueOutboxWithin(em, DELIVERY_RESULT_KIND, clientRef);
@@ -266,6 +331,14 @@ export class DeliveryIntakeService implements OnModuleInit {
               invoiceNumber: stop.invoiceNumber ?? '',
               customer: stop.recipientName ?? stop.customerCode ?? '',
               lines: lines.differing,
+            }
+          : null,
+        increaseRequest: increase.length
+          ? {
+              stopId: stop.id,
+              invoiceNumber: stop.invoiceNumber ?? '',
+              customer: stop.recipientName ?? stop.customerCode ?? '',
+              items: increase.length,
             }
           : null,
       };
@@ -284,6 +357,7 @@ export class DeliveryIntakeService implements OnModuleInit {
         'delivery.result.received',
       );
       if (outcome.returnRequest) await this.notifyReturnRequest(outcome.returnRequest);
+      if (outcome.increaseRequest) await this.notifyIncreaseRequest(outcome.increaseRequest);
       // Latency only: the rows are durable, the drain is the guarantee.
       const refs = outcome.proofRefs ?? [];
       void (async () => {
@@ -315,6 +389,36 @@ export class DeliveryIntakeService implements OnModuleInit {
       // The result is taken; a failed alert must not turn it into a failure.
       this.logger.warn(`return-request notification failed: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  /** "Increase request: invoice X, customer Y, n items" to every manager. Best effort. */
+  private async notifyIncreaseRequest(r: {
+    stopId: string;
+    invoiceNumber: string;
+    customer: string;
+    items: number;
+  }): Promise<void> {
+    try {
+      await this.notifications.notifyManagers({
+        kind: 'delivery.increase_requested',
+        titleAr: 'طلب زيادة',
+        titleEn: 'Increase request',
+        bodyAr: `طلب زيادة: الفاتورة ${r.invoiceNumber}، الزبون ${r.customer}، ${r.items} أصناف`,
+        bodyEn: `Increase request: invoice ${r.invoiceNumber}, customer ${r.customer}, ${r.items} item${r.items === 1 ? '' : 's'}`,
+        refType: 'delivery_stop',
+        refId: r.stopId,
+      });
+    } catch (e) {
+      this.logger.warn(`increase-request notification failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** app_settings.delivery_increase_requests (default off). */
+  private async increaseRequestsOn(em: EntityManager): Promise<boolean> {
+    const rows: Array<{ on: boolean }> = await em.query(
+      `SELECT delivery_increase_requests AS "on" FROM app_settings WHERE id = 1`,
+    );
+    return rows[0]?.on === true;
   }
 
   /** app_settings.delivery_proof_required (default on). */
@@ -407,6 +511,14 @@ export class DeliveryIntakeService implements OnModuleInit {
 
   /** Accepted: mirror the run the ERP answered with; the stop is no longer SENDING. */
   private async onPosted(row: ErpOutbox, reply: unknown): Promise<void> {
+    // The ERP keeps the result and drops increase lines it cannot take (an
+    // unknown or archived SKU, a bad quantity, past 30 lines). Not an error:
+    // CashVan's own request row and the order made from it are unaffected.
+    for (const w of resultWarnings(reply)) {
+      this.logger.warn(
+        `result ${row.ref}: ERP warning ${w.code}${w.skuCode ? ` (${w.skuCode})` : ''}${w.reason ? `: ${w.reason}` : ''}`,
+      );
+    }
     const run = unwrapRun(reply);
     if (run && Array.isArray(run.items)) {
       await this.mirror.applyRun(run, { settledRef: row.ref });

@@ -18,13 +18,17 @@ import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import { DeliveryProof } from './entities/delivery-proof.entity';
 import { DeliveryProofsService } from './delivery-proofs.service';
 import { DeliveryReturnsService } from './delivery-returns.service';
+import { DeliveryIncreasesService } from './delivery-increases.service';
+import { DeliveryIncreaseRequest } from './entities/delivery-increase-request.entity';
+import { VouchersModule } from '../vouchers/vouchers.module';
+import { ProductsModule } from '../products/products.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 
 /**
  * Delivery & collection representative (docs/SPEC-delivery-rep.md): the mirror
  * of the ERP's delivery runs, the office's run screens, the delivery rep's phone
  * routes, his results line by line and his proofs, and the office's return
- * approvals through the ERP (phases 1–3).
+ * approvals through the ERP, and increase requests turned into orders (phases 1–4).
  */
 @Module({
   imports: [
@@ -33,12 +37,15 @@ import { NotificationsModule } from '../notifications/notifications.module';
       DeliveryStop,
       DeliveryStopLine,
       DeliveryProof,
+      DeliveryIncreaseRequest,
       Rep,
       ErpSyncCursor,
     ]),
     ErpSyncModule,
     SettingsModule,
     NotificationsModule,
+    VouchersModule,
+    ProductsModule,
   ],
   controllers: [DeliveriesController, DeliveriesAppController, DeliverySyncController],
   providers: [
@@ -48,6 +55,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     DeliveryIntakeService,
     DeliveryProofsService,
     DeliveryReturnsService,
+    DeliveryIncreasesService,
   ],
   exports: [DeliveriesService, DeliveryMirrorService],
 })
