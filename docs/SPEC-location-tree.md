@@ -362,13 +362,18 @@ new app build shows the two levels (governorate → area).
 - **Area push** (`erp.customer.area` → outbox `CUSTOMER_AREA` → `PATCH customers/{id}
   {address}`): in TREE mode send `locationLabel` (`"عمّان - الجبيهة"`). Same event and
   same outbox kind; only the payload builder looks at the mode.
-- **Salesman push** — today a reassignment never reaches the ERP (only `salesmanCode` on
-  create). An area reassignment can move hundreds of customers, so leaving the ERP stale
-  gets worse. Add outbox kind `CUSTOMER_SALESMAN`, drained in batches of ≤ 500 through
+- **Salesman push** (built) — every reassignment path (customer edit, reassign, "use
+  area salesman", Excel bulk, segment bulk, area-salesman resolver) emits
+  `erp.customer.salesman {customerIds}` → outbox kind `CUSTOMER_SALESMAN`, one row per
+  customer (`ref` = customer number, requeued so only the latest state is sent). The
+  drain takes these apart from other documents (≤ 500 per tick) and sends them through
   the ERP's existing `POST /api/v1/customers/assign-salesmen`
-  `[{customerCode, salesmanCode}]`. A customer moved to *no* salesman has no row in
-  that call; it needs an ERP "unassign" (ERP follow-up E1). Applies to every reassignment
-  path, not only areas.
+  `{assignments:[{customerCode, salesmanCode}]}` in calls of 50 — the ERP names at most
+  50 refused rows, so every refusal lands on its own customer and retries there. A
+  customer not yet in the ERP waits; a salesman without a code is dead-lettered with
+  that reason. A customer moved to *no* salesman cannot be sent: it is dead-lettered
+  ("the ERP cannot clear a salesman yet") until the ERP has an "unassign" (follow-up
+  E1). The ERP pull that sets a salesman *from* the ERP does not emit the event.
 - **Governorate code** — the ERP's customer PATCH accepts `address` but **not**
   `cityCode` (`ERP src/app/api/v1/customers/[id]/route.ts`). Sending `JO-xx` to the ERP
   needs an ERP change (follow-up E2). Until then `city_code` is filled on the VanFlow
@@ -414,7 +419,7 @@ new app build shows the two levels (governorate → area).
 |---|---|---|
 | 1 | Table, CRUD, seed, import, `location_mode` (FLAT default), customer `locationId` + list fields, picker endpoint, old-app compatibility | Yes — nothing changes until an admin switches |
 | 2 | Salesman by area: `locations.rep_id`, `rep_source`, resolver, `PUT /locations/:id/rep`, rep-source reset, mode-switch recompute | Yes |
-| 3 | ERP: label in `address`; `CUSTOMER_SALESMAN` outbox | Needs ERP E1 for unassign |
+| 3 | ERP: label in `address`; `CUSTOMER_SALESMAN` outbox — **built**; only "no salesman" waits on ERP E1 | Yes |
 | 4 | Reports: "Sales by governorate / area" (group `c.location_id` up the path) | Later |
 
 ---

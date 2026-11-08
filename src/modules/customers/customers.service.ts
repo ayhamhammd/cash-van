@@ -460,6 +460,7 @@ export class CustomersService {
     dto = await this.withTreeArea(dto);
     const areaBefore = customer.areaId ?? null;
     const locationBefore = customer.locationId ?? null;
+    const repBefore = customer.repId ?? null;
     if (dto.areaId && dto.areaId !== customer.areaId) {
       await this.areas.assertAssignable(dto.areaId);
     }
@@ -499,6 +500,9 @@ export class CustomersService {
       creditLimit: saved.creditLimit != null ? Number(saved.creditLimit) : null,
       repId: saved.repId ?? null,
     });
+    if ((saved.repId ?? null) !== repBefore) {
+      this.events.emit('erp.customer.salesman', { customerIds: [saved.id] });
+    }
     // The ERP address follows whichever place the company uses; only that one
     // moving re-sends it.
     const areaMoved = (saved.areaId ?? null) !== areaBefore;
@@ -732,6 +736,9 @@ export class CustomersService {
       previousRepId,
       reason: 'customer.reassigned',
     });
+    if (previousRepId !== newRepId) {
+      this.events.emit('erp.customer.salesman', { customerIds: [saved.id] });
+    }
     return saved;
   }
 
@@ -759,6 +766,9 @@ export class CustomersService {
       previousRepId,
       reason: 'customer.rep.area',
     });
+    if ((saved.repId ?? null) !== previousRepId) {
+      this.events.emit('erp.customer.salesman', { customerIds: [saved.id] });
+    }
     return saved;
   }
 
@@ -973,6 +983,7 @@ export class CustomersService {
     // exactly as the single-customer reassign does. Broad signal = every van.
     if (result.assigned > 0) {
       this.events.emit('customer.changed', { reason: 'bulk.salesman.assignment' });
+      this.events.emit('erp.customer.salesman', { customerIds: toAssign.map((a) => a.id) });
     }
     result.ambiguousCustomers = [...new Set(result.ambiguousCustomers)];
     result.unmatchedCustomers = [...new Set(result.unmatchedCustomers)];

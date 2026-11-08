@@ -28,6 +28,11 @@ export type ErpOutboxKind =
   // raises on receipt, which queues separately as STOCK_TRANSFER.
   | 'VAN_STOCK_REQUEST'
   | 'CUSTOMER_AREA'
+  // A customer whose salesman changed in VanFlow (reassigned, by area, bulk).
+  // `ref` is the customer number. The salesman is read when it is sent, and the
+  // drain sends these in batches through the ERP's assign-salesmen call rather
+  // than one by one, so an area handing 500 shops over does not hold up sales.
+  | 'CUSTOMER_SALESMAN'
   // Returnable packaging moving between a van and a customer. Its own kind
   // rather than STOCK_ADJUSTMENT because the ERP has to record WHO is holding
   // the containers, and a stock adjustment carries no customer — which is the

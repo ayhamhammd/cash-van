@@ -828,6 +828,9 @@ export class LocationTreeService {
       if (mv.toRepId) reps.add(mv.toRepId);
     }
     for (const repId of reps) this.events.emit('customer.changed', { repId, reason: 'location.rep' });
+    if (moves.length) {
+      this.events.emit('erp.customer.salesman', { customerIds: moves.map((mv) => mv.customerId) });
+    }
   }
 
   private async report(

@@ -66,6 +66,14 @@ const TRANSIENT_BACKOFF_CAP_MS = 3_600_000;
 // class is defined, before DI exists. Validated in validation.schema.ts.
 const DRAIN_INTERVAL_MS = parseInt(process.env.ERP_OUTBOX_DRAIN_MS ?? '30000', 10);
 const BATCH = 20;
+/**
+ * Customers per ERP `assign-salesmen` call. The ERP lists at most 50 refused
+ * rows in its reply, so a batch no larger than that is one where every refusal
+ * is named and lands on its own customer's row.
+ */
+const SALESMAN_BATCH = 50;
+/** Salesman pushes sent per drain tick, in SALESMAN_BATCH-sized calls. */
+const SALESMAN_PER_TICK = 500;
 // How often to poll the ERP for the async JoFotara QR of already-pushed sales.
 const QR_RECONCILE_INTERVAL_MS = parseInt(process.env.ERP_QR_RECONCILE_MS ?? '30000', 10);
 /**
@@ -369,12 +377,29 @@ export class ErpOutboxService {
     }
     this.draining = true;
     try {
+      // Salesman changes are drained apart and in bulk: an area handing its
+      // shops to another salesman queues hundreds of them at once, and taking
+      // those twenty at a time would hold every sale behind them for minutes.
       const due = await this.outbox.find({
-        where: { status: 'pending', nextAttemptAt: LessThanOrEqual(new Date()) },
+        where: {
+          status: 'pending',
+          kind: Not('CUSTOMER_SALESMAN'),
+          nextAttemptAt: LessThanOrEqual(new Date()),
+        },
         order: { createdAt: 'ASC' },
         take: BATCH,
       });
       for (const row of due) await this.pushOne(row);
+      const salesmen = await this.outbox.find({
+        where: {
+          status: 'pending',
+          kind: 'CUSTOMER_SALESMAN',
+          nextAttemptAt: LessThanOrEqual(new Date()),
+        },
+        order: { createdAt: 'ASC' },
+        take: SALESMAN_PER_TICK,
+      });
+      if (salesmen.length) await this.pushSalesmen(salesmen);
     } finally {
       this.draining = false;
     }
@@ -673,6 +698,7 @@ export class ErpOutboxService {
   }
 
   private async pushOne(row: ErpOutbox): Promise<void> {
+    if (row.kind === 'CUSTOMER_SALESMAN') return this.pushSalesmen([row]);
     try {
       let calls;
       try {
@@ -988,8 +1014,135 @@ export class ErpOutboxService {
     };
   }
 
+  /**
+   * Tell the ERP who each customer's salesman is now (`CUSTOMER_SALESMAN`).
+   *
+   * Read when sent, not when queued: a customer moved twice before the drain
+   * runs sends only where it ended up. Sent through the ERP's bulk
+   * `POST customers/assign-salesmen`, which answers per row and never fails the
+   * batch for one bad row, so each refusal is put back on its own customer.
+   *
+   * A customer left with no salesman cannot be sent: the ERP has no way to
+   * clear one yet (spec follow-up E1). Its row is dead-lettered with that
+   * reason, so the office sees that the ERP still shows the old salesman,
+   * instead of a "sent" that did nothing.
+   */
+  private async pushSalesmen(rows: ErpOutbox[]): Promise<void> {
+    const refs = [...new Set(rows.map((r) => r.ref))];
+    let found: Array<{
+      customer_number: string;
+      erp_id: string | null;
+      erp_code: string | null;
+      rep_id: string | null;
+      rep_code: string | null;
+      rep_name: string | null;
+    }>;
+    try {
+      found = await this.outbox.query(
+        `SELECT c.customer_number, m.erp_id, m.erp_code, c.rep_id,
+                NULLIF(TRIM(r.code), '') AS rep_code, r.name_ar AS rep_name
+           FROM customers c
+           LEFT JOIN reps r ON r.id = c.rep_id
+           LEFT JOIN LATERAL (
+             SELECT erp_id, erp_code FROM erp_id_map
+              WHERE entity = 'customer' AND local_id = c.customer_number
+              ORDER BY updated_at DESC LIMIT 1
+           ) m ON true
+          WHERE c.customer_number = ANY($1::text[]) AND c.deleted_at IS NULL`,
+        [refs],
+      );
+    } catch (e) {
+      for (const row of rows) {
+        await this.fail(row, e instanceof Error ? e.message : String(e), { transient: true });
+      }
+      return;
+    }
+    const byRef = new Map(found.map((f) => [f.customer_number, f]));
+
+    const ready: Array<{ row: ErpOutbox; customerCode: string; salesmanCode: string }> = [];
+    for (const row of rows) {
+      const c = byRef.get(row.ref);
+      if (!c) {
+        await this.failTerminal(row, `Customer ${row.ref} no longer exists in VanFlow.`);
+      } else if (!c.erp_id) {
+        // Not in the ERP yet. Its export carries the salesman it has then, and
+        // this row follows once the customer is mapped.
+        await this.fail(row, 'waiting on a prerequisite that has not synced yet', { transient: true });
+      } else if (!c.rep_id) {
+        await this.failTerminal(
+          row,
+          'The customer has no salesman now, and the ERP cannot clear a salesman yet — the ERP still shows the previous one.',
+        );
+      } else if (!c.rep_code) {
+        await this.failTerminal(
+          row,
+          `Salesman ${c.rep_name ?? c.rep_id} has no code, so the ERP cannot match him. Give him a code, then retry.`,
+        );
+      } else {
+        ready.push({ row, customerCode: c.erp_code || c.customer_number, salesmanCode: c.rep_code });
+      }
+    }
+
+    for (let i = 0; i < ready.length; i += SALESMAN_BATCH) {
+      const batch = ready.slice(i, i + SALESMAN_BATCH);
+      await this.sendSalesmanBatch(batch);
+    }
+  }
+
+  private async sendSalesmanBatch(
+    batch: Array<{ row: ErpOutbox; customerCode: string; salesmanCode: string }>,
+  ): Promise<void> {
+    let res: Awaited<ReturnType<ErpHttpClient['post']>>;
+    try {
+      res = await this.erp.post(
+        'customers/assign-salesmen',
+        { assignments: batch.map((b) => ({ customerCode: b.customerCode, salesmanCode: b.salesmanCode })) },
+        // Unique per call: these rows are re-sent whenever a salesman changes
+        // again, and a key the ERP has seen would answer with the old result.
+        `salesmen-${batch[0].row.id}-${batch[0].row.updatedAt.getTime()}-${batch.length}`,
+      );
+    } catch (e) {
+      for (const b of batch) {
+        await this.fail(b.row, e instanceof Error ? e.message : String(e), { transient: true });
+      }
+      return;
+    }
+    if (!res.ok) {
+      for (const b of batch) {
+        if (res.status === 429) await this.softRetry(b.row, res.error ?? 'RATE_LIMITED');
+        else
+          await this.fail(b.row, res.error ?? 'ERP refused the salesman assignment', {
+            transient: res.status >= 500 || res.status === 408,
+          });
+      }
+      return;
+    }
+    const data = (res.data as { data?: unknown } | null)?.data ?? res.data;
+    const problems = new Map<string, string>();
+    for (const p of ((data as { problems?: unknown } | null)?.problems ?? []) as Array<{
+      customerCode?: string;
+      problem?: string;
+    }>) {
+      if (p?.customerCode) problems.set(p.customerCode.trim().toUpperCase(), p.problem ?? 'refused');
+    }
+    for (const b of batch) {
+      const problem = problems.get(b.customerCode.trim().toUpperCase());
+      // A salesman or customer the ERP does not know yet may be created there
+      // later, so it is retried a few times before it is dead-lettered.
+      if (problem) {
+        await this.fail(b.row, problem);
+        continue;
+      }
+      if (await this.requeuedSinceRead(b.row)) continue;
+      b.row.status = 'posted';
+      b.row.error = null;
+      b.row.resultRef = b.salesmanCode;
+      await this.outbox.save(b.row);
+    }
+  }
+
   private async requeuedSinceRead(row: ErpOutbox): Promise<boolean> {
-    if (row.kind !== 'CUSTOMER_AREA') return false;
+    if (row.kind !== 'CUSTOMER_AREA' && row.kind !== 'CUSTOMER_SALESMAN') return false;
     const fresh = await this.outbox.findOne({ where: { id: row.id } });
     return !!fresh && fresh.updatedAt.getTime() > row.updatedAt.getTime();
   }

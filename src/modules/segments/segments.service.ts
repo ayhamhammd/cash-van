@@ -431,12 +431,15 @@ export class SegmentsService {
       .andWhere('deleted_at IS NULL')
       .andWhere('rep_id IS DISTINCT FROM :repId', { repId })
       .andWhere('(CAST(:scope AS uuid[]) IS NULL OR rep_id = ANY(:scope))', { scope })
+      .returning(['id'])
       .execute();
 
     const assigned = result.affected ?? 0;
     if (assigned > 0) {
       // No repId in the payload → broadcast to all vans (previous owners differ).
       this.events.emit('customer.changed', { reason: 'segment.bulk.reassign' });
+      const customerIds = ((result.raw ?? []) as Array<{ id: string }>).map((r) => r.id);
+      if (customerIds.length) this.events.emit('erp.customer.salesman', { customerIds });
     }
     return { assigned };
   }

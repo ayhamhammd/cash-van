@@ -107,8 +107,10 @@ describe('CustomersService.assignSalesmenFromXlsx (match customer by NAME)', () 
     expect(r.unmatchedSalesmen).toEqual(['999']);
     // Only the one real change is written, and vans are signalled exactly once.
     expect(updates).toEqual([{ crit: { id: 'c1' }, patch: { repId: 'rep-1', repSource: 'DIRECT' } }]);
-    expect(events.emit).toHaveBeenCalledTimes(1);
+    // ...and the ERP is told about that one customer.
+    expect(events.emit).toHaveBeenCalledTimes(2);
     expect(events.emit).toHaveBeenCalledWith('customer.changed', expect.any(Object));
+    expect(events.emit).toHaveBeenCalledWith('erp.customer.salesman', { customerIds: ['c1'] });
   });
 
   it('keeps the first row when it is real data (column 2 has a digit → not a header)', async () => {
