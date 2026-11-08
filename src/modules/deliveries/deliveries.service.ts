@@ -55,6 +55,13 @@ const COUNTED_COLLECTION = ['confirmed', 'deposited'];
 const RECENT_DAYS = 2;
 
 /**
+ * When a stop was finished. The ERP stamps delivered_at only on a delivery, so a
+ * refusal (RETURNED) falls back to when the mirror last saw the stop change;
+ * without it a refused stop never showed in the phone's lists or history.
+ */
+const FINISHED_AT = 'COALESCE(s.delivered_at, s.local_delivered_at, s.updated_at)';
+
+/**
  * Delivery runs for the dashboard and the delivery rep's phone
  * (docs/SPEC-delivery-rep.md §6.1–6.2, delivery phase-1 contract §B).
  *
@@ -171,7 +178,9 @@ export class DeliveriesService {
       `NOT EXISTS (
          SELECT 1 FROM delivery_stops s
            JOIN delivery_runs r ON r.id = s.run_id
-          WHERE r.status = 'OPEN' AND s.status = 'LOADED'
+          WHERE ((r.status = 'OPEN' AND s.status = 'LOADED')
+                 -- delivered once is delivered: the ERP refuses it (ALREADY_DELIVERED)
+                 OR s.status IN ('DELIVERED', 'PARTIAL'))
             AND (s.erp_invoice_id = ei.erp_id OR s.invoice_number = ei.invoice_number))`,
     ];
     if (q.from) where.push(`(ei.issued_at AT TIME ZONE ${p(tz)})::date >= ${p(q.from)}::date`);
@@ -294,7 +303,7 @@ export class DeliveriesService {
          FROM delivery_stops s
          JOIN delivery_runs r ON r.id = s.run_id
         WHERE r.rep_id = $1 AND r.status = 'CLOSED'
-          AND COALESCE(s.delivered_at, s.local_delivered_at) >= now() - ($2 || ' days')::interval`,
+          AND ${FINISHED_AT} >= now() - ($2 || ' days')::interval`,
       [rep.id, String(RECENT_DAYS)],
     );
     const closedIds = [...new Set(recent.map((r) => r.run_id))];
@@ -325,7 +334,7 @@ export class DeliveriesService {
     const where = ['r.rep_id = $1'];
     if (q.status) where.push(`s.status = ${p(q.status)}`);
     else where.push(`(s.status <> 'LOADED' OR s.local_result_ref IS NOT NULL)`);
-    const at = 'COALESCE(s.delivered_at, s.local_delivered_at)';
+    const at = FINISHED_AT;
     if (q.from) where.push(`(${at} AT TIME ZONE ${p(tz)})::date >= ${p(q.from)}::date`);
     if (q.to) where.push(`(${at} AT TIME ZONE ${p(tz)})::date <= ${p(q.to)}::date`);
     if (q.customerId) where.push(`s.customer_id = ${p(q.customerId)}`);
