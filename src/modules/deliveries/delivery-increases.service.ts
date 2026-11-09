@@ -24,6 +24,7 @@ import {
   type IncreaseStatus,
 } from './entities/delivery-increase-request.entity';
 import type { CustomerRef } from './delivery-views';
+import { PRODUCT_UNIT_SQL, increaseLineOf, withBaseUnits, type ProductUnitRow } from './delivery-increase-units';
 import type { DismissIncreaseDto, ListIncreasesQuery, OrderIncreaseDto } from './dto/deliveries.dto';
 
 /** Contract §B `IncreaseRequest`. */
@@ -164,7 +165,10 @@ export class DeliveryIncreasesService {
         throw this.alreadyDecided(req);
       }
 
-      const lines = dto.lines?.length ? await this.orderLines(dto.lines) : req.lines;
+      // As requested, with a pre-fix row's placeholder unit put right on the way.
+      const lines = dto.lines?.length
+        ? await this.orderLines(dto.lines)
+        : await withBaseUnits((sql, p) => this.dataSource.query(sql, p), req.lines);
       const customer = req.customerId
         ? ((await this.dataSource.query(
             `SELECT id, customer_number, rep_id FROM customers WHERE id = $1 AND deleted_at IS NULL`,
@@ -343,12 +347,10 @@ export class DeliveryIncreasesService {
   /** The office's edited lines, each a known active product, names snapshotted again. */
   private async orderLines(lines: Array<{ productId: string; qty: number }>): Promise<IncreaseLine[]> {
     const ids = [...new Set(lines.map((l) => l.productId))];
-    const rows: Array<{ id: string; item_number: string; name_ar: string | null; name_en: string | null; unit: string | null }> =
-      await this.dataSource.query(
-        `SELECT id, item_number, name_ar, name_en, unit FROM item_cart
-          WHERE id = ANY($1::uuid[]) AND is_active AND deleted_at IS NULL`,
-        [ids],
-      );
+    const rows: ProductUnitRow[] = await this.dataSource.query(
+      `${PRODUCT_UNIT_SQL} AND ic.is_active AND ic.deleted_at IS NULL`,
+      [ids],
+    );
     const byId = new Map(rows.map((r) => [r.id, r]));
     const missing = ids.filter((id) => !byId.has(id));
     if (missing.length) {
@@ -359,10 +361,7 @@ export class DeliveryIncreasesService {
     }
     const by = new Map<string, number>();
     for (const l of lines) by.set(l.productId, (by.get(l.productId) ?? 0) + l.qty);
-    return [...by.entries()].map(([productId, qty]) => {
-      const r = byId.get(productId)!;
-      return { productId, skuCode: r.item_number, nameAr: r.name_ar, nameEn: r.name_en, unit: r.unit, qty };
-    });
+    return [...by.entries()].map(([productId, qty]) => increaseLineOf(byId.get(productId)!, qty));
   }
 
   /**
@@ -445,7 +444,10 @@ export class DeliveryIncreasesService {
     const runBy = new Map(runs.map((r) => [r.id, r]));
     const stopBy = new Map(stops.map((s) => [s.id, s]));
     const repBy = new Map(reps.map((r) => [r.id, r]));
-    return reqs.map((r) => {
+    const linesOf = await Promise.all(
+      reqs.map((r) => withBaseUnits((sql, p) => this.dataSource.query(sql, p), r.lines ?? [])),
+    );
+    return reqs.map((r, i) => {
       const run = r.runId ? runBy.get(r.runId) : undefined;
       const stop = r.stopId ? stopBy.get(r.stopId) : undefined;
       const rep = r.repId ? repBy.get(r.repId) : undefined;
@@ -457,7 +459,7 @@ export class DeliveryIncreasesService {
         stop: r.stopId ? { id: r.stopId, invoiceNumber: stop?.invoice_number ?? r.invoiceNumber ?? null } : null,
         customer: r.customerId ? (customers.get(r.customerId) ?? null) : null,
         rep: rep ? { id: rep.id, code: rep.code ?? null, nameAr: rep.nameAr } : null,
-        lines: r.lines ?? [],
+        lines: linesOf[i],
         decidedAt: r.decidedAt ? new Date(r.decidedAt).toISOString() : null,
         decidedBy: r.decidedBy ?? null,
         decisionNote: r.decisionNote ?? null,

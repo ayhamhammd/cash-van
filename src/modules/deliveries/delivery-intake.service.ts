@@ -19,6 +19,14 @@ import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import { DeliveryProof } from './entities/delivery-proof.entity';
 import type { IncreaseLine } from './entities/delivery-increase-request.entity';
+import {
+  ITEMS_AR,
+  LINES_AR,
+  PRODUCT_UNIT_SQL,
+  arabicCount,
+  increaseLineOf,
+  type ProductUnitRow,
+} from './delivery-increase-units';
 import { attachmentIdOf, erpErrorCode, unwrapRun } from './erp-delivery.types';
 import { checkLines, checkProofs, type RejectReason } from './delivery-result-checks';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -240,20 +248,15 @@ export class DeliveryIntakeService implements OnModuleInit {
           );
         } else {
           const wanted = mergeIncrease(dto.increase);
-          const products: Array<{ id: string; item_number: string; name_ar: string | null; name_en: string | null; unit: string | null }> =
-            await em.query(
-              `SELECT id, item_number, name_ar, name_en, unit FROM item_cart
-                WHERE id = ANY($1::uuid[]) AND is_active AND deleted_at IS NULL`,
-              [wanted.map((w) => w.productId)],
-            );
+          const products: ProductUnitRow[] = await em.query(
+            `${PRODUCT_UNIT_SQL} AND ic.is_active AND ic.deleted_at IS NULL`,
+            [wanted.map((w) => w.productId)],
+          );
           const byId = new Map(products.map((p) => [p.id, p]));
           if (wanted.some((w) => !byId.has(w.productId))) {
             return { verdict: { status: 'rejected' as const, reason: 'INCREASE_UNKNOWN_PRODUCT' as const } };
           }
-          increase = wanted.map((w) => {
-            const p = byId.get(w.productId)!;
-            return { productId: p.id, skuCode: p.item_number, nameAr: p.name_ar, nameEn: p.name_en, unit: p.unit, qty: w.qty };
-          });
+          increase = wanted.map((w) => increaseLineOf(byId.get(w.productId)!, w.qty));
         }
       }
 
@@ -380,7 +383,7 @@ export class DeliveryIntakeService implements OnModuleInit {
         kind: 'delivery.return_requested',
         titleAr: 'طلب إرجاع',
         titleEn: 'Return request',
-        bodyAr: `الفاتورة ${r.invoiceNumber}، الزبون ${r.customer}، ${r.lines} بند`,
+        bodyAr: `الفاتورة ${r.invoiceNumber}، الزبون ${r.customer}، ${arabicCount(r.lines, LINES_AR)}`,
         bodyEn: `Return request: invoice ${r.invoiceNumber}, customer ${r.customer}, ${r.lines} line${r.lines === 1 ? '' : 's'}`,
         refType: 'delivery_stop',
         refId: r.stopId,
@@ -403,7 +406,7 @@ export class DeliveryIntakeService implements OnModuleInit {
         kind: 'delivery.increase_requested',
         titleAr: 'طلب زيادة',
         titleEn: 'Increase request',
-        bodyAr: `طلب زيادة: الفاتورة ${r.invoiceNumber}، الزبون ${r.customer}، ${r.items} أصناف`,
+        bodyAr: `طلب زيادة: الفاتورة ${r.invoiceNumber}، الزبون ${r.customer}، ${arabicCount(r.items, ITEMS_AR)}`,
         bodyEn: `Increase request: invoice ${r.invoiceNumber}, customer ${r.customer}, ${r.items} item${r.items === 1 ? '' : 's'}`,
         refType: 'delivery_stop',
         refId: r.stopId,

@@ -49,6 +49,7 @@ run('delivery increase requests (real DB, real vouchers path)', () => {
   let office = '';
   let cust = '';
   let water = '';
+  let pce: { name_ar: string; name_en: string | null } = { name_ar: '', name_en: null };
   let juice = '';
   let settingsBefore: { inc: boolean; proof: boolean; erp: boolean } = { inc: false, proof: true, erp: false };
   const q = <T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> => ds.query(sql, params);
@@ -130,11 +131,17 @@ run('delivery increase requests (real DB, real vouchers path)', () => {
     const mkItem = async (n: string, name: string, price: number) =>
       (
         await q<{ id: string }>(
-          `INSERT INTO item_cart (item_number, item_name, barcode, sku, name_ar, name_en, price, tax_percentage, tax_rate, unit)
-           VALUES ($1, $2, $1, $1, $2, $2, $3, 16, 0.16, 'CTN') RETURNING id`,
+          `INSERT INTO item_cart (item_number, item_name, barcode, sku, name_ar, name_en, price, tax_percentage, tax_rate, unit, unit_of_measure)
+           VALUES ($1, $2, $1, $1, $2, $2, $3, 16, 0.16, 'carton', 'PCE') RETURNING id`,
           [n, name, price],
         )
       )[0].id;
+    // The base unit lives in unit_of_measure → units; item_cart.unit is a
+    // placeholder ('carton') that must never reach a line.
+    await q(
+      `INSERT INTO units (code, name_ar, name_en) VALUES ('PCE', 'قطعة', 'piece') ON CONFLICT (code) DO NOTHING`,
+    );
+    [pce] = await q<{ name_ar: string; name_en: string | null }>(`SELECT name_ar, name_en FROM units WHERE code = 'PCE'`);
     water = await mkItem(`${P}W`, 'Water', 1500);
     juice = await mkItem(`${P}J`, 'Juice', 2000);
     // The customer's contract price for water — the order must use it, not the list price.
@@ -216,9 +223,10 @@ run('delivery increase requests (real DB, real vouchers path)', () => {
       [`${P}-ref-2`],
     );
     expect(row).toMatchObject({ status: 'PENDING', customer_id: cust, rep_id: repD, invoice_number: `${P}-INV-2` });
+    const base = { unit: 'PCE', unitNameAr: pce.name_ar, unitNameEn: pce.name_en ?? pce.name_ar };
     expect(row.lines).toEqual([
-      { productId: water, skuCode: `${P}W`, nameAr: 'Water', nameEn: 'Water', unit: 'CTN', qty: 3 },
-      { productId: juice, skuCode: `${P}J`, nameAr: 'Juice', nameEn: 'Juice', unit: 'CTN', qty: 2 },
+      { productId: water, skuCode: `${P}W`, nameAr: 'Water', nameEn: 'Water', ...base, qty: 3 },
+      { productId: juice, skuCode: `${P}J`, nameAr: 'Juice', nameEn: 'Juice', ...base, qty: 2 },
     ]);
     const [{ payload }] = await q<{ payload: Record<string, unknown> }>(
       `SELECT payload FROM voucher_inbox WHERE client_ref = $1`,
@@ -230,6 +238,11 @@ run('delivery increase requests (real DB, real vouchers path)', () => {
     ]);
     const after = await q<{ n: number }>(`SELECT count(*)::int AS n FROM notifications WHERE kind = 'delivery.increase_requested'`);
     expect(after[0].n).toBeGreaterThan(before[0].n);
+    const [managerNote] = await q<{ body_ar: string }>(
+      `SELECT body_ar FROM notifications WHERE kind = 'delivery.increase_requested' AND body_ar LIKE $1 LIMIT 1`,
+      [`%${P}-INV-2%`],
+    );
+    expect(managerNote.body_ar).toMatch(/، صنفان$/);
 
     // The replayed result makes no second request.
     await intake.ingest((await result('2', { increase: [{ productId: water, qty: 3 }] })) as never, asDriver());
@@ -353,5 +366,25 @@ run('delivery increase requests (real DB, real vouchers path)', () => {
     });
     const decided = await increases.list({ status: 'DECIDED', customerId: cust });
     expect(decided.items.map((i) => i.status).sort()).toEqual(['DISMISSED', 'ORDERED']);
+  });
+
+  it("a request stored before the base unit was kept (unit 'carton') reads in the base unit", async () => {
+    await q(
+      `INSERT INTO delivery_increase_requests (client_ref, stop_id, run_id, customer_id, rep_id, invoice_number, lines)
+       SELECT $1, s.id, s.run_id, $2, $3, s.invoice_number, $4::jsonb FROM delivery_stops s WHERE s.erp_id = $5`,
+      [
+        `${P}-ref-old`,
+        cust,
+        repD,
+        JSON.stringify([{ productId: water, skuCode: `${P}W`, nameAr: 'Water', nameEn: 'Water', unit: 'carton', qty: 2 }]),
+        `${P}-item-1`,
+      ],
+    );
+    const phone = await deliveries.appStop(asDriver(), await stopId('1'));
+    expect(phone.increaseRequest?.lines).toEqual([
+      { productId: water, skuCode: `${P}W`, nameAr: 'Water', nameEn: 'Water', unit: 'PCE', unitNameAr: pce.name_ar, unitNameEn: pce.name_en ?? pce.name_ar, qty: 2 },
+    ]);
+    const listed = await increases.list({ status: 'PENDING', customerId: cust });
+    expect(listed.items.find((i) => i.stop?.invoiceNumber === `${P}-INV-1`)?.lines[0]).toMatchObject({ unit: 'PCE', unitNameAr: pce.name_ar });
   });
 });

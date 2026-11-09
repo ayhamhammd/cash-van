@@ -78,7 +78,15 @@ describe('increase requests — order and dismiss', () => {
         }
         if (sql.includes('SELECT user_id FROM reps')) return [{ user_id: `user-of-${params[0]}` }];
         if (sql.includes('FROM item_cart')) {
-          return (params[0] as string[]).map((id) => ({ id, item_number: id === P1 ? 'W1' : 'J1', name_ar: 'x', name_en: null, unit: 'CTN' }));
+          return (params[0] as string[]).map((id) => ({
+            id,
+            item_number: id === P1 ? 'W1' : 'J1',
+            name_ar: 'x',
+            name_en: null,
+            unit: 'PCE',
+            unit_name_ar: 'قطعة',
+            unit_name_en: 'piece',
+          }));
         }
         if (sql.includes('FROM delivery_runs')) return [{ id: 'run-1', run_number: 'DR-1', run_date: '2026-11-08' }];
         if (sql.includes('FROM delivery_stops')) return [{ id: 'stop-1', invoice_number: 'INV-9' }];
@@ -165,12 +173,21 @@ describe('increase requests — order and dismiss', () => {
     expect(none.vouchers.create).not.toHaveBeenCalled();
   });
 
+  it("a row stored with the placeholder 'carton' reads in the base unit, and is ordered and saved that way", async () => {
+    const t = setup();
+    const out = await t.svc.order(REQ, {}, actor, 'k');
+    expect(out.request.lines[0]).toMatchObject({ unit: 'PCE', unitNameAr: 'قطعة', unitNameEn: 'piece', qty: 3 });
+    expect((t.req.lines as Array<{ unit: string }>).map((l) => l.unit)).toEqual(['PCE', 'PCE']);
+  });
+
   it("the office's edited lines replace the request's", async () => {
     const t = setup();
     await t.svc.order(REQ, { lines: [{ productId: P2, qty: 4 }] }, actor, 'k');
     const dto = (t.vouchers.create.mock.calls[0] as unknown[])[0] as { transactions: unknown[] };
     expect(dto.transactions).toEqual([{ itemNumber: 'J1', itemName: 'x', itemQty: '4', unitPrice: '2.000', storeNumber: 'S1' }]);
-    expect(t.req.lines).toEqual([{ productId: P2, skuCode: 'J1', nameAr: 'x', nameEn: null, unit: 'CTN', qty: 4 }]);
+    expect(t.req.lines).toEqual([
+      { productId: P2, skuCode: 'J1', nameAr: 'x', nameEn: null, unit: 'PCE', unitNameAr: 'قطعة', unitNameEn: 'piece', qty: 4 },
+    ]);
   });
 
   it('the same Idempotency-Key again answers the same order without a second one', async () => {

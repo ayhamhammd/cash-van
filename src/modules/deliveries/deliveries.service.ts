@@ -19,6 +19,7 @@ import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import { DeliveryProof } from './entities/delivery-proof.entity';
 import { DeliveryIncreaseRequest } from './entities/delivery-increase-request.entity';
+import { withBaseUnits } from './delivery-increase-units';
 import type { ErpDeliveryRun, ErpLoadWarning } from './erp-delivery.types';
 import {
   goodsBack,
@@ -429,6 +430,10 @@ export class DeliveriesService {
       where: { stopId: In(ids) },
       order: { createdAt: 'ASC' },
     });
+    // A row stored before the base unit was kept still reads right.
+    for (const r of increases) {
+      r.lines = await withBaseUnits((sql, p) => this.dataSource.query(sql, p), r.lines ?? []);
+    }
     const increaseBy = new Map(increases.map((r) => [r.stopId!, r]));
     const linesBy = new Map<string, DeliveryStopLine[]>();
     for (const l of lines) linesBy.set(l.stopId, [...(linesBy.get(l.stopId) ?? []), l]);

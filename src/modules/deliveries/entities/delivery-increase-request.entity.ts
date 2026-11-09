@@ -9,13 +9,20 @@ import {
 
 export type IncreaseStatus = 'PENDING' | 'ORDERED' | 'DISMISSED';
 
-/** One requested line, with the product's name and unit snapshotted when it was asked for. */
+/**
+ * One requested line, with the product's name and BASE unit snapshotted when it
+ * was asked for. `qty` is in that base unit (the unit the order is priced in).
+ */
 export interface IncreaseLine {
   productId: string;
   skuCode: string;
   nameAr: string | null;
   nameEn: string | null;
+  /** The base unit's code (item_cart.unit_of_measure), e.g. PCE. */
   unit: string | null;
+  /** Its names from `units` (the code when it has none). Absent on rows stored before this was kept. */
+  unitNameAr?: string | null;
+  unitNameEn?: string | null;
   qty: number;
 }
 

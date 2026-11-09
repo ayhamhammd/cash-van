@@ -145,7 +145,15 @@ describe('sync/deliveries — intake', () => {
       proofs?: Proof[];
       proofRequired?: boolean;
       increaseOn?: boolean;
-      products?: Array<{ id: string; item_number: string; name_ar: string; name_en: string | null; unit: string }>;
+      products?: Array<{
+        id: string;
+        item_number: string;
+        name_ar: string;
+        name_en: string | null;
+        unit: string;
+        unit_name_ar: string | null;
+        unit_name_en: string | null;
+      }>;
     } = {},
   ) {
     const increases: unknown[][] = [];
@@ -331,6 +339,7 @@ describe('sync/deliveries — intake', () => {
         expect.objectContaining({ kind: 'delivery.return_requested', refType: 'delivery_stop', refId: STOP }),
       ]);
       expect(String(w.notified[0].bodyEn)).toMatch(/1 line$/);
+      expect(String(w.notified[0].bodyAr)).toMatch(/، بند واحد$/);
       await new Promise((r) => setImmediate(r));
       expect(w.pushed).toEqual(['p-1', 's-1', 'd-1']);
     });
@@ -373,9 +382,11 @@ describe('sync/deliveries — intake', () => {
   describe('phase 4 — increase requests', () => {
     const P1 = '22222222-2222-4222-8222-222222222222';
     const P2 = '33333333-3333-4333-8333-333333333333';
+    // The BASE unit (unit_of_measure → units), never item_cart.unit.
     const products = [
-      { id: P1, item_number: 'W1', name_ar: 'ماء', name_en: 'Water', unit: 'CTN' },
-      { id: P2, item_number: 'J1', name_ar: 'عصير', name_en: null, unit: 'CTN' },
+      { id: P1, item_number: 'W1', name_ar: 'ماء', name_en: 'Water', unit: 'PCE', unit_name_ar: 'قطعة', unit_name_en: 'piece' },
+      // No units row for KG here: the code stands in for the names.
+      { id: P2, item_number: 'J1', name_ar: 'عصير', name_en: null, unit: 'KG', unit_name_ar: null, unit_name_en: null },
     ];
     const payloadOf = (w: ReturnType<typeof world>) =>
       (w.inbox.find((r) => r.client_ref === 'd-1') as unknown as { payload: Record<string, unknown> }).payload;
@@ -400,8 +411,8 @@ describe('sync/deliveries — intake', () => {
       expect([clientRef, stopId, runId, repId]).toEqual(['d-1', STOP, 'run-local', 'rep-1']);
       // The same product twice is one line.
       expect(JSON.parse(linesJson)).toEqual([
-        { productId: P1, skuCode: 'W1', nameAr: 'ماء', nameEn: 'Water', unit: 'CTN', qty: 3 },
-        { productId: P2, skuCode: 'J1', nameAr: 'عصير', nameEn: null, unit: 'CTN', qty: 1.5 },
+        { productId: P1, skuCode: 'W1', nameAr: 'ماء', nameEn: 'Water', unit: 'PCE', unitNameAr: 'قطعة', unitNameEn: 'piece', qty: 3 },
+        { productId: P2, skuCode: 'J1', nameAr: 'عصير', nameEn: null, unit: 'KG', unitNameAr: 'KG', unitNameEn: 'KG', qty: 1.5 },
       ]);
       expect(payloadOf(w).increase).toEqual([
         { skuCode: 'W1', qty: 3 },
@@ -410,7 +421,7 @@ describe('sync/deliveries — intake', () => {
       expect(w.notified).toEqual([
         expect.objectContaining({
           kind: 'delivery.increase_requested',
-          bodyAr: expect.stringContaining('2 أصناف'),
+          bodyAr: expect.stringMatching(/، صنفان$/),
           bodyEn: expect.stringMatching(/^Increase request: invoice .*, 2 items$/),
         }),
       ]);
