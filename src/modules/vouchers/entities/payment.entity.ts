@@ -21,7 +21,7 @@ export class Payment extends BaseEntity {
   @Column({ name: 'voucher_number', type: 'text' })
   voucherNumber!: string;
 
-  @Column({ type: 'numeric', precision: 14, scale: 2 })
+  @Column({ type: 'numeric', precision: 14, scale: 3 })
   amount!: string;
 
   @Column({ name: 'payment_date', type: 'timestamptz', default: () => 'now()' })

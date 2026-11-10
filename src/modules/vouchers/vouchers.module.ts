@@ -21,6 +21,9 @@ import { ReturnsController } from './returns/returns.controller';
 import { ReturnCandidatesService } from './returns/candidates';
 import { ReturnCreateService } from './returns/create';
 
+import { PaymentFilsRepairController } from './payment-fils-repair.controller';
+import { PaymentFilsRepairService } from './payment-fils-repair.service';
+
 @Module({
   imports: [
     TypeOrmModule.forFeature([
@@ -37,8 +40,14 @@ import { ReturnCreateService } from './returns/create';
     WarehousesModule,
     OffersModule,
   ],
-  controllers: [ReturnsController, VouchersController],
-  providers: [ReturnCandidatesService, ReturnCreateService, VouchersService, TransactionKindsService],
+  controllers: [ReturnsController, VouchersController, PaymentFilsRepairController],
+  providers: [
+    ReturnCandidatesService,
+    ReturnCreateService,
+    VouchersService,
+    TransactionKindsService,
+    PaymentFilsRepairService,
+  ],
   exports: [VouchersService, TransactionKindsService],
 })
 export class VouchersModule {}

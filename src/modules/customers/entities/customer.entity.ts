@@ -89,7 +89,7 @@ export class Customer extends BaseEntity {
     name: 'credit_limit',
     type: 'numeric',
     precision: 14,
-    scale: 2,
+    scale: 3,
     default: 0,
   })
   creditLimit!: string;
@@ -109,7 +109,7 @@ export class Customer extends BaseEntity {
     name: 'total_debt',
     type: 'numeric',
     precision: 14,
-    scale: 2,
+    scale: 3,
     default: 0,
   })
   totalDebt!: string;
@@ -118,7 +118,7 @@ export class Customer extends BaseEntity {
     name: 'total_credit',
     type: 'numeric',
     precision: 14,
-    scale: 2,
+    scale: 3,
     default: 0,
   })
   totalCredit!: string;

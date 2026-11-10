@@ -24,7 +24,7 @@ export class PaymentCheque extends BaseEntity {
   @Column({ name: 'due_date', type: 'date' })
   dueDate!: string;
 
-  @Column({ type: 'numeric', precision: 14, scale: 2 })
+  @Column({ type: 'numeric', precision: 14, scale: 3 })
   amount!: string;
 
   @ManyToOne(() => Customer, { onDelete: 'RESTRICT', nullable: true })

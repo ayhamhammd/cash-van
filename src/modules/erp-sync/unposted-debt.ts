@@ -85,12 +85,12 @@ export async function unpostedDebtByCustomer(
   const out = new Map<string, number>();
   for (const r of rows) {
     const n = Number(r.amount);
-    if (Number.isFinite(n) && Math.abs(n) >= 0.005) out.set(r.customer_id, n);
+    if (Number.isFinite(n) && Math.abs(n) >= 0.0005) out.set(r.customer_id, n);
   }
   return out;
 }
 
 /** The ERP's figure for a customer, with what the ERP has not posted yet put back. */
 export function withUnposted(erpBalance: number, unposted: number | undefined): string {
-  return (erpBalance + (unposted ?? 0)).toFixed(2);
+  return (erpBalance + (unposted ?? 0)).toFixed(3); // fils: the JOD has three decimals
 }

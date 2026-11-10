@@ -54,7 +54,7 @@ export class ItemUnit {
     name: 'sale_price',
     type: 'numeric',
     precision: 14,
-    scale: 2,
+    scale: 3,
     default: 0,
   })
   salePrice!: string;

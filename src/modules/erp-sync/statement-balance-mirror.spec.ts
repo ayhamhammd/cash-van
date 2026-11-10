@@ -73,7 +73,7 @@ describe('ErpSyncService statement balance mirror', () => {
   it('mirrors an open-ended window, which always means "up to now"', async () => {
     const { svc, updates } = service();
     await svc.mirrorStatementBalance('c1', statement(120.75), {});
-    expect(updates).toEqual([{ totalDebt: '120.75' }]);
+    expect(updates).toEqual([{ totalDebt: '120.750' }]);
   });
 
   it('puts back a receipt the ERP has not posted yet, instead of undoing it', async () => {
@@ -83,28 +83,27 @@ describe('ErpSyncService statement balance mirror', () => {
     // next credit sale.
     const { svc, updates } = service({ c1: -500 });
     await svc.mirrorStatementBalance('c1', statement(500), {});
-    expect(updates).toEqual([{ totalDebt: '0.00' }]);
+    expect(updates).toEqual([{ totalDebt: '0.000' }]);
   });
 
   it('puts back an unposted credit sale too — the ERP must not hand out its headroom', async () => {
     const { svc, updates } = service({ c1: 75 });
     await svc.mirrorStatementBalance('c1', statement(100), {});
-    expect(updates).toEqual([{ totalDebt: '175.00' }]);
+    expect(updates).toEqual([{ totalDebt: '175.000' }]);
   });
 
-  it('writes two decimals, which is all the column holds', () => {
-    // NOT a rule this code invented: customers.total_debt is numeric(14,2) and
-    // pullCustomerBalances() already rounds the same way. Recorded here because
-    // JOD carries THREE decimals (fils), so a balance of 260.325 lands as 260.32
-    // and the last fil is lost on the dashboard. The handset keeps its own
-    // 3-decimal arithmetic; only this mirrored column is coarse.
-    expect((260.325).toFixed(2)).toBe('260.32');
+  it('keeps the fils: the JOD has three decimals and total_debt is numeric(14,3)', async () => {
+    // It used to write two (the column was numeric(14,2)), so 260.325 landed as
+    // 260.32 and the last fil was lost on the dashboard. See PaymentMoney3dp.
+    const { svc, updates } = service();
+    await svc.mirrorStatementBalance('c1', statement(260.325), { to: today });
+    expect(updates).toEqual([{ totalDebt: '260.325' }]);
   });
 
   it('mirrors a window that ends today', async () => {
     const { svc, updates } = service();
     await svc.mirrorStatementBalance('c1', statement(120.5), { to: today });
-    expect(updates).toEqual([{ totalDebt: '120.50' }]);
+    expect(updates).toEqual([{ totalDebt: '120.500' }]);
   });
 
   it('mirrors a window that ends in the future', async () => {

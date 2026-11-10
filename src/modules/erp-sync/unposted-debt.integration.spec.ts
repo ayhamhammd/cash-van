@@ -112,7 +112,7 @@ run('unposted debt put back on the ERP mirror (real DB)', () => {
     // Owed 500, collected all of it; the ERP still says 500.
     await receipt(500, { outbox: 'pending' });
     expect(await unposted()).toBeCloseTo(-500, 2);
-    expect(withUnposted(500, await unposted())).toBe('0.00');
+    expect(withUnposted(500, await unposted())).toBe('0.000');
   });
 
   it('counts a receipt once: by cash-van until the ERP posts it, then by the ERP', async () => {

@@ -28,13 +28,13 @@ describe('CollectionsService.applyCollectionToDebt', () => {
     // raw fils would move the balance a thousand times too far.
     const { svc, em, queries } = service();
     await svc.applyCollectionToDebt(em, 'cust-1', 50_000);
-    expect(queries[0].params[1]).toBe('50.00');
+    expect(queries[0].params[1]).toBe('50.000');
   });
 
   it('keeps the fils that JOD actually has', async () => {
     const { svc, em, queries } = service();
     await svc.applyCollectionToDebt(em, 'cust-1', 9_331);
-    expect(queries[0].params[1]).toBe('9.33');
+    expect(queries[0].params[1]).toBe('9.331');
   });
 
   it('SUBTRACTS - a receipt reduces the debt', async () => {

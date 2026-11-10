@@ -2406,7 +2406,7 @@ export class ErpSyncService {
         if (c.email) cust.email = c.email;
         if (c.taxNumber) cust.tin = c.taxNumber; // ERP taxNumber ↔ cash-van tin
         if (c.creditLimit != null) {
-          cust.creditLimit = Number(c.creditLimit).toFixed(2); // ERP GET returns JOD major already
+          cust.creditLimit = Number(c.creditLimit).toFixed(3); // ERP GET returns JOD major already
         }
         // AR: mirror payment terms + credit hold (see docs/SPEC-accounts-receivable.md).
         if (c.paymentTermsDays != null) cust.paymentTerms = Number(c.paymentTermsDays);
@@ -5084,7 +5084,7 @@ export class ErpSyncService {
       // Same uniqueness story as the item barcode above (uq_item_units_barcode).
       iu.barcode = await this.freeUnitBarcode(s.barcode || s.sku, s.sku, iu.id);
       iu.qty = mult;
-      iu.salePrice = (Number(s.sellingPrice) || 0).toFixed(2); // JOD major
+      iu.salePrice = (Number(s.sellingPrice) || 0).toFixed(3); // JOD major, to the fil
       // Both of these are written on UPDATE as well as INSERT, and that is what
       // migrates an install that already ran: its colour units exist, so this
       // loop finds them and an insert-only write would never touch them again.

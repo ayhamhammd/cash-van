@@ -479,7 +479,7 @@ export class VouchersService implements OnModuleInit {
       `UPDATE customers
           SET total_debt = COALESCE(total_debt, 0) + $2::numeric
         WHERE customer_number = $1`,
-      [dto.customerNumber, signed.toFixed(2)],
+      [dto.customerNumber, signed.toFixed(3)],
     );
   }
 

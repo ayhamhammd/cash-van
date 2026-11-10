@@ -302,7 +302,7 @@ export class ArService {
       month: ym,
       creditSold,
       collected,
-      collectionRatio: creditSold > 0 ? Number((collected / creditSold).toFixed(3)) : null,
+      collectionRatio: creditSold > 0 ? Number((collected / creditSold).toFixed(2)) : null,
       totalReceivable,
       arrearsCount: arrears.length,
       arrears,
@@ -450,20 +450,20 @@ export class ArService {
         unpaidVouchers.push({
           voucherNumber: v.voucherNumber,
           date: v.date,
-          amount: Number(v.amount.toFixed(2)),
-          unpaid: Number(unpaid.toFixed(2)),
+          amount: Number(v.amount.toFixed(3)),
+          unpaid: Number(unpaid.toFixed(3)),
         });
       }
       const outstanding = unpaidVouchers.reduce((s, v) => s + v.unpaid, 0);
-      if (outstanding <= 0.005) continue;
+      if (outstanding <= 0.0005) continue;
       totalOutstanding += outstanding;
       customers.push({
         customerNumber,
         customerName: e.customerName,
-        debit: Number(debit.toFixed(2)),
-        collected: Number(collected.toFixed(2)),
-        returns: Number(returns.toFixed(2)),
-        outstanding: Number(outstanding.toFixed(2)),
+        debit: Number(debit.toFixed(3)),
+        collected: Number(collected.toFixed(3)),
+        returns: Number(returns.toFixed(3)),
+        outstanding: Number(outstanding.toFixed(3)),
         unpaidVouchers,
       });
     }
@@ -473,7 +473,7 @@ export class ArService {
       from,
       to,
       customerNumber: cust,
-      totalOutstanding: Number(totalOutstanding.toFixed(2)),
+      totalOutstanding: Number(totalOutstanding.toFixed(3)),
       customerCount: customers.length,
       customers,
     };

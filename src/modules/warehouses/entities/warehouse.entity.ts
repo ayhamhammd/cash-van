@@ -45,7 +45,7 @@ export class Warehouse extends BaseEntity {
     name: 'wh_credit_box',
     type: 'numeric',
     precision: 14,
-    scale: 2,
+    scale: 3,
     default: 0,
   })
   whCreditBox!: string;
@@ -54,7 +54,7 @@ export class Warehouse extends BaseEntity {
     name: 'wh_debit_box',
     type: 'numeric',
     precision: 14,
-    scale: 2,
+    scale: 3,
     default: 0,
   })
   whDebitBox!: string;

@@ -397,7 +397,7 @@ export class CollectionsService {
     amountFils: number,
   ): Promise<void> {
     if (!customerId || !amountFils) return;
-    const major = (amountFils / 1000).toFixed(2);
+    const major = (amountFils / 1000).toFixed(3); // exact: fils → JOD with all three decimals
     // One statement, no read-modify-write: two receipts for one customer at once
     // would otherwise both read the old balance and one would overwrite the other,
     // and the number that goes missing is money the customer has already handed over.

@@ -17,7 +17,7 @@ export class Vendor extends BaseEntity {
     name: 'vendor_debit',
     type: 'numeric',
     precision: 14,
-    scale: 2,
+    scale: 3,
     default: 0,
   })
   vendorDebit!: string;
@@ -26,7 +26,7 @@ export class Vendor extends BaseEntity {
     name: 'vendor_credit',
     type: 'numeric',
     precision: 14,
-    scale: 2,
+    scale: 3,
     default: 0,
   })
   vendorCredit!: string;
