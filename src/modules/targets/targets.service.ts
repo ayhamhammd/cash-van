@@ -1,10 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 
 import { SalesTarget, TargetMetric } from './entities/sales-target.entity';
 import { UpsertTargetDto } from './dto/upsert-target.dto';
 import { ErpSyncService } from '../erp-sync/erp-sync.service';
+import { INCLUDE_TAX_SQL, POSTED_IN_PERIOD, periodBounds } from './target-rules';
+import { ItemTargetsService, type ItemTargetLine } from './item-targets.service';
 
 export interface TargetRow {
   /**
@@ -59,6 +61,13 @@ export interface TargetRow {
   /** Confirmed collections. What the collection target is measured against. */
   collectedFils: number;
 
+  /**
+   * The rep's item targets for the month with what was achieved — present only
+   * while Program features → item targets is on. Measured, not paid: none of
+   * the commission figures below read them.
+   */
+  itemTargets?: ItemTargetLine[];
+
   // ── What that earns ───────────────────────────────────────────────────────
   commissionOnCashFils: number;
   commissionOnCreditFils: number;
@@ -97,7 +106,7 @@ export interface TargetHistoryRow extends TargetRow {
  * each voucher's payments are scaled by its own net/gross ratio, so a figure is
  * the amount before tax for exactly that document.
  */
-const TAX_FACTOR = `(CASE WHEN COALESCE((SELECT s.targets_include_tax FROM app_settings s ORDER BY s.id LIMIT 1), true)
+const TAX_FACTOR = `(CASE WHEN ${INCLUDE_TAX_SQL}
        THEN 1
        ELSE COALESCE(h.total::numeric / NULLIF(h.net_total::numeric, 0), 1) END)`;
 
@@ -105,16 +114,14 @@ const ACTUALS_JOINS = `
   LEFT JOIN (
     SELECT h.user_code, COALESCE(SUM(ROUND(h.total * 1000)), 0)::bigint AS amount_fils
     FROM voucher_headers h
-    WHERE h.trans_kind = 'SALE' AND h.is_posted = true
-      AND h.in_date >= $1::date AND h.in_date < $2::date
+    WHERE h.trans_kind = 'SALE' AND ${POSTED_IN_PERIOD}
     GROUP BY h.user_code
   ) sa ON sa.user_code = u.user_number
   LEFT JOIN (
     SELECT h.user_code, COALESCE(SUM(CAST(vt.item_qty AS numeric)), 0) AS qty
     FROM voucher_headers h
     JOIN voucher_transactions vt ON vt.voucher_number = h.voucher_number AND vt.trans_kind = 'SALE'
-    WHERE h.trans_kind = 'SALE' AND h.is_posted = true
-      AND h.in_date >= $1::date AND h.in_date < $2::date
+    WHERE h.trans_kind = 'SALE' AND ${POSTED_IN_PERIOD}
     GROUP BY h.user_code
   ) sq ON sq.user_code = u.user_number
   LEFT JOIN (
@@ -133,8 +140,7 @@ const ACTUALS_JOINS = `
                     THEN ROUND(p.amount::numeric * 1000 * ${TAX_FACTOR}) ELSE 0 END)::bigint AS credit_fils
       FROM voucher_headers h
       JOIN payments p ON p.voucher_number = h.voucher_number
-     WHERE h.trans_kind = 'SALE' AND h.is_posted = true AND h.deleted_at IS NULL
-       AND h.in_date >= $1::date AND h.in_date < $2::date
+     WHERE h.trans_kind = 'SALE' AND ${POSTED_IN_PERIOD} AND h.deleted_at IS NULL
      GROUP BY h.user_code
   ) sp ON sp.user_code = u.user_number
   LEFT JOIN (
@@ -158,16 +164,14 @@ const ACTUALS_JOINS = `
     SELECT h.user_code,
            SUM(h.total::numeric) / NULLIF(SUM(h.net_total::numeric), 0) AS ratio
       FROM voucher_headers h
-     WHERE h.trans_kind = 'SALE' AND h.is_posted = true AND h.deleted_at IS NULL
-       AND h.in_date >= $1::date AND h.in_date < $2::date
+     WHERE h.trans_kind = 'SALE' AND ${POSTED_IN_PERIOD} AND h.deleted_at IS NULL
      GROUP BY h.user_code
   ) tr ON tr.user_code = u.user_number
   LEFT JOIN (
     -- The company's, for a salesman who sold nothing this month.
     SELECT SUM(h.total::numeric) / NULLIF(SUM(h.net_total::numeric), 0) AS ratio
       FROM voucher_headers h
-     WHERE h.trans_kind = 'SALE' AND h.is_posted = true AND h.deleted_at IS NULL
-       AND h.in_date >= $1::date AND h.in_date < $2::date
+     WHERE h.trans_kind = 'SALE' AND ${POSTED_IN_PERIOD} AND h.deleted_at IS NULL
   ) tall ON true
 `;
 
@@ -191,7 +195,7 @@ const SELECT_COLS = `
   COALESCE(sp.cash_fils, 0)         AS "cashSalesFils",
   COALESCE(sp.credit_fils, 0)       AS "creditSalesFils",
   ROUND(COALESCE(co.amount_fils, 0) *
-        CASE WHEN COALESCE((SELECT s.targets_include_tax FROM app_settings s ORDER BY s.id LIMIT 1), true)
+        CASE WHEN ${INCLUDE_TAX_SQL}
              THEN 1 ELSE COALESCE(tr.ratio, tall.ratio, 1) END)::bigint
                                     AS "collectedFils",
   COALESCE((SELECT s.targets_sales_include_cash FROM app_settings s ORDER BY s.id LIMIT 1), true)
@@ -204,7 +208,22 @@ export class TargetsService {
     @InjectDataSource() private readonly ds: DataSource,
     @InjectRepository(SalesTarget) private readonly repo: Repository<SalesTarget>,
     private readonly erpSync: ErpSyncService,
+    // APPENDED: the specs build this service positionally.
+    @Optional() private readonly itemTargets?: ItemTargetsService,
   ) {}
+
+  /** Each rep's item targets on its row, while item targets are switched on. */
+  private async withItemTargets<T extends { repId: string }>(
+    rows: T[],
+    year: number,
+    month: number,
+  ): Promise<Array<T & { itemTargets?: ItemTargetLine[] }>> {
+    if (!this.itemTargets || !rows.length || !(await this.itemTargets.enabled())) return rows;
+    const lines = await this.itemTargets.lines(year, month, { repIds: rows.map((r) => r.repId) });
+    const byRep = new Map<string, ItemTargetLine[]>();
+    for (const l of lines) byRep.set(l.repId, [...(byRep.get(l.repId) ?? []), l]);
+    return rows.map((r) => ({ ...r, itemTargets: byRep.get(r.repId) ?? [] }));
+  }
 
   /**
    * Put the ERP's sales figures on the raw rows, while the ERP is connected.
@@ -286,7 +305,11 @@ export class TargetsService {
     );
 
     const sales = await this.withErpSales(rows, year, month);
-    return sales.rows.map((r) => ({ ...mapRow(r), salesSource: sales.source, erpUnavailable: sales.unavailable }));
+    return this.withItemTargets(
+      sales.rows.map((r) => ({ ...mapRow(r), salesSource: sales.source, erpUnavailable: sales.unavailable })),
+      year,
+      month,
+    );
   }
 
   /**
@@ -312,7 +335,12 @@ export class TargetsService {
 
     if (rows.length === 0) throw new NotFoundException('Salesman not found.');
     const sales = await this.withErpSales(rows, year, month);
-    return { ...mapRow(sales.rows[0]), salesSource: sales.source, erpUnavailable: sales.unavailable };
+    const [row] = await this.withItemTargets(
+      [{ ...mapRow(sales.rows[0]), salesSource: sales.source, erpUnavailable: sales.unavailable }],
+      year,
+      month,
+    );
+    return row;
   }
 
   /**
@@ -369,16 +397,7 @@ export class TargetsService {
   }
 }
 
-function pad(n: number): string {
-  return n < 10 ? `0${n}` : String(n);
-}
 
-/** [monthStart, nextMonthStart) as YYYY-MM-DD strings for the SQL date range. */
-function periodBounds(year: number, month: number): [string, string] {
-  const start = `${year}-${pad(month)}-01`;
-  const end = month === 12 ? `${year + 1}-01-01` : `${year}-${pad(month + 1)}-01`;
-  return [start, end];
-}
 
 /** Shape a raw SQL row into a TargetRow, computing progress on the target metric. */
 function mapRow(r: Record<string, string | null>): Omit<TargetRow, 'salesSource' | 'erpUnavailable'> {

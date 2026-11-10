@@ -111,6 +111,10 @@ export class AppSettings {
   @Column({ name: 'delivery_enabled', type: 'boolean', default: false })
   deliveryEnabled!: boolean;
 
+  /** Item targets per salesman (Program features). Off ⇒ hidden, stored rows kept. */
+  @Column({ name: 'item_targets_enabled', type: 'boolean', default: false })
+  itemTargetsEnabled!: boolean;
+
   @Column({ name: 'delivery_increase_requests', type: 'boolean', default: false })
   deliveryIncreaseRequests!: boolean;
 

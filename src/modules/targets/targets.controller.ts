@@ -8,6 +8,7 @@ import {
   ParseIntPipe,
   ParseUUIDPipe,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -22,6 +23,8 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { TargetsService } from './targets.service';
 import { UpsertTargetDto } from './dto/upsert-target.dto';
+import { ItemTargetsService } from './item-targets.service';
+import { PutItemTargetsDto } from './dto/item-targets.dto';
 
 @ApiTags('targets')
 @ApiBearerAuth()
@@ -31,7 +34,47 @@ export class TargetsController {
   constructor(
     private readonly targets: TargetsService,
     private readonly repScope: RepScopeService,
+    private readonly itemTargets: ItemTargetsService,
   ) {}
+
+  // ── Item targets (Program features → item targets; measured, not paid) ────
+
+  @Get('items')
+  @Roles('admin', 'manager', 'supervisor')
+  @ApiOperation({
+    summary: 'Item targets for a month with what was achieved',
+    description: '{ items: [] } while item targets are switched off in Program features.',
+  })
+  @ApiOkResponse({ description: '{ items: ItemTargetLine[] }' })
+  async listItems(
+    @Query('year', ParseIntPipe) year: number,
+    @Query('month', ParseIntPipe) month: number,
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('repId', new ParseUUIDPipe({ optional: true })) repId?: string,
+  ) {
+    return this.itemTargets.list(year, month, repId, await this.repScope.visibleRepIds(user));
+  }
+
+  @Put('items')
+  @Roles('admin', 'manager')
+  @ApiOperation({
+    summary: "Replace one salesman's item targets for a month",
+    description:
+      'Upserts the lines sent and deletes the ones left out. 400 ITEM_TARGET_INVALID names each ' +
+      'problem; 403 FEATURE_DISABLED while item targets are off.',
+  })
+  @ApiOkResponse({ description: "{ items: ItemTargetLine[] } — that rep's month" })
+  putItems(@Body() dto: PutItemTargetsDto, @CurrentUser('sub') userId: string | null) {
+    return this.itemTargets.replace(dto, userId ?? null);
+  }
+
+  @Delete('items/:id')
+  @Roles('admin', 'manager')
+  @ApiOperation({ summary: 'Remove one item target' })
+  @ApiOkResponse({ description: '{ deleted: true }' })
+  removeItem(@Param('id', ParseUUIDPipe) id: string) {
+    return this.itemTargets.remove(id);
+  }
 
   @Get('me')
   @ApiOperation({

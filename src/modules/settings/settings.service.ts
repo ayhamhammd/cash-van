@@ -33,6 +33,7 @@ const PROGRAM_FEATURE_KEYS = [
   'deliveryEnabled',
   'deliveryIncreaseRequests',
   'deliveryProofRequired',
+  'itemTargetsEnabled',
   'targetsIncludeTax',
   'targetsSalesIncludeCash',
 ] as const;
@@ -60,6 +61,8 @@ export interface AppSettingsView {
   containersEnabled: boolean;
   /** Master switch for Delivery & collection; off ⇒ the two below have no effect. */
   deliveryEnabled: boolean;
+  /** Item targets per salesman on the targets page. */
+  itemTargetsEnabled: boolean;
   /** Delivery reps may record increase requests (SPEC-delivery-rep §3.2). */
   deliveryIncreaseRequests: boolean;
   /** A delivery needs photo + signature proof. */
@@ -218,6 +221,15 @@ export class SettingsService {
    * feature on cannot accumulate packaging movements through an installed APK
    * that still offers the action.
    */
+  /** Item targets switch (Program features). */
+  async itemTargetsEnabled(): Promise<boolean> {
+    const row = await this.repo.findOne({
+      where: { id: 1 },
+      select: { id: true, itemTargetsEnabled: true },
+    });
+    return row?.itemTargetsEnabled === true;
+  }
+
   /** Delivery & collection master switch (Program features). */
   async deliveryEnabled(): Promise<boolean> {
     const row = await this.repo.findOne({
@@ -411,6 +423,7 @@ export class SettingsService {
     jofotaraAutoSubmit: boolean | null;
     hasDeliveryReps: boolean;
     deliveryEnabled: boolean;
+    itemTargetsEnabled: boolean;
     deliveryIncreaseRequests: boolean;
     deliveryProofRequired: boolean;
   }> {
@@ -443,6 +456,8 @@ export class SettingsService {
       deliveryEnabled: row.deliveryEnabled,
       deliveryIncreaseRequests: row.deliveryIncreaseRequests,
       deliveryProofRequired: row.deliveryProofRequired,
+      // Item targets: the app and non-admin dashboards read it here.
+      itemTargetsEnabled: row.itemTargetsEnabled,
     };
   }
 
@@ -565,6 +580,7 @@ export class SettingsService {
       deliveryEnabled: row.deliveryEnabled,
       deliveryIncreaseRequests: row.deliveryIncreaseRequests,
       deliveryProofRequired: row.deliveryProofRequired,
+      itemTargetsEnabled: row.itemTargetsEnabled,
       locationMode: row.locationMode,
       targetsIncludeTax: row.targetsIncludeTax,
       targetsSalesIncludeCash: row.targetsSalesIncludeCash,

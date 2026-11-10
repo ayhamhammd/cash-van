@@ -152,6 +152,16 @@ export class UpdateAppSettingsDto {
   deliveryEnabled?: boolean;
 
   @ApiPropertyOptional({
+    example: false,
+    description:
+      'Program feature: item targets — a salesman target per item (quantity or amount) on the ' +
+      'targets page. OFF ⇒ hidden; stored targets are kept. Measured only, not paid.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  itemTargetsEnabled?: boolean;
+
+  @ApiPropertyOptional({
     example: true,
     description:
       'Program feature: a delivery needs a photo and the customer\'s signature ' +
