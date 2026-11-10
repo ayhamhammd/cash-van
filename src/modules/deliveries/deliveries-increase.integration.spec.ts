@@ -51,7 +51,12 @@ run('delivery increase requests (real DB, real vouchers path)', () => {
   let water = '';
   let pce: { name_ar: string; name_en: string | null } = { name_ar: '', name_en: null };
   let juice = '';
-  let settingsBefore: { inc: boolean; proof: boolean; erp: boolean } = { inc: false, proof: true, erp: false };
+  let settingsBefore: { inc: boolean; proof: boolean; erp: boolean; on: boolean } = {
+    inc: false,
+    proof: true,
+    erp: false,
+    on: true,
+  };
   const q = <T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> => ds.query(sql, params);
 
   async function purge() {
@@ -87,10 +92,13 @@ run('delivery increase requests (real DB, real vouchers path)', () => {
     mirror = app.get(DeliveryMirrorService);
     await purge();
 
-    [{ inc: settingsBefore.inc, proof: settingsBefore.proof, erp: settingsBefore.erp }] = await q(
-      `SELECT delivery_increase_requests AS inc, delivery_proof_required AS proof, erp_sync_enabled AS erp
+    [{ inc: settingsBefore.inc, proof: settingsBefore.proof, erp: settingsBefore.erp, on: settingsBefore.on }] = await q(
+      `SELECT delivery_increase_requests AS inc, delivery_proof_required AS proof, erp_sync_enabled AS erp,
+              delivery_enabled AS on
          FROM app_settings WHERE id = 1`,
     );
+    // Delivery & collection on: increase requests are a sub-flag of it.
+    await q(`UPDATE app_settings SET delivery_enabled = true WHERE id = 1`);
     // ERP on with no key: the voucher path queues its SALES_ORDER row and the
     // drain, finding no key, sends nothing anywhere.
     await q(`UPDATE app_settings SET delivery_proof_required = false, erp_sync_enabled = true WHERE id = 1`);
@@ -179,8 +187,9 @@ run('delivery increase requests (real DB, real vouchers path)', () => {
   afterAll(async () => {
     if (!ds?.isInitialized) return;
     await q(
-      `UPDATE app_settings SET delivery_increase_requests = $1, delivery_proof_required = $2, erp_sync_enabled = $3 WHERE id = 1`,
-      [settingsBefore.inc, settingsBefore.proof, settingsBefore.erp],
+      `UPDATE app_settings SET delivery_increase_requests = $1, delivery_proof_required = $2, erp_sync_enabled = $3,
+              delivery_enabled = $4 WHERE id = 1`,
+      [settingsBefore.inc, settingsBefore.proof, settingsBefore.erp, settingsBefore.on],
     );
     await purge();
     await app.close();

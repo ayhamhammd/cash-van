@@ -53,6 +53,7 @@ run('delivery rep phase 1 (real DB)', () => {
   let storage: StorageService;
   let storageRoot = '';
   let proofRequiredBefore = true;
+  let deliveryEnabledBefore = true;
   const pushed: string[] = [];
   let repD = '';
   let repS = '';
@@ -237,15 +238,21 @@ run('delivery rep phase 1 (real DB)', () => {
       storage,
       deliveries,
     );
-    [{ required: proofRequiredBefore }] = await q<{ required: boolean }>(
-      `SELECT delivery_proof_required AS required FROM app_settings WHERE id = 1`,
+    [{ required: proofRequiredBefore, enabled: deliveryEnabledBefore }] = await q<{ required: boolean; enabled: boolean }>(
+      `SELECT delivery_proof_required AS required, delivery_enabled AS enabled FROM app_settings WHERE id = 1`,
     );
+    // These cases are about delivery working: the master switch is on (a fresh
+    // install starts with it off; delivery-enabled.integration covers off).
+    await q(`UPDATE app_settings SET delivery_enabled = true WHERE id = 1`);
   });
 
   afterAll(async () => {
     if (storageRoot) await fs.rm(storageRoot, { recursive: true, force: true });
     if (!ds?.isInitialized) return;
-    await q(`UPDATE app_settings SET delivery_proof_required = $1 WHERE id = 1`, [proofRequiredBefore]);
+    await q(`UPDATE app_settings SET delivery_proof_required = $1, delivery_enabled = $2 WHERE id = 1`, [
+      proofRequiredBefore,
+      deliveryEnabledBefore,
+    ]);
     await purge();
     await ds.destroy();
   });

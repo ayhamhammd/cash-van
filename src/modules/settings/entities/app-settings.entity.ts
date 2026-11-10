@@ -103,6 +103,14 @@ export class AppSettings {
    * invoiced) for the office to invoice later (docs/SPEC-delivery-rep.md §3.2).
    * Off by default. Served in company-info.
    */
+  /**
+   * Master switch for Delivery & collection. Off: the delivery screens are
+   * hidden and the two delivery sub-flags below have no effect (they keep their
+   * stored values). Served in company-info and the settings view.
+   */
+  @Column({ name: 'delivery_enabled', type: 'boolean', default: false })
+  deliveryEnabled!: boolean;
+
   @Column({ name: 'delivery_increase_requests', type: 'boolean', default: false })
   deliveryIncreaseRequests!: boolean;
 

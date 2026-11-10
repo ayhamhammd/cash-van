@@ -145,6 +145,7 @@ describe('sync/deliveries — intake', () => {
       proofs?: Proof[];
       proofRequired?: boolean;
       increaseOn?: boolean;
+      deliveryEnabled?: boolean;
       products?: Array<{
         id: string;
         item_number: string;
@@ -169,8 +170,12 @@ describe('sync/deliveries — intake', () => {
         if (sql.includes('FROM delivery_stops WHERE id = $1 FOR UPDATE')) {
           return stop && stop.id === params[0] ? [{ id: stop.id }] : [];
         }
-        if (sql.includes('delivery_increase_requests AS')) return [{ on: opts.increaseOn ?? false }];
-        if (sql.includes('FROM app_settings')) return [{ required: opts.proofRequired ?? false }];
+        if (sql.includes('delivery_increase_requests AS')) {
+          return [{ on: opts.increaseOn ?? false, enabled: opts.deliveryEnabled ?? true }];
+        }
+        if (sql.includes('FROM app_settings')) {
+          return [{ required: opts.proofRequired ?? false, enabled: opts.deliveryEnabled ?? true }];
+        }
         if (sql.includes('FROM item_cart')) {
           const ids = params[0] as string[];
           return (opts.products ?? []).filter((p) => ids.includes(p.id));
@@ -472,6 +477,26 @@ describe('sync/deliveries — intake', () => {
         increase: [{ skuCode: 'W1', qty: 3 }],
       });
       expect(call.body.increase).toEqual([{ skuCode: 'W1', qty: 3 }]);
+    });
+  });
+
+  describe('Delivery & collection switched off', () => {
+    it('a result the phone saved is still accepted; the sub-flags have no effect', async () => {
+      const stop = loaded();
+      const P1 = '22222222-2222-4222-8222-222222222222';
+      const w = world(stop, [], {
+        // Stored values ON — but the master switch is off, so neither applies.
+        proofRequired: true,
+        increaseOn: true,
+        deliveryEnabled: false,
+        products: [{ id: P1, item_number: 'W1', name_ar: 'ماء', name_en: null, unit: 'PCE', unit_name_ar: 'قطعة', unit_name_en: 'piece' }],
+      });
+      // No proofs at all: accepted (proof required has no effect while off).
+      expect(await w.svc.ingest(dto({ increase: [{ productId: P1, qty: 1 }] }), actor)).toEqual({ status: 'accepted' });
+      expect(stop.localResultRef).toBe('d-1');
+      expect(w.outbox).toEqual(['DELIVERY_RESULT:d-1']);
+      // The increase is ignored, as with its own switch off.
+      expect(w.increases).toEqual([]);
     });
   });
 

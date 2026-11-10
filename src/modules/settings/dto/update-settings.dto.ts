@@ -144,6 +144,16 @@ export class UpdateAppSettingsDto {
   @ApiPropertyOptional({
     example: true,
     description:
+      'Program feature: Delivery & collection, the master switch. OFF ⇒ the delivery screens are ' +
+      'hidden and the two delivery sub-flags have no effect (their values are kept).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  deliveryEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    example: true,
+    description:
       'Program feature: a delivery needs a photo and the customer\'s signature ' +
       '(a refused delivery a photo only). OFF ⇒ proofs are optional.',
   })

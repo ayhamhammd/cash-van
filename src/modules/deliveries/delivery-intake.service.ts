@@ -418,18 +418,21 @@ export class DeliveryIntakeService implements OnModuleInit {
 
   /** app_settings.delivery_increase_requests (default off). */
   private async increaseRequestsOn(em: EntityManager): Promise<boolean> {
-    const rows: Array<{ on: boolean }> = await em.query(
-      `SELECT delivery_increase_requests AS "on" FROM app_settings WHERE id = 1`,
+    // With Delivery & collection switched off the sub-flag has no effect.
+    const rows: Array<{ on: boolean; enabled?: boolean | null }> = await em.query(
+      `SELECT delivery_increase_requests AS "on", delivery_enabled AS enabled FROM app_settings WHERE id = 1`,
     );
-    return rows[0]?.on === true;
+    return rows[0]?.on === true && rows[0]?.enabled !== false;
   }
 
   /** app_settings.delivery_proof_required (default on). */
   private async proofRequired(em: EntityManager): Promise<boolean> {
-    const rows: Array<{ required: boolean }> = await em.query(
-      `SELECT delivery_proof_required AS required FROM app_settings WHERE id = 1`,
+    // With Delivery & collection switched off the sub-flag has no effect: a
+    // result a phone saved before the switch is never refused for its proofs.
+    const rows: Array<{ required: boolean; enabled?: boolean | null }> = await em.query(
+      `SELECT delivery_proof_required AS required, delivery_enabled AS enabled FROM app_settings WHERE id = 1`,
     );
-    return rows[0]?.required !== false;
+    return rows[0]?.required !== false && rows[0]?.enabled !== false;
   }
 
   /**

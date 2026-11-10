@@ -30,6 +30,7 @@ const PROGRAM_FEATURE_KEYS = [
   'damagedReturnsEnabled',
   'damagedWarehouseCode',
   'containersEnabled',
+  'deliveryEnabled',
   'deliveryIncreaseRequests',
   'deliveryProofRequired',
   'targetsIncludeTax',
@@ -57,6 +58,8 @@ export interface AppSettingsView {
   damagedWarehouseCode: string | null;
   /** Returnable containers — the office switch the dashboard reads. */
   containersEnabled: boolean;
+  /** Master switch for Delivery & collection; off ⇒ the two below have no effect. */
+  deliveryEnabled: boolean;
   /** Delivery reps may record increase requests (SPEC-delivery-rep §3.2). */
   deliveryIncreaseRequests: boolean;
   /** A delivery needs photo + signature proof. */
@@ -215,6 +218,15 @@ export class SettingsService {
    * feature on cannot accumulate packaging movements through an installed APK
    * that still offers the action.
    */
+  /** Delivery & collection master switch (Program features). */
+  async deliveryEnabled(): Promise<boolean> {
+    const row = await this.repo.findOne({
+      where: { id: 1 },
+      select: { id: true, deliveryEnabled: true },
+    });
+    return row?.deliveryEnabled === true;
+  }
+
   async containersEnabled(): Promise<boolean> {
     const row = await this.repo.findOne({
       where: { id: 1 },
@@ -398,6 +410,7 @@ export class SettingsService {
     locationMode: LocationMode;
     jofotaraAutoSubmit: boolean | null;
     hasDeliveryReps: boolean;
+    deliveryEnabled: boolean;
     deliveryIncreaseRequests: boolean;
     deliveryProofRequired: boolean;
   }> {
@@ -426,6 +439,8 @@ export class SettingsService {
       // Delivery reps (docs/SPEC-delivery-rep.md §4.1). The dashboard shows the
       // Deliveries menu only when a rep can deliver; the app reads the two switches.
       hasDeliveryReps,
+      // The master switch; the app may hide its delivery home on it.
+      deliveryEnabled: row.deliveryEnabled,
       deliveryIncreaseRequests: row.deliveryIncreaseRequests,
       deliveryProofRequired: row.deliveryProofRequired,
     };
@@ -547,6 +562,7 @@ export class SettingsService {
       damagedReturnsEnabled: row.damagedReturnsEnabled,
       damagedWarehouseCode: row.damagedWarehouseCode ?? null,
       containersEnabled: row.containersEnabled,
+      deliveryEnabled: row.deliveryEnabled,
       deliveryIncreaseRequests: row.deliveryIncreaseRequests,
       deliveryProofRequired: row.deliveryProofRequired,
       locationMode: row.locationMode,

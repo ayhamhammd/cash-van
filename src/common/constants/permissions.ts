@@ -67,3 +67,9 @@ export const DELIVERY_PERMISSION_KEYS = [
   PERM_DELIVERIES_MANAGE,
   PERM_DELIVERIES_APPROVE_RETURN,
 ] as const;
+
+/** Delivery keys being GRANTED by a change (in `after`, not in `before`). Removing one is never blocked. */
+export function addedDeliveryKeys(before: string[] | null | undefined, after: string[] | null | undefined): string[] {
+  const had = new Set(before ?? []);
+  return (after ?? []).filter((k) => (DELIVERY_PERMISSION_KEYS as readonly string[]).includes(k) && !had.has(k));
+}

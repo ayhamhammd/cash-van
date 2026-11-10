@@ -305,6 +305,9 @@ export class DeliveriesService {
   /** OPEN runs of this rep, plus stops he finished in the last 2 days. */
   async mine(actor: AuthenticatedUser): Promise<{ runs: RunDetailView[]; serverTime: string }> {
     const rep = await this.requireDeliveryRep(actor);
+    // Delivery & collection switched off: no runs, not an error — a delivery
+    // rep's app keeps working (and keeps uploading anything already saved).
+    if (!(await this.deliveryOn())) return { runs: [], serverTime: new Date().toISOString() };
     const open = await this.runs.find({ where: { repId: rep.id, status: 'OPEN' } });
     const recent: Array<{ id: string; run_id: string }> = await this.dataSource.query(
       `SELECT s.id, s.run_id
@@ -331,6 +334,7 @@ export class DeliveriesService {
     q: DeliveryHistoryQuery,
   ): Promise<{ items: Array<StopView & { run: { id: string; runNumber: string | null; runDate: string | null } }>; total: number }> {
     const rep = await this.requireDeliveryRep(actor);
+    if (!(await this.deliveryOn())) return { items: [], total: 0 };
     const page = q.page ?? 1;
     const pageSize = q.pageSize ?? 50;
     const tz = await this.timezone();
@@ -544,6 +548,18 @@ export class DeliveriesService {
     const res = await this.mirror.pullRun(String(id));
     if (!res) throw new NotFoundException(`The ERP no longer has run ${id}`);
     return res.runId;
+  }
+
+  /**
+   * The Delivery & collection master switch (Program features). Read straight
+   * from app_settings; a missing value counts as on, so nothing is hidden by a
+   * row this server cannot read.
+   */
+  async deliveryOn(): Promise<boolean> {
+    const rows: Array<{ on: boolean | null }> = await this.dataSource
+      .query(`SELECT delivery_enabled AS "on" FROM app_settings WHERE id = 1`)
+      .catch(() => []);
+    return rows[0]?.on !== false;
   }
 
   private async timezone(): Promise<string> {

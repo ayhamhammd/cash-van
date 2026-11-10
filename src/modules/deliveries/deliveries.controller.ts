@@ -31,6 +31,8 @@ import {
 import { DeliveryReturnsService } from './delivery-returns.service';
 import { DeliveryIncreasesService } from './delivery-increases.service';
 import { DeliveryReturnVoucherService } from './delivery-return-voucher.service';
+import { AnswersWhenDeliveryOff, DeliveryFeatureGuard } from './delivery-feature.guard';
+import { SettingsService } from '../settings/settings.service';
 import { DeliveriesService } from './deliveries.service';
 import { streamProof } from './deliveries-app.controller';
 import { DeliveryProofsService } from './delivery-proofs.service';
@@ -57,7 +59,7 @@ import {
  */
 @ApiTags('deliveries')
 @ApiBearerAuth()
-@UseGuards(RolesGuard)
+@UseGuards(RolesGuard, DeliveryFeatureGuard)
 @Controller({ path: 'deliveries', version: '1' })
 export class DeliveriesController {
   constructor(
@@ -66,6 +68,7 @@ export class DeliveriesController {
     private readonly returns: DeliveryReturnsService,
     private readonly increases: DeliveryIncreasesService,
     private readonly returnVouchers: DeliveryReturnVoucherService,
+    private readonly settings: SettingsService,
   ) {}
 
   // ── increase requests (phase 4) ─────────────────────────────────────────
@@ -80,9 +83,11 @@ export class DeliveriesController {
 
   @Get('increases/count')
   @RequirePermissionKeys(PERM_DELIVERIES_VIEW)
-  @ApiOperation({ summary: 'Pending increase requests, for the badge' })
+  @AnswersWhenDeliveryOff()
+  @ApiOperation({ summary: 'Pending increase requests, for the badge ({ pending: 0 } while delivery is off)' })
   @ApiOkResponse({ description: '{ pending }' })
-  countIncreases() {
+  async countIncreases() {
+    if (!(await this.settings.deliveryEnabled())) return { pending: 0 };
     return this.increases.count();
   }
 
@@ -132,9 +137,11 @@ export class DeliveriesController {
 
   @Get('returns/count')
   @RequirePermissionKeys(PERM_DELIVERIES_VIEW)
-  @ApiOperation({ summary: 'Pending delivery returns, for the badge' })
+  @AnswersWhenDeliveryOff()
+  @ApiOperation({ summary: 'Pending delivery returns, for the badge ({ pending: 0 } while delivery is off)' })
   @ApiOkResponse({ description: '{ pending }' })
-  countReturns() {
+  async countReturns() {
+    if (!(await this.settings.deliveryEnabled())) return { pending: 0 };
     return this.returns.count();
   }
 

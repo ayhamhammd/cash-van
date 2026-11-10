@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -12,6 +13,7 @@ import { RepScopeService } from './rep-scope.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { PaginationDto, PaginatedResult } from '../../common/dto/pagination.dto';
+import { addedDeliveryKeys } from '../../common/constants/permissions';
 
 const BCRYPT_ROUNDS = 12;
 
@@ -31,6 +33,7 @@ export class UsersService {
         `User with userNumber ${dto.userNumber} already exists`,
       );
     }
+    await this.assertDeliveryKeysAllowed([], dto.permissions);
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     const user = this.usersRepo.create({
       userNumber: dto.userNumber,
@@ -79,10 +82,30 @@ export class UsersService {
     // repIds is a separate TABLE, not a column. Object.assign would drop it onto
     // the entity where it means nothing, and the assignment would silently not save.
     const { repIds, ...columns } = dto;
+    if (columns.permissions) await this.assertDeliveryKeysAllowed(user.permissions, columns.permissions);
     Object.assign(user, columns);
     const saved = await this.usersRepo.save(user);
     if (repIds) await this.repScope.setScope(id, repIds);
     return saved;
+  }
+
+  /**
+   * With Delivery & collection switched off in Program features, a delivery
+   * permission key may not be GRANTED. Taking one away is always allowed, and
+   * keys a user already holds are left as they are.
+   */
+  private async assertDeliveryKeysAllowed(before: string[] | null | undefined, after: string[] | null | undefined): Promise<void> {
+    const added = addedDeliveryKeys(before, after);
+    if (!added.length) return;
+    const rows: Array<{ on: boolean | null }> = await this.usersRepo.manager.query(
+      `SELECT delivery_enabled AS "on" FROM app_settings WHERE id = 1`,
+    );
+    if (rows[0]?.on === false) {
+      throw new BadRequestException({
+        code: 'FEATURE_DISABLED',
+        message: `Delivery & collection is turned off in Program features, so ${added.join(', ')} cannot be granted`,
+      });
+    }
   }
 
   /** The salesmen assigned to a scoped user (empty for unrestricted ones). */

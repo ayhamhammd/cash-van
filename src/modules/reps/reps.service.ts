@@ -8,7 +8,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, ILike, IsNull, Not, Repository } from 'typeorm';
 
-import { Rep } from './entities/rep.entity';
+import { Rep, canDeliver } from './entities/rep.entity';
 import { ErpSyncService } from '../erp-sync/erp-sync.service';
 import { SettingsService } from '../settings/settings.service';
 import { UsersService } from '../users/users.service';
@@ -293,6 +293,7 @@ export class RepsService {
     }
     if (dto.userId) await this.assertUserUnlinked(dto.userId);
     await this.assertCodeUnique(dto.code);
+    await this.assertKindAllowed(dto.kind, undefined);
 
     // Licensing: a salesman created from the dashboard is frozen on arrival when
     // the installation has activation switched on, exactly like one arriving
@@ -340,6 +341,7 @@ export class RepsService {
       delete fields.nameEn;
     }
 
+    await this.assertKindAllowed(fields.kind, rep.kind);
     if (fields.userId) await this.assertUserUnlinked(fields.userId, id);
     if (fields.code) await this.assertCodeUnique(fields.code, id);
     const wasActive = rep.isActive;
@@ -359,6 +361,21 @@ export class RepsService {
       await this.users.changePassword(rep.userId, password);
     }
     return saved;
+  }
+
+  /**
+   * With Delivery & collection switched off in Program features, a rep may not
+   * BECOME a delivery rep (DELIVERY or BOTH). Leaving the kind out, sending the
+   * rep's current kind, or moving him to SALES is always allowed, so an existing
+   * delivery rep can still be edited. (canDeliver is derived from the kind.)
+   */
+  private async assertKindAllowed(next: string | undefined, current: string | undefined): Promise<void> {
+    if (!next || next === current || !canDeliver(next)) return;
+    if (await this.settings.deliveryEnabled()) return;
+    throw new BadRequestException({
+      code: 'FEATURE_DISABLED',
+      message: 'Delivery & collection is turned off in Program features, so a rep cannot be made a delivery rep',
+    });
   }
 
   private async assertCodeUnique(code: string, exceptRepId?: string): Promise<void> {
