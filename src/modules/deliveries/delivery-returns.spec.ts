@@ -98,7 +98,7 @@ describe('returns — the value and the view', () => {
 });
 
 describe('returns — approve and reject', () => {
-  function setup(opts: { pullFails?: boolean } = {}) {
+  function setup(opts: { pullFails?: boolean; returnVouchers?: unknown } = {}) {
     const stop = { id: STOP, runId: 'run-l', erpId: 'item-9', creditNoteNumber: null } as unknown as DeliveryStop;
     const erp = {
       approveReturn: jest.fn().mockResolvedValue({
@@ -119,6 +119,7 @@ describe('returns — approve and reject', () => {
       { stopViews: async () => [{ id: STOP, returnStatus: 'APPROVED' }] } as never,
       erp as never,
       mirror as never,
+      opts.returnVouchers as never,
     );
     return { svc, erp, mirror };
   }
@@ -145,7 +146,30 @@ describe('returns — approve and reject', () => {
     expect(out).toEqual({
       stop: { id: STOP, returnStatus: 'APPROVED' },
       creditNote: { number: 'CN-7', totalFils: 3480, jofotaraStatus: 'SUBMITTED', qr: 'Q' },
+      // No voucher service in this unit (see delivery-return-voucher specs).
+      returnVoucher: null,
     });
+  });
+
+  it('the approve makes the CashVan RETURN voucher through the one idempotent place, after the re-read', async () => {
+    const order: string[] = [];
+    const ensureFor = jest.fn(async () => {
+      order.push('ensure');
+      return { status: 'created', voucherNumber: 'ERP-RET-CN-7', voucherId: 'v-1' };
+    });
+    const t = setup({ returnVouchers: { ensureFor } });
+    t.mirror.pullRun.mockImplementation(async () => void order.push('pull'));
+    const out = await t.svc.approve(STOP, {}, actor, 'k');
+    expect(ensureFor).toHaveBeenCalledWith(STOP);
+    expect(order).toEqual(['pull', 'ensure']);
+    expect(out.returnVoucher).toEqual({ id: 'v-1', voucherNumber: 'ERP-RET-CN-7' });
+  });
+
+  it('a voucher that cannot be built does not fail the approval (the ERP has decided)', async () => {
+    const t = setup({ returnVouchers: { ensureFor: async () => ({ status: 'skipped', reason: 'UNKNOWN_SKU:X' }) } });
+    expect((await t.svc.approve(STOP, {}, actor, 'k')).returnVoucher).toBeNull();
+    const broken = setup({ returnVouchers: { ensureFor: async () => { throw new Error('db down'); } } });
+    expect((await broken.svc.approve(STOP, {}, actor, 'k')).creditNote).toMatchObject({ number: 'CN-7' });
   });
 
   it('a plain approve sends no lines; a missing key is minted', async () => {

@@ -108,6 +108,8 @@ export interface StopView {
   proofs: ProofView[];
   /** ERP attachments on the stop that are not one of these proofs (added in the ERP). */
   erpOnlyAttachments: number;
+  /** The CashVan RETURN voucher an approved return became (`ERP-RET-<credit note>`). */
+  returnVoucher: { id: string; voucherNumber: string } | null;
   /** The customer wanted more (phase 4) — never part of this invoice. */
   increaseRequest: {
     status: IncreaseStatus;
@@ -251,6 +253,10 @@ export function stopView(
       .sort((a, b) => (a.kind === b.kind ? +a.createdAt - +b.createdAt : a.kind === 'PHOTO' ? -1 : 1))
       .map((p) => proofView(p, audience)),
     erpOnlyAttachments: s.erpOnlyAttachments ?? 0,
+    returnVoucher:
+      s.returnVoucherNumber && s.returnVoucherId
+        ? { id: s.returnVoucherId, voucherNumber: s.returnVoucherNumber }
+        : null,
     increaseRequest: increase
       ? {
           status: increase.status,

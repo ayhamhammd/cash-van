@@ -405,6 +405,11 @@ export class ArService {
          JOIN voucher_headers h ON h.voucher_number = p.voucher_number
          LEFT JOIN customers c ON c.customer_number = h.customer_number
         WHERE p.payment_type = 'CREDIT' AND h.trans_kind = 'RETURN'
+          -- A delivery return (ERP-RET-…) credits an ERP invoice. Unless that
+          -- invoice came from a CashVan sale (then it is referenced, and that
+          -- sale is a debit here), its debit is not in this report, so neither
+          -- is its credit: applied FIFO it would pay off unrelated van sales.
+          AND NOT (h.voucher_number LIKE 'ERP-RET-%' AND h.reference_voucher_number IS NULL)
           AND ($1::date IS NULL OR h.created_at >= $1::date)
           AND ($2::date IS NULL OR h.created_at < ($2::date + 1))
           AND ($3::text IS NULL OR h.customer_number = $3 OR c.customer_name ILIKE '%' || $3 || '%')

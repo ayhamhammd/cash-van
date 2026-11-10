@@ -144,6 +144,13 @@ export class DeliveryStop {
   @Column({ name: 'credit_note_uuid', type: 'text', nullable: true })
   creditNoteUuid?: string | null;
 
+  /** The CashVan RETURN voucher the approved return became (`ERP-RET-<credit note>`). */
+  @Column({ name: 'return_voucher_number', type: 'text', nullable: true })
+  returnVoucherNumber?: string | null;
+
+  @Column({ name: 'return_voucher_id', type: 'uuid', nullable: true })
+  returnVoucherId?: string | null;
+
   /** ERP attachments on the item that are not one of our proofs (counted, not mirrored). */
   @Column({ name: 'erp_only_attachments', type: 'integer', default: 0 })
   erpOnlyAttachments!: number;

@@ -412,6 +412,10 @@ export class ReportsService {
         JOIN users u ON u.user_number = h.user_code
         JOIN reps  r ON r.user_id = u.id
         WHERE h.is_posted = true AND h.in_date >= $1::date AND h.in_date < ($2::date + 1)
+          -- A delivery return the office approved (ERP-RET-…) is the original
+          -- salesman's return in the reports, but not part of anyone's day: the
+          -- goods went back to the ERP's warehouses, not through his van.
+          AND h.voucher_number NOT LIKE 'ERP-RET-%'
         GROUP BY r.id
       ),
       disc AS (
@@ -464,6 +468,7 @@ export class ReportsService {
         JOIN reps  r ON r.user_id = u.id
         WHERE h.is_posted = true AND h.trans_kind = 'RETURN'
           AND h.in_date >= $1::date AND h.in_date < ($2::date + 1)
+          AND h.voucher_number NOT LIKE 'ERP-RET-%' -- not damaged units brought back on his van
         GROUP BY r.id
       )
       SELECT r.id AS "repId", r.code AS "repCode", r.name_ar AS "repName",

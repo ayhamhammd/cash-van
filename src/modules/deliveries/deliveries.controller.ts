@@ -30,6 +30,7 @@ import {
 } from '../../common/decorators/current-user.decorator';
 import { DeliveryReturnsService } from './delivery-returns.service';
 import { DeliveryIncreasesService } from './delivery-increases.service';
+import { DeliveryReturnVoucherService } from './delivery-return-voucher.service';
 import { DeliveriesService } from './deliveries.service';
 import { streamProof } from './deliveries-app.controller';
 import { DeliveryProofsService } from './delivery-proofs.service';
@@ -64,6 +65,7 @@ export class DeliveriesController {
     private readonly proofs: DeliveryProofsService,
     private readonly returns: DeliveryReturnsService,
     private readonly increases: DeliveryIncreasesService,
+    private readonly returnVouchers: DeliveryReturnVoucherService,
   ) {}
 
   // ── increase requests (phase 4) ─────────────────────────────────────────
@@ -146,7 +148,10 @@ export class DeliveriesController {
       'with their code: 409 RETURN_ALREADY_DECIDED, 422 NOTHING_TO_RETURN / QTY_OUT_OF_RANGE / ' +
       'NO_DAMAGED_WAREHOUSE. 503 ERP_UNAVAILABLE.',
   })
-  @ApiOkResponse({ description: '{ stop: Stop, creditNote: { number, totalFils, jofotaraStatus, qr } | null }' })
+  @ApiOkResponse({
+    description:
+      '{ stop: Stop, creditNote: { number, totalFils, jofotaraStatus, qr } | null, returnVoucher: { id, voucherNumber } | null }',
+  })
   approveReturn(
     @Param('stopId', ParseUUIDPipe) stopId: string,
     @Body() dto: ApproveReturnDto,
@@ -154,6 +159,20 @@ export class DeliveriesController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     return this.returns.approve(stopId, dto, user, idempotencyKey);
+  }
+
+  @Post('returns/backfill-vouchers')
+  @RequirePermissionKeys(PERM_DELIVERIES_APPROVE_RETURN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Write the CashVan RETURN voucher of every approved delivery return that has none (idempotent)',
+    description:
+      'The one-off for returns approved before the vouchers existed. Safe to run again: a return ' +
+      'that has its voucher is left alone. Never pushes anything to the ERP.',
+  })
+  @ApiOkResponse({ description: '{ total, created, existing, skipped: [{ stopId, reason }] }' })
+  backfillReturnVouchers() {
+    return this.returnVouchers.backfill();
   }
 
   @Post('returns/:stopId/reject')

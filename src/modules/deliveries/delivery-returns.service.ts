@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { DataSource, In, Repository } from 'typeorm';
@@ -9,6 +9,7 @@ import type { AuthenticatedUser } from '../../common/decorators/current-user.dec
 import { DeliveriesService } from './deliveries.service';
 import { DeliveryErpClient } from './delivery-erp.client';
 import { DeliveryMirrorService } from './delivery-mirror.service';
+import { DeliveryReturnVoucherService } from './delivery-return-voucher.service';
 import { DeliveryRun } from './entities/delivery-run.entity';
 import { DeliveryStop } from './entities/delivery-stop.entity';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
@@ -65,6 +66,8 @@ export class DeliveryReturnsService {
     private readonly deliveries: DeliveriesService,
     private readonly erp: DeliveryErpClient,
     private readonly mirror: DeliveryMirrorService,
+    // APPENDED: the specs build this service positionally.
+    @Optional() private readonly returnVouchers?: DeliveryReturnVoucherService,
   ) {}
 
   /**
@@ -124,7 +127,11 @@ export class DeliveryReturnsService {
     dto: ApproveReturnDto,
     actor: AuthenticatedUser,
     idempotencyKey?: string,
-  ): Promise<{ stop: StopView; creditNote: CreditNoteSummary | null }> {
+  ): Promise<{
+    stop: StopView;
+    creditNote: CreditNoteSummary | null;
+    returnVoucher: { id: string; voucherNumber: string } | null;
+  }> {
     const { stop, run } = await this.stopAndRun(stopId);
     const { creditNote } = await this.erp.approveReturn(
       stop.erpId,
@@ -144,9 +151,16 @@ export class DeliveryReturnsService {
       this.key(idempotencyKey),
     );
     await this.remirror(run.erpId);
+    // The CashVan RETURN voucher (once — the mirror may already have made it).
+    const rv = await this.returnVouchers?.ensureFor(stop.id).catch((e: unknown) => {
+      this.logger.warn(`RETURN voucher for stop ${stop.id}: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    });
     const fresh = await this.freshStop(stop.id);
     return {
       stop: fresh.view,
+      returnVoucher:
+        rv && 'voucherNumber' in rv ? { id: rv.voucherId, voucherNumber: rv.voucherNumber } : null,
       creditNote:
         creditNoteSummary(creditNote) ??
         (fresh.stop.creditNoteNumber

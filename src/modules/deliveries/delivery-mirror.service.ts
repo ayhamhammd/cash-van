@@ -15,6 +15,7 @@ import {
 } from './entities/delivery-stop.entity';
 import { conditionOf } from './delivery-reasons';
 import { NotificationsService } from '../notifications/notifications.service';
+import { DeliveryReturnVoucherService } from './delivery-return-voucher.service';
 import { DeliveryStopLine } from './entities/delivery-stop-line.entity';
 import type {
   ErpDeliveryItem,
@@ -193,6 +194,7 @@ export class DeliveryMirrorService {
     private readonly events: EventEmitter2,
     // APPENDED: the specs build this service positionally.
     @Optional() private readonly notifications?: NotificationsService,
+    @Optional() private readonly returnVouchers?: DeliveryReturnVoucherService,
   ) {}
 
   /** Every 2 minutes (DELIVERY_PULL_INTERVAL_MS), when ERP sync is on. */
@@ -303,6 +305,11 @@ export class DeliveryMirrorService {
     const result = await this.dataSource.transaction((em) => this.applyWithin(em, erpId, run, opts));
     this.signal(result, result.decisions?.length ? 'delivery.return.decided' : 'erp.pull');
     if (result.decisions?.length) await this.notifyDecisions(result.repId, result.decisions);
+    // An approved return becomes its CashVan RETURN voucher — however it was
+    // approved (the dashboard, the ERP's own screen) and however often seen.
+    await this.returnVouchers?.ensureForRun(result.runId).catch((e: unknown) =>
+      this.logger.warn(`RETURN vouchers for run ${result.runId}: ${e instanceof Error ? e.message : String(e)}`),
+    );
     return result;
   }
 

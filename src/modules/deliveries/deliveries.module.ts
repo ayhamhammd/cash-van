@@ -19,6 +19,7 @@ import { DeliveryProof } from './entities/delivery-proof.entity';
 import { DeliveryProofsService } from './delivery-proofs.service';
 import { DeliveryReturnsService } from './delivery-returns.service';
 import { DeliveryIncreasesService } from './delivery-increases.service';
+import { DeliveryReturnVoucherService } from './delivery-return-voucher.service';
 import { DeliveryIncreaseRequest } from './entities/delivery-increase-request.entity';
 import { VouchersModule } from '../vouchers/vouchers.module';
 import { ProductsModule } from '../products/products.module';
@@ -56,6 +57,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     DeliveryProofsService,
     DeliveryReturnsService,
     DeliveryIncreasesService,
+    DeliveryReturnVoucherService,
   ],
   exports: [DeliveriesService, DeliveryMirrorService],
 })
