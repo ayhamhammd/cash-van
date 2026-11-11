@@ -85,6 +85,23 @@ const MOVES_VAN_STOCK = new Set(['SALE', 'RETURN']);
  */
 const QR_WAIT_MS = parseInt(process.env.SYNC_QR_WAIT_MS ?? '4000', 10);
 
+/**
+ * What the dashboard's "failed" and "pending" filters mean, in stored statuses.
+ *
+ * The drain added `rejected` and `dead_letter` to the old `failed`, and
+ * `accepted` to the old `pending`, but the filter still matched one literal
+ * status. A credit-limit refusal is stored as `rejected`, so it never showed on
+ * the Failed tab (the page opens on that tab) and its rep's phone kept saying
+ * "the office will fix it" about a document nobody in the office could see.
+ */
+const INBOX_STATUS_GROUP: Partial<Record<InboxStatus, InboxStatus[]>> & {
+  pending: InboxStatus[];
+  failed: InboxStatus[];
+} = {
+  pending: ['pending', 'accepted'],
+  failed: ['failed', 'rejected', 'dead_letter'],
+};
+
 @Injectable()
 export class SyncService {
   private readonly logger = new Logger(SyncService.name);
@@ -352,15 +369,15 @@ export class SyncService {
   ): Promise<{ items: VoucherInbox[]; total: number; pending: number; failed: number }> {
     const [items, total] = await this.inbox.findAndCount({
       where: {
-        ...(q.status ? { status: q.status } : {}),
+        ...(q.status ? { status: In(INBOX_STATUS_GROUP[q.status] ?? [q.status]) } : {}),
         ...(q.type ? { type: q.type } : {}),
       },
       order: { createdAt: 'DESC' },
       skip: q.offset ?? 0,
       take: q.limit ?? 50,
     });
-    const pending = await this.inbox.count({ where: { status: 'pending' } });
-    const failed = await this.inbox.count({ where: { status: 'failed' } });
+    const pending = await this.inbox.count({ where: { status: In(INBOX_STATUS_GROUP.pending) } });
+    const failed = await this.inbox.count({ where: { status: In(INBOX_STATUS_GROUP.failed) } });
     return { items, total, pending, failed };
   }
 
