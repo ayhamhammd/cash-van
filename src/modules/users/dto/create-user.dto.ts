@@ -134,6 +134,12 @@ export class CreateUserDto {
   })
   @IsOptional() @IsBoolean() canUseCardPayment?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'May pay a return back in cash from the van. Off by default — a return is then customer credit. A cash return comes off expected cash.',
+  })
+  @IsOptional() @IsBoolean() canCashReturn?: boolean;
+
   @ApiPropertyOptional({ description: 'May raise a van stock request.' })
   @IsOptional() @IsBoolean() canRequestStock?: boolean;
 

@@ -1,4 +1,4 @@
-import { returnsAreCredit } from './returns/returns-are-credit';
+import { asksForCash, classifyReturnPayment, returnPaymentMilli } from './returns/return-payment';
 import {
   BadRequestException,
   ConflictException,
@@ -336,9 +336,22 @@ export class VouchersService implements OnModuleInit {
     opts: { allowOverCreditLimit?: boolean; completedOffline?: boolean } = {},
   ): Promise<VoucherHeader> {
     // First, before anything reads the payments: a return is the customer's
-    // credit, never a cash refund — whatever an old phone sent. See
-    // returns/returns-are-credit.
-    returnsAreCredit(dto);
+    // credit, unless a salesman allowed to refund cash chose cash. See
+    // returns/return-payment and docs/SPEC-cash-returns.md.
+    const returnMethod = classifyReturnPayment(dto, asksForCash(dto) && (await this.mayReturnCash(dto)));
+    if (returnMethod === 'CASH' && !opts.completedOffline) {
+      // Online the salesman can still switch to credit, so an over-the-sale
+      // cash refund is refused. Offline the cash has already been handed over:
+      // it posts, and the sync service tells the managers.
+      const over = await this.cashReturnOverSale(dto);
+      if (over) {
+        throw new BadRequestException({
+          code: 'CASH_RETURN_OVER_SALE',
+          message: `A cash return may not exceed what is left of sale ${over.saleNumber} (${over.remaining.toFixed(3)}).`,
+          remaining: over.remaining.toFixed(3),
+        });
+      }
+    }
     await this.requireCustomerForErp(dto);
     // F10 gate: salesmen need explicit permission for returns, discounts and
     // price overrides — otherwise the client must file an approval request
@@ -2136,6 +2149,55 @@ export class VouchersService implements OnModuleInit {
     });
     if (!user || user.userType === 'ADMIN') return;
     if (!user.canUseCardPayment) throw new ForbiddenException('CARD_NOT_ALLOWED');
+  }
+
+  /**
+   * May the return in [dto] be paid back in cash? It is the voucher's salesman
+   * who hands the money over, so his switch decides — also when a manager
+   * approves the return and re-runs create() under the manager's role. An office
+   * user's own return may be cash. Unknown → no: a return is credit unless
+   * somebody was allowed to make it cash.
+   */
+  private async mayReturnCash(dto: CreateVoucherDto): Promise<boolean> {
+    const users = this.dataSource.getRepository(User);
+    const owner = dto.userCode ? await users.findOne({ where: { userNumber: dto.userCode } }) : null;
+    if (owner) return owner.userType === 'ADMIN' || owner.userType === 'MANAGER' || owner.canCashReturn === true;
+    const ctx = this.userCtx.get();
+    if (!ctx) return false;
+    if (ctx.role === 'admin' || ctx.role === 'manager') return true;
+    const me = await users.findOne({ where: { id: ctx.userId } });
+    return !!me && (me.userType === 'ADMIN' || me.canCashReturn === true);
+  }
+
+  /**
+   * A cash return may not refund more than is left of the sale it returns:
+   * the sale's net total, minus every return already made against it, cash or
+   * credit. Null when it fits, or when there is no sale to measure against.
+   *
+   * @param excludeVoucherNumber leave this return out of "already made" — for a
+   *   check run after the return was saved (sync intake).
+   */
+  async cashReturnOverSale(
+    dto: CreateVoucherDto,
+    excludeVoucherNumber?: string,
+  ): Promise<{ saleNumber: string; remaining: number } | null> {
+    const ref = dto.referenceVoucherNumber?.trim();
+    if (dto.transKind !== 'RETURN' || !ref) return null;
+    const [row] = await this.dataSource.query(
+      `SELECT s.net_total::numeric AS sale,
+              COALESCE((SELECT SUM(r.net_total) FROM voucher_headers r
+                         WHERE r.trans_kind = 'RETURN'
+                           AND r.reference_voucher_number = s.voucher_number
+                           AND ($2::text IS NULL OR r.voucher_number <> $2)), 0)::numeric AS returned
+         FROM voucher_headers s
+        WHERE s.voucher_number = $1 AND s.trans_kind = 'SALE'
+        LIMIT 1`,
+      [ref, excludeVoucherNumber ?? null],
+    );
+    if (!row) return null;
+    const remainingMilli = Math.round(Number(row.sale) * 1000) - Math.round(Number(row.returned) * 1000);
+    if (returnPaymentMilli(dto) <= remainingMilli) return null;
+    return { saleNumber: ref, remaining: Math.max(0, remainingMilli) / 1000 };
   }
 
   /**

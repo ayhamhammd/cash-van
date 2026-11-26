@@ -1825,7 +1825,16 @@ export class ErpOutboxService {
     // van stock. Null (feature off / unset) → the van, as before. See
     // docs/SPEC-damaged-expired-returns.md §8b.
     const damagedWh = await this.settings.damagedReturnWarehouseCode();
-    const warehouseCode = damagedWh ?? this.vanStoreOf(lines, header.userCode);
+    const vanStore = this.vanStoreOf(lines, header.userCode);
+    const warehouseCode = damagedWh ?? vanStore;
+    // How the customer was paid back — the salesman's choice, kept at intake
+    // (vouchers/returns/return-payment). Sent so the ERP refunds from the van's
+    // cash box exactly when the salesman paid cash, instead of guessing from how
+    // the original sale was paid. An older ERP strips both keys and keeps
+    // guessing. See docs/SPEC-cash-returns.md §5.4.
+    const paidRows = await this.payments.find({ where: { voucherNumber } });
+    const refundMethod =
+      paidRows.length > 0 && paidRows.every((p) => p.paymentType === 'CASH') ? 'CASH' : 'CREDIT';
     return {
       path: 'sales-returns',
       body: {
@@ -1838,6 +1847,9 @@ export class ErpOutboxService {
         // the credit note's reason when no quarantine reason is set.
         ...(header.notes ? { notes: header.notes } : {}),
         originalInvoiceNumber,
+        refundMethod,
+        // The cash left the VAN, even when the goods go to the damaged warehouse.
+        ...(refundMethod === 'CASH' ? { refundWarehouseCode: vanStore } : {}),
         lines: lines.map((l) => ({
           skuCode: skuOf(l), // red goes back to the red SKU, not the base one
           quantity: this.erpQty(l.itemQty, l.itemNumber, voucherNumber),

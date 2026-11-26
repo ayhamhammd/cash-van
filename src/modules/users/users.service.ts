@@ -60,6 +60,7 @@ export class UsersService {
       canSetCustomerArea: dto.canSetCustomerArea ?? false,
       canPrintLineDiscount: dto.canPrintLineDiscount ?? false,
       canUseCardPayment: dto.canUseCardPayment ?? false,
+      canCashReturn: dto.canCashReturn ?? false,
       canRequestStock: dto.canRequestStock ?? false,
       canApproveStockRequest: dto.canApproveStockRequest ?? false,
       canCollectOnSale: dto.canCollectOnSale ?? false,

@@ -369,7 +369,10 @@ export class CashAccountsService {
     const shortfall = Math.max(0, expected - received);
     const overpay = Math.max(0, received - expected);
     const accountable = expected + chequeBal;
-    if (accountable <= 0 && received <= 0) return null; // nothing to post
+    // Expected cash can be negative: cash returns paid out more than the period
+    // took in. The reconciliation line then turns debit, and the rep is credited
+    // for the cash he put up — the journal still balances.
+    if (accountable === 0 && received <= 0) return null; // nothing to post
 
     // Accumulate signed fils per account code (+ = debit, − = credit); same code merges.
     const post = new Map<string, number>();
@@ -384,7 +387,7 @@ export class CashAccountsService {
     if (chequeBal > 0) { if (!need(chequeCode)) return null; add(chequeCode, chequeBal, true); } // DR cheques in
     if (shortfall > 0) add(repCode, shortfall, true);   // DR rep — still owes
     if (overpay > 0) add(repCode, overpay, false);      // CR rep — pays down prior debt
-    if (accountable > 0) { if (!need(salesCode)) return null; add(salesCode, accountable, false); } // CR reconciliation
+    if (accountable !== 0) { if (!need(salesCode)) return null; add(salesCode, accountable, false); } // CR reconciliation (DR when negative)
 
     const memo = `تسوية مندوب المبيعات (${rep?.name ?? ''}) — ${s.periodTo}`;
     const lines = [...post.entries()]

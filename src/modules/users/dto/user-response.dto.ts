@@ -30,6 +30,7 @@ export class UserResponseDto {
   @ApiProperty() canSetCustomerArea!: boolean;
   @ApiProperty() canPrintLineDiscount!: boolean;
   @ApiProperty() canUseCardPayment!: boolean;
+  @ApiProperty() canCashReturn!: boolean;
   @ApiProperty() canRequestStock!: boolean;
   @ApiProperty() canApproveStockRequest!: boolean;
   @ApiProperty() canCollectOnSale!: boolean;
@@ -83,6 +84,7 @@ export class UserResponseDto {
       canSetCustomerArea: u.canSetCustomerArea,
       canPrintLineDiscount: u.canPrintLineDiscount,
       canUseCardPayment: u.canUseCardPayment,
+      canCashReturn: u.canCashReturn ?? false,
       canRequestStock: u.canRequestStock,
       canApproveStockRequest: u.canApproveStockRequest,
       canCollectOnSale: u.canCollectOnSale,

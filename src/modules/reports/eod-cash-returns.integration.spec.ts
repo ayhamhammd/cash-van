@@ -1,12 +1,10 @@
 /**
- * Real-DB: in the rep's End of Day, a return is the customer's credit — never
- * cash excused.
+ * Real-DB: in the rep's End of Day, a CREDIT return is the customer's credit and
+ * takes nothing out of the drawer; a CASH return paid the customer out of the
+ * van and comes off expected cash (docs/SPEC-cash-returns.md).
  *
- * A return used to be recorded, and subtracted, as a cash refund whenever the
- * sale it reversed was a cash sale. The business rule is the opposite: no money
- * is handed back on a return. So a rep who took 40 in cash owes 40, however many
- * returns he booked — and the returns are still shown, whatever they were
- * recorded as (an old phone may still send a cash refund).
+ * Intake keeps a return CASH only for a salesman allowed to refund cash, so a
+ * stored CASH return here is money that left the van.
  *
  * Runs when DB_NAME is set, like the other report integration specs.
  */
@@ -20,7 +18,7 @@ const run = HAS_DB ? describe : describe.skip;
 const P = 'ZZEODRET';
 const DAY = '2026-03-10';
 
-run('End of Day — returns are credit (real DB)', () => {
+run('End of Day — cash and credit returns (real DB)', () => {
   let ds: DataSource;
   let reports: ReportsService;
   let repId = '';
@@ -75,8 +73,8 @@ run('End of Day — returns are credit (real DB)', () => {
     await q(`INSERT INTO customers (customer_number, customer_name, name_ar) VALUES ($1, 'Shop', 'Shop')`, [`${P}-C1`]);
 
     await voucher(`${P}-S1`, 'SALE', 40, 'CASH');
-    await voucher(`${P}-R1`, 'RETURN', 10, 'CASH');   // an old phone's "cash refund"
-    await voucher(`${P}-R2`, 'RETURN', 5, 'CREDIT');  // how every return is stored now
+    await voucher(`${P}-R1`, 'RETURN', 10, 'CASH');   // paid back from the van
+    await voucher(`${P}-R2`, 'RETURN', 5, 'CREDIT');  // left on the customer's account
   });
 
   afterAll(async () => {
@@ -84,17 +82,20 @@ run('End of Day — returns are credit (real DB)', () => {
     await ds.destroy();
   });
 
-  it('owes every dinar of cash he took — returns are not taken off it', async () => {
+  it('takes a cash return off what he owes, and never a credit one', async () => {
     const eod = await reports.endOfDay(DAY, DAY, repId);
     const row = eod.rows.find((r) => r.repId === repId);
     expect(row).toBeDefined();
     expect(row!.cashSalesFils).toBe(40_000);
-    expect(row!.expectedCashFils).toBe(40_000);
+    expect(row!.cashRefundsFils).toBe(10_000);
+    expect(row!.expectedCashFils).toBe(30_000);
   });
 
-  it('still shows every return, whatever it was recorded as', async () => {
+  it('still shows every return, split by how the customer was paid back', async () => {
     const eod = await reports.endOfDay(DAY, DAY, repId);
     const row = eod.rows.find((r) => r.repId === repId)!;
     expect(row.cashReturnsFils).toBe(15_000);
+    expect(row.returnsCreditFils).toBe(5_000);
+    expect(eod.totals.cashRefundsFils).toBeGreaterThanOrEqual(10_000);
   });
 });

@@ -252,6 +252,7 @@ export class AuthService {
       canPrintLineDiscount: user.canPrintLineDiscount,
       // Read by the app to decide whether a sale offers فيزا at all.
       canUseCardPayment: user.canUseCardPayment,
+      canCashReturn: user.canCashReturn ?? false,
       canRequestStock: user.canRequestStock,
       // A dashboard manager/admin decides stock requests as part of running the
       // office; a "stock manager" holds only this flag. Granting it to

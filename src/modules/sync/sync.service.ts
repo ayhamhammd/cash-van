@@ -435,6 +435,7 @@ export class SyncService {
       await this.markPosted(row.id, created.voucherNumber);
       // ERP push is enqueued via the 'erp.voucher.posted' event from vouchers.create.
       await this.flagUnpermittedCard(dto, created.voucherNumber);
+      await this.flagCashReturnOverSale(dto, created.voucherNumber);
     } catch (e) {
       await this.markFailed(row, e);
     }
@@ -539,6 +540,30 @@ export class SyncService {
       this.logger.error(
         `Could not flag Visa sale ${voucherNumber}: ${(err as Error).message}`,
       );
+    }
+  }
+
+  /**
+   * A cash return made offline already paid the customer, so it posts — but if
+   * it refunded more than was left of its sale, the managers hear about it.
+   * Runs after intake, which has already decided whether it stayed cash.
+   */
+  private async flagCashReturnOverSale(dto: CreateVoucherDto, voucherNumber: string): Promise<void> {
+    if (dto.transKind !== 'RETURN' || !(dto.payments ?? []).some((p) => p.paymentType === 'CASH')) return;
+    try {
+      const over = await this.vouchers.cashReturnOverSale(dto, voucherNumber);
+      if (!over) return;
+      await this.notifications.notifyManagers({
+        kind: 'sync.cash_return_over_sale',
+        titleAr: 'إرجاع نقدي أكبر من المتبقي من الفاتورة',
+        titleEn: 'Cash return larger than what was left of the sale',
+        bodyAr: `${voucherNumber} — ${over.saleNumber} (المتبقي ${over.remaining.toFixed(3)})`,
+        bodyEn: `${voucherNumber} on ${over.saleNumber} (left ${over.remaining.toFixed(3)})`,
+        refType: 'voucher',
+        refId: voucherNumber,
+      });
+    } catch (err) {
+      this.logger.error(`Could not check cash return ${voucherNumber}: ${(err as Error).message}`);
     }
   }
 

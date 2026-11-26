@@ -18,9 +18,11 @@ export interface EodRow {
   cashSalesFils: number;
   creditSalesFils: number;
   cardSalesFils: number; // Visa — paid, but to the bank: never part of expected cash
-  cashReturnsFils: number;
+  cashReturnsFils: number; // every return in the period, cash or credit — for the day's picture
+  cashRefundsFils: number; // returns paid back in CASH from the van — taken off expected cash
+  returnsCreditFils: number; // returns left as the customer's credit — shown, never cash
   totalDiscountFils: number;
-  expectedCashFils: number; // cashSales + collectedCash — returns are the customer's credit, not cash
+  expectedCashFils: number; // cashSales + collectedCash − cashRefunds (may be negative)
   previousBalanceFils: number; // carried from prior settlements
   totalDueFils: number; // expectedCash + previousBalance
   visitCount: number; // customer visits in range
@@ -55,6 +57,7 @@ export interface SettlementRow {
   creditSalesFils: string;
   cardSalesFils: string;
   cashReturnsFils: string;
+  cashRefundsFils: string;
   totalDiscountFils: string;
   previousBalanceFils: string;
   receivedFils: string;
@@ -402,11 +405,12 @@ export class ReportsService {
           COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CASH'   AND h.trans_kind='SALE'),0)   AS cash_sales,
           COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CREDIT' AND h.trans_kind='SALE'),0)   AS credit_sales,
           COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE p.payment_type='CARD'   AND h.trans_kind='SALE'),0)   AS card_sales,
-          -- Every return, whatever it was recorded as: it is the customer's credit,
-          -- shown for the day's picture and never taken off expected cash. (Only
-          -- CASH-typed returns used to count, and be subtracted — new returns are
-          -- all CREDIT, so that column would now read zero.)
-          COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE h.trans_kind='RETURN'),0) AS cash_returns
+          -- Every return, for the day's picture; then split by how the customer
+          -- was paid back. Intake keeps a return CASH only for a salesman the
+          -- office lets refund cash (vouchers/returns/return-payment), so a CASH
+          -- return here is money that left the van. See docs/SPEC-cash-returns.md.
+          COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE h.trans_kind='RETURN'),0) AS cash_returns,
+          COALESCE(SUM(ROUND(p.amount*1000)) FILTER (WHERE h.trans_kind='RETURN' AND p.payment_type='CASH'),0) AS cash_refunds
         FROM payments p
         JOIN voucher_headers h ON h.voucher_number = p.voucher_number
         JOIN users u ON u.user_number = h.user_code
@@ -478,6 +482,7 @@ export class ReportsService {
         COALESCE(vp.credit_sales,0)::bigint       AS "creditSalesFils",
         COALESCE(vp.card_sales,0)::bigint         AS "cardSalesFils",
         COALESCE(vp.cash_returns,0)::bigint       AS "cashReturnsFils",
+        COALESCE(vp.cash_refunds,0)::bigint       AS "cashRefundsFils",
         COALESCE(disc.total_discount,0)::bigint   AS "totalDiscountFils",
         COALESCE(bal.new_balance_fils,0)::bigint  AS "previousBalanceFils",
         COALESCE(vis.visit_count,0)::int          AS "visitCount",
@@ -506,9 +511,11 @@ export class ReportsService {
     );
     return rows.map((r) => {
       const n = (k: string) => Number(r[k] ?? 0);
-      // Returns are NOT subtracted: a return is credited to the customer and hands
-      // no money back, so it takes nothing out of the rep's drawer.
-      const expectedCashFils = n('cashSalesFils') + n('collectedCashFils');
+      // A cash return paid the customer out of the van, so it comes off what the
+      // rep should hand over. A credit return hands no money back and takes
+      // nothing out of the drawer.
+      const cashRefundsFils = n('cashRefundsFils');
+      const expectedCashFils = n('cashSalesFils') + n('collectedCashFils') - cashRefundsFils;
       const previousBalanceFils = n('previousBalanceFils');
       return {
         repId: r.repId,
@@ -520,6 +527,8 @@ export class ReportsService {
         creditSalesFils: n('creditSalesFils'),
         cardSalesFils: n('cardSalesFils'),
         cashReturnsFils: n('cashReturnsFils'),
+        cashRefundsFils,
+        returnsCreditFils: n('cashReturnsFils') - cashRefundsFils,
         totalDiscountFils: n('totalDiscountFils'),
         expectedCashFils,
         previousBalanceFils,
@@ -553,6 +562,8 @@ export class ReportsService {
         creditSalesFils: sum('creditSalesFils'),
         cardSalesFils: sum('cardSalesFils'),
         cashReturnsFils: sum('cashReturnsFils'),
+        cashRefundsFils: sum('cashRefundsFils'),
+        returnsCreditFils: sum('returnsCreditFils'),
         totalDiscountFils: sum('totalDiscountFils'),
         expectedCashFils: sum('expectedCashFils'),
         previousBalanceFils: sum('previousBalanceFils'),
@@ -590,6 +601,7 @@ export class ReportsService {
         creditSalesFils: String(row.creditSalesFils),
         cardSalesFils: String(row.cardSalesFils),
         cashReturnsFils: String(row.cashReturnsFils),
+        cashRefundsFils: String(row.cashRefundsFils),
         totalDiscountFils: String(row.totalDiscountFils),
         previousBalanceFils: String(row.previousBalanceFils),
         receivedFils: String(dto.receivedFils),
@@ -659,6 +671,7 @@ export class ReportsService {
          s.credit_sales_fils     AS "creditSalesFils",
          s.card_sales_fils       AS "cardSalesFils",
          s.cash_returns_fils     AS "cashReturnsFils",
+         s.cash_refunds_fils     AS "cashRefundsFils",
          s.total_discount_fils   AS "totalDiscountFils",
          s.previous_balance_fils AS "previousBalanceFils",
          s.received_fils         AS "receivedFils",

@@ -126,6 +126,14 @@ export class User extends BaseEntity {
   @Column({ name: 'can_use_card_payment', type: 'boolean', default: false })
   canUseCardPayment!: boolean;
 
+  /**
+   * May this salesman pay a return back in CASH from the van? Off by default:
+   * a return is then customer credit only. A cash return comes off his
+   * expected cash (docs/SPEC-cash-returns.md).
+   */
+  @Column({ name: 'can_cash_return', type: 'boolean', default: false })
+  canCashReturn!: boolean;
+
   @Column({ name: 'can_create_customer_direct', type: 'boolean', default: false })
   canCreateCustomerDirect!: boolean;
 

@@ -49,6 +49,10 @@ export class SalesmanSettlement {
   @Column({ name: 'cash_returns_fils', type: 'bigint', default: 0 })
   cashReturnsFils!: string;
 
+  /** Cash paid back to customers on returns — what expected cash was reduced by. */
+  @Column({ name: 'cash_refunds_fils', type: 'bigint', default: 0 })
+  cashRefundsFils!: string;
+
   @Column({ name: 'total_discount_fils', type: 'bigint', default: 0 })
   totalDiscountFils!: string;
 
